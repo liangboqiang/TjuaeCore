@@ -638,8 +638,8 @@ mod tests {
         let result = svc.test_connection("timeout-cleanup", &transport).await;
         assert!(!result.success);
         assert!(
-            result.error.as_deref().unwrap_or_default().contains("timed out"),
-            "expected timeout result, got {result:?}"
+            result.error.as_deref().unwrap_or_default().contains("超时"),
+            "应返回超时结果，实际为 {result:?}"
         );
 
         let pid: i32 = std::fs::read_to_string(&marker_path)

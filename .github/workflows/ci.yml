@@ -65,7 +65,7 @@ jobs:
         with:
           prefix-key: v1-rust
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace
+      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate-final
 
   audit:
     name: 安全审计
