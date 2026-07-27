@@ -1,13 +1,13 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
-$configFile = if ([string]::IsNullOrWhiteSpace($env:AIONUI_CONFIG_DEV_FILE)) {
-    Join-Path $HOME ".aionui-config-dev/aionui-config.txt"
+$configFile = if ([string]::IsNullOrWhiteSpace($env:TJUAE_CONFIG_DEV_FILE)) {
+    Join-Path $HOME ".tjuaeui-config-dev/tjuaeui-config.txt"
 } else {
-    $env:AIONUI_CONFIG_DEV_FILE
+    $env:TJUAE_CONFIG_DEV_FILE
 }
 
 if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
-    Write-Error "config file not found: $configFile"
+    Write-Error "未找到配置文件：$configFile"
     exit 1
 }
 
@@ -18,7 +18,7 @@ $plain = [Uri]::UnescapeDataString($decoded)
 
 if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
     Set-Clipboard -Value $plain
-    Write-Output "Config copied to clipboard"
+    Write-Output "配置已复制到剪贴板"
 } else {
     Write-Output $plain
 }

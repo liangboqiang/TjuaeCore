@@ -1,4 +1,4 @@
-name: CI
+name: 持续集成
 
 on:
   push:
@@ -11,8 +11,15 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  identity:
+    name: 身份与去推广门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/quality/check-identity.sh
+
   migration-immutability:
-    name: Migration Immutability
+    name: 数据库迁移不可变检查
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -22,7 +29,7 @@ jobs:
       - run: bash scripts/migration/check-immutability.sh
 
   fmt:
-    name: Format
+    name: 格式检查
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -33,7 +40,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy 静态检查
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -47,7 +54,7 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
 
   test:
-    name: Test
+    name: 测试
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -60,28 +67,9 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace
 
-  changes:
-    name: Detect dependency changes
-    runs-on: ubuntu-latest
-    outputs:
-      deps: ${{ steps.filter.outputs.deps }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            deps:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'crates/*/Cargo.toml'
-
   audit:
-    name: Security Audit
+    name: 安全审计
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.deps == 'true'
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - run: cargo install cargo-audit --locked

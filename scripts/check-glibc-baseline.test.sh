@@ -7,7 +7,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 FAKE_OBJDUMP="${TMP_DIR}/objdump"
-FAKE_BINARY="${TMP_DIR}/aioncore"
+FAKE_BINARY="${TMP_DIR}/tjuaecore"
 touch "${FAKE_BINARY}"
 
 write_fake_objdump() {
@@ -27,11 +27,11 @@ PATH="${TMP_DIR}:${PATH}" "${CHECKER}" "${FAKE_BINARY}" "GLIBC_2.30"
 
 write_fake_objdump "GLIBC_2.39"
 if PATH="${TMP_DIR}:${PATH}" "${CHECKER}" "${FAKE_BINARY}" "GLIBC_2.30" >"${TMP_DIR}/fail.out" 2>&1; then
-  echo "expected GLIBC_2.39 to fail against GLIBC_2.30 ceiling" >&2
+  echo "期望 GLIBC_2.39 在 GLIBC_2.30 上限下检查失败" >&2
   exit 1
 fi
 
-grep -q "exceeds GLIBC_2.30" "${TMP_DIR}/fail.out"
+grep -q "超过了上限 GLIBC_2.30" "${TMP_DIR}/fail.out"
 
 cat > "${FAKE_OBJDUMP}" <<'EOF'
 #!/usr/bin/env bash
@@ -42,8 +42,8 @@ EOF
 chmod +x "${FAKE_OBJDUMP}"
 
 if PATH="${TMP_DIR}:${PATH}" "${CHECKER}" "${FAKE_BINARY}" "GLIBC_2.30" >"${TMP_DIR}/empty.out" 2>&1; then
-  echo "expected missing GLIBC symbols to fail" >&2
+  echo "期望缺少 GLIBC 符号时检查失败" >&2
   exit 1
 fi
 
-grep -q "No GLIBC versioned symbols found" "${TMP_DIR}/empty.out"
+grep -q "未在.*中找到带版本的 GLIBC 符号" "${TMP_DIR}/empty.out"

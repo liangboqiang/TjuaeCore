@@ -24,18 +24,18 @@ sha256_file() {
 case "$mode" in
     release)
         just _cargo build --release
-        binary="target/release/aioncore"
+        binary="target/release/tjuaecore"
         sum_file="target/.build-sum"
-        label="Build"
+        label="发布构建"
         ;;
     debug)
         just _cargo build
-        binary="target/debug/aioncore"
+        binary="target/debug/tjuaecore"
         sum_file="target/.build-debug-sum"
-        label="Debug build"
+        label="调试构建"
         ;;
     *)
-        echo "unknown build mode: $mode" >&2
+        echo "未知构建模式：$mode" >&2
         exit 1
         ;;
 esac
@@ -48,12 +48,12 @@ fi
 
 if [[ "$new_sum" == "$old_sum" ]]; then
     echo
-    echo "$label unchanged (sha256: ${new_sum:0:16})"
+    echo "$label 未变更（SHA-256：${new_sum:0:16}）"
 else
     if [[ "$mode" == "release" ]]; then
         bash scripts/just/install.sh release
     fi
     echo "$new_sum" > "$sum_file"
     echo
-    echo "$label complete (sha256: ${new_sum:0:16})"
+    echo "$label 已完成（SHA-256：${new_sum:0:16}）"
 fi

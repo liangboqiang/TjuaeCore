@@ -1,0 +1,31 @@
+[package]
+name = "tjuaeui-assistant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tjuaeui-common = { workspace = true }
+tjuaeui-api-types = { workspace = true }
+tjuaeui-db = { workspace = true }
+tjuaeui-auth = { workspace = true }
+tjuaeui-extension = { workspace = true }
+axum = { workspace = true }
+dirs = { workspace = true }
+include_dir = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tjuaeui-realtime = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }

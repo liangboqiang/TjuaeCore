@@ -4,7 +4,7 @@ set -euo pipefail
 cargo_config=()
 restore_cargo_lock=false
 cargo_lock_snapshot=""
-aionrs_root=""
+tjuae_cli_root=""
 
 restore_local_lockfile() {
     local status=$?
@@ -22,17 +22,17 @@ restore_local_lockfile() {
 }
 trap restore_local_lockfile EXIT
 
-verify_local_aionrs_patch() {
+verify_local_tjuae_cli_patch() {
     local metadata_file
     metadata_file=$(mktemp)
     cargo "${cargo_config[@]}" metadata --format-version 1 > "$metadata_file"
 
-    python3 - "$aionrs_root" "$metadata_file" "${crates[@]}" <<'PY'
+    python3 - "$tjuae_cli_root" "$metadata_file" "${crates[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-aionrs_root = Path(sys.argv[1]).resolve()
+tjuae_cli_root = Path(sys.argv[1]).resolve()
 metadata_path = Path(sys.argv[2])
 crates = sys.argv[3:]
 metadata = json.loads(metadata_path.read_text())
@@ -40,58 +40,58 @@ packages = {package["name"]: package for package in metadata["packages"]}
 
 for crate in crates:
     package = packages.get(crate)
-    expected = (aionrs_root / "crates" / crate).resolve()
+    expected = (tjuae_cli_root / "crates" / crate).resolve()
     if not package:
-        print(f"AIONRS patch was not used for {crate}.", file=sys.stderr)
-        print("  resolved: package not found", file=sys.stderr)
-        print(f"  expected: {expected}", file=sys.stderr)
+        print(f"{crate} 未使用 TJUAE_CLI 补丁。", file=sys.stderr)
+        print("  实际解析：未找到包", file=sys.stderr)
+        print(f"  期望路径：{expected}", file=sys.stderr)
         sys.exit(1)
 
     actual = Path(package["manifest_path"]).resolve().parent
     if actual != expected:
-        print(f"AIONRS patch was not used for {crate}.", file=sys.stderr)
-        print(f"  resolved: {actual}", file=sys.stderr)
-        print(f"  expected: {expected}", file=sys.stderr)
+        print(f"{crate} 未使用 TJUAE_CLI 补丁。", file=sys.stderr)
+        print(f"  实际解析：{actual}", file=sys.stderr)
+        print(f"  期望路径：{expected}", file=sys.stderr)
         sys.exit(1)
 PY
 
     rm -f "$metadata_file"
 }
 
-if [[ -n "${AIONRS:-}" ]]; then
-    if [[ ! -d "$AIONRS" ]]; then
-        echo "AIONRS does not exist or is not a directory: $AIONRS" >&2
+if [[ -n "${TJUAE_CLI:-}" ]]; then
+    if [[ ! -d "$TJUAE_CLI" ]]; then
+        echo "TJUAE_CLI 不存在或不是目录：$TJUAE_CLI" >&2
         exit 1
     fi
 
-    aionrs_root=$(cd "$AIONRS" && pwd -P)
+    tjuae_cli_root=$(cd "$TJUAE_CLI" && pwd -P)
     crates=(
-        aion-agent
-        aion-compact
-        aion-config
-        aion-mcp
-        aion-memory
-        aion-process
-        aion-protocol
-        aion-providers
-        aion-skills
-        aion-tools
-        aion-types
+        tjuae-agent
+        tjuae-compact
+        tjuae-config
+        tjuae-mcp
+        tjuae-memory
+        tjuae-process
+        tjuae-protocol
+        tjuae-providers
+        tjuae-skills
+        tjuae-tools
+        tjuae-types
     )
 
     for crate in "${crates[@]}"; do
-        crate_dir="$aionrs_root/crates/$crate"
+        crate_dir="$tjuae_cli_root/crates/$crate"
         if [[ ! -f "$crate_dir/Cargo.toml" ]]; then
-            echo "AIONRS is missing $crate: $crate_dir/Cargo.toml" >&2
+            echo "TJUAE_CLI 缺少 $crate：$crate_dir/Cargo.toml" >&2
             exit 1
         fi
 
         toml_path=${crate_dir//\\/\\\\}
         toml_path=${toml_path//\"/\\\"}
-        cargo_config+=(--config "patch.'https://github.com/iOfficeAI/aionrs.git'.$crate.path = \"$toml_path\"")
+        cargo_config+=(--config "patch.'https://github.com/liangboqiang/TjuaeCLI.git'.$crate.path = \"$toml_path\"")
     done
 
-    echo "Using local aionrs SDK: $aionrs_root" >&2
+    echo "正在使用本地 TjuaeCLI SDK：$tjuae_cli_root" >&2
 
     if [[ -f Cargo.lock ]]; then
         cargo_lock_snapshot=$(mktemp)
@@ -100,24 +100,24 @@ if [[ -n "${AIONRS:-}" ]]; then
         if git diff --quiet -- Cargo.lock && git diff --cached --quiet -- Cargo.lock; then
             restore_cargo_lock=true
         else
-            echo "Cargo.lock already has changes; leaving successful AIONRS lockfile updates in place." >&2
+            echo "Cargo.lock 已有变更；将保留成功解析 TJUAE_CLI 后的锁文件更新。" >&2
         fi
     fi
 
-    echo "Resolving Cargo.lock against local aionrs SDK" >&2
+    echo "正在针对本地 TjuaeCLI SDK 解析 Cargo.lock" >&2
     cargo "${cargo_config[@]}" update \
-        -p aion-agent \
-        -p aion-compact \
-        -p aion-config \
-        -p aion-mcp \
-        -p aion-memory \
-        -p aion-process \
-        -p aion-protocol \
-        -p aion-providers \
-        -p aion-skills \
-        -p aion-tools \
-        -p aion-types
-    verify_local_aionrs_patch
+        -p tjuae-agent \
+        -p tjuae-compact \
+        -p tjuae-config \
+        -p tjuae-mcp \
+        -p tjuae-memory \
+        -p tjuae-process \
+        -p tjuae-protocol \
+        -p tjuae-providers \
+        -p tjuae-skills \
+        -p tjuae-tools \
+        -p tjuae-types
+    verify_local_tjuae_cli_patch
 fi
 
 if ((${#cargo_config[@]})); then

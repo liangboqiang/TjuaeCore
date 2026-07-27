@@ -11,64 +11,64 @@ arm64_cross_image="ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:99e041b94e7
 
 grep -Fq "${arm64_cross_image}" Cross.toml \
   || {
-    echo "Cross.toml must pin Linux ARM64 to the v0.1.39/v0.1.40 cross image digest" >&2
+    echo "Cross.toml 必须将 Linux ARM64 固定到 v0.1.39/v0.1.40 cross 镜像摘要" >&2
     exit 1
   }
 
 grep -Fq 'target: x86_64-unknown-linux-gnu' ".github/workflows/release.yml" \
   && grep -Fq 'os: ubuntu-22.04' ".github/workflows/release.yml" \
   || {
-    echo ".github/workflows/release.yml must keep Linux x64 on ubuntu-22.04" >&2
+    echo ".github/workflows/release.yml 必须使 Linux x64 继续使用 ubuntu-22.04" >&2
     exit 1
   }
 
 grep -Fq '"platform":"linux-x64","os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"' ".github/workflows/build-manual.yml" \
   || {
-    echo ".github/workflows/build-manual.yml must keep Linux x64 on ubuntu-22.04" >&2
+    echo ".github/workflows/build-manual.yml 必须使 Linux x64 继续使用 ubuntu-22.04" >&2
     exit 1
   }
 
 for workflow in "${workflows[@]}"; do
   if [[ ! -f "${workflow}" ]]; then
-    echo "Workflow not found: ${workflow}" >&2
+    echo "未找到工作流：${workflow}" >&2
     exit 1
   fi
 
   grep -Fq 'LINUX_X64_GLIBC_MAX: "GLIBC_2.34"' "${workflow}" \
     || {
-      echo "${workflow} must pin the Linux x64 GLIBC ceiling to GLIBC_2.34" >&2
+      echo "${workflow} 必须将 Linux x64 GLIBC 上限固定为 GLIBC_2.34" >&2
       exit 1
     }
 
   grep -Fq "CROSS_GIT_REV: \"${arm64_cross_rev}\"" "${workflow}" \
     || {
-      echo "${workflow} must pin cross to the v0.1.39/v0.1.40 git revision" >&2
+      echo "${workflow} 必须将 cross 固定到 v0.1.39/v0.1.40 Git 修订版" >&2
       exit 1
     }
 
   grep -Fq 'cargo install cross --git https://github.com/cross-rs/cross --rev "${CROSS_GIT_REV}" --locked' "${workflow}" \
     || {
-      echo "${workflow} must install cross from the pinned git revision" >&2
+      echo "${workflow} 必须从固定的 Git 修订版安装 cross" >&2
       exit 1
     }
 
   grep -Fq "docker pull ${arm64_cross_image}" "${workflow}" \
     || {
-      echo "${workflow} must pre-pull the pinned Linux ARM64 cross image" >&2
+      echo "${workflow} 必须预先拉取固定的 Linux ARM64 cross 镜像" >&2
       exit 1
     }
 
   grep -Fq "matrix.target == 'x86_64-unknown-linux-gnu'" "${workflow}" \
     || {
-      echo "${workflow} must verify the Linux x64 GLIBC baseline" >&2
+      echo "${workflow} 必须验证 Linux x64 GLIBC 基线" >&2
       exit 1
     }
 
   grep -Fq '${LINUX_X64_GLIBC_MAX}' "${workflow}" \
     || {
-      echo "${workflow} must pass LINUX_X64_GLIBC_MAX to the GLIBC checker" >&2
+      echo "${workflow} 必须将 LINUX_X64_GLIBC_MAX 传给 GLIBC 检查器" >&2
       exit 1
     }
 done
 
-echo "Linux GLIBC workflow config is pinned for x64 and arm64"
+echo "Linux GLIBC 工作流配置已针对 x64 和 arm64 固定"

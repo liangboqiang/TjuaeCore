@@ -1,10 +1,10 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $CargoArgs = @($args)
 $cargoConfig = @()
 $restoreCargoLock = $false
 $cargoLockSnapshot = $null
-$aionrsRoot = $null
+$tjuae_cliRoot = $null
 $crates = @()
 
 function Invoke-Native {
@@ -34,7 +34,7 @@ function Resolve-LocalPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 }
 
-function Test-AionrsPatch {
+function Test-TjuaeCliPatch {
     $metadataJson = & cargo @cargoConfig metadata --format-version 1
     if ($LASTEXITCODE -ne 0) {
         $script:status = $LASTEXITCODE
@@ -43,16 +43,16 @@ function Test-AionrsPatch {
     $metadata = $metadataJson | ConvertFrom-Json
 
     foreach ($crate in $crates) {
-        $expectedPath = Resolve-LocalPath (Join-Path $aionrsRoot "crates/$crate")
+        $expectedPath = Resolve-LocalPath (Join-Path $tjuae_cliRoot "crates/$crate")
         $package = $metadata.packages | Where-Object { $_.name -eq $crate } | Select-Object -First 1
         $actualPath = if ($null -eq $package) {
-            "package not found"
+            "未找到包"
         } else {
             Resolve-LocalPath (Split-Path -Parent $package.manifest_path)
         }
 
         if ($actualPath -ne $expectedPath) {
-            Write-Error "AIONRS patch was not used for $crate.`n  resolved: $actualPath`n  expected: $expectedPath"
+            Write-Error "$crate 未使用 TJUAE_CLI 补丁。`n  实际解析：$actualPath`n  期望路径：$expectedPath"
             $script:status = 1
             exit 1
         }
@@ -61,40 +61,40 @@ function Test-AionrsPatch {
 
 $status = 0
 try {
-    if (-not [string]::IsNullOrWhiteSpace($env:AIONRS)) {
-        if (-not (Test-Path -LiteralPath $env:AIONRS -PathType Container)) {
-            Write-Error "AIONRS does not exist or is not a directory: $env:AIONRS"
+    if (-not [string]::IsNullOrWhiteSpace($env:TJUAE_CLI)) {
+        if (-not (Test-Path -LiteralPath $env:TJUAE_CLI -PathType Container)) {
+            Write-Error "TJUAE_CLI 不存在或不是目录：$env:TJUAE_CLI"
             exit 1
         }
 
-        $aionrsRoot = (Resolve-Path -LiteralPath $env:AIONRS).ProviderPath
+        $tjuae_cliRoot = (Resolve-Path -LiteralPath $env:TJUAE_CLI).ProviderPath
         $crates = @(
-            "aion-agent",
-            "aion-compact",
-            "aion-config",
-            "aion-mcp",
-            "aion-memory",
-            "aion-process",
-            "aion-protocol",
-            "aion-providers",
-            "aion-skills",
-            "aion-tools",
-            "aion-types"
+            "tjuae-agent",
+            "tjuae-compact",
+            "tjuae-config",
+            "tjuae-mcp",
+            "tjuae-memory",
+            "tjuae-process",
+            "tjuae-protocol",
+            "tjuae-providers",
+            "tjuae-skills",
+            "tjuae-tools",
+            "tjuae-types"
         )
 
         foreach ($crate in $crates) {
-            $crateDir = Join-Path $aionrsRoot "crates/$crate"
+            $crateDir = Join-Path $tjuae_cliRoot "crates/$crate"
             $manifest = Join-Path $crateDir "Cargo.toml"
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-                Write-Error "AIONRS is missing ${crate}: $manifest"
+                Write-Error "TJUAE_CLI 缺少 ${crate}：$manifest"
                 exit 1
             }
 
             $tomlPath = $crateDir.Replace("\", "/").Replace('"', '\"')
-            $cargoConfig += @("--config", "patch.'https://github.com/iOfficeAI/aionrs.git'.$crate.path = `"`"$tomlPath`"`"")
+            $cargoConfig += @("--config", "patch.'https://github.com/liangboqiang/TjuaeCLI.git'.$crate.path = `"`"$tomlPath`"`"")
         }
 
-        [Console]::Error.WriteLine("Using local aionrs SDK: $aionrsRoot")
+        [Console]::Error.WriteLine("正在使用本地 TjuaeCLI SDK：$tjuae_cliRoot")
 
         if (Test-Path -LiteralPath "Cargo.lock" -PathType Leaf) {
             $cargoLockSnapshot = [System.IO.Path]::GetTempFileName()
@@ -105,27 +105,27 @@ try {
             if ($worktreeClean -and $indexClean) {
                 $restoreCargoLock = $true
             } else {
-                [Console]::Error.WriteLine("Cargo.lock already has changes; leaving successful AIONRS lockfile updates in place.")
+                [Console]::Error.WriteLine("Cargo.lock 已有变更；将保留成功解析 TJUAE_CLI 后的锁文件更新。")
             }
         }
 
-        [Console]::Error.WriteLine("Resolving Cargo.lock against local aionrs SDK")
+        [Console]::Error.WriteLine("正在针对本地 TjuaeCLI SDK 解析 Cargo.lock")
         $updateArgs = @($cargoConfig) + @(
             "update",
-            "-p", "aion-agent",
-            "-p", "aion-compact",
-            "-p", "aion-config",
-            "-p", "aion-mcp",
-            "-p", "aion-memory",
-            "-p", "aion-process",
-            "-p", "aion-protocol",
-            "-p", "aion-providers",
-            "-p", "aion-skills",
-            "-p", "aion-tools",
-            "-p", "aion-types"
+            "-p", "tjuae-agent",
+            "-p", "tjuae-compact",
+            "-p", "tjuae-config",
+            "-p", "tjuae-mcp",
+            "-p", "tjuae-memory",
+            "-p", "tjuae-process",
+            "-p", "tjuae-protocol",
+            "-p", "tjuae-providers",
+            "-p", "tjuae-skills",
+            "-p", "tjuae-tools",
+            "-p", "tjuae-types"
         )
         Invoke-Native "cargo" $updateArgs
-        Test-AionrsPatch
+        Test-TjuaeCliPatch
     }
 
     & cargo @cargoConfig @CargoArgs

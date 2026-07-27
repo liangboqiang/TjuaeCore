@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("release", "debug")]
     [string] $Mode = "release"
 )
@@ -6,13 +6,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 $binary = if ($Mode -eq "release") {
-    "target/release/aioncore.exe"
+    "target/release/tjuaecore.exe"
 } else {
-    "target/debug/aioncore.exe"
+    "target/debug/tjuaecore.exe"
 }
 
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
-    Write-Error "binary not found: $binary"
+    Write-Error "未找到二进制文件：$binary"
     exit 1
 }
 
@@ -25,4 +25,4 @@ $installDir = Join-Path $cargoHome "bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 Copy-Item -LiteralPath $binary -Destination $installDir -Force
-Write-Output "Installed aioncore.exe to $installDir"
+Write-Output "已将 tjuaecore.exe 安装到 $installDir"

@@ -1,0 +1,88 @@
+[package]
+name = "tjuaeui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+exclude = ["data/**"]
+
+[[bin]]
+name = "tjuaecore"
+path = "src/main.rs"
+
+[features]
+default = ["telegram", "lark", "dingtalk", "weixin"]
+telegram = ["tjuaeui-channel/telegram"]
+lark = ["tjuaeui-channel/lark"]
+dingtalk = ["tjuaeui-channel/dingtalk"]
+weixin = ["tjuaeui-channel/weixin"]
+
+[dependencies]
+tjuaeui-common.workspace = true
+tjuaeui-assets.workspace = true
+tjuaeui-db.workspace = true
+tjuaeui-api-types.workspace = true
+tjuaeui-realtime.workspace = true
+tjuaeui-auth.workspace = true
+tjuaeui-system.workspace = true
+tjuaeui-file.workspace = true
+tjuaeui-office.workspace = true
+tjuaeui-shell.workspace = true
+tjuaeui-ai-agent.workspace = true
+tjuaeui-mcp.workspace = true
+tjuaeui-conversation.workspace = true
+tjuaeui-extension.workspace = true
+tjuaeui-channel.workspace = true
+tjuaeui-team.workspace = true
+tjuaeui-team-prompts.workspace = true
+tjuaeui-cron.workspace = true
+tjuaeui-project.workspace = true
+tjuaeui-assistant.workspace = true
+tjuaeui-runtime.workspace = true
+tjuaeui-process.workspace = true
+tjuae-config.workspace = true
+axum.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
+anyhow.workspace = true
+async-trait.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tjuaeui-api-types.workspace = true
+tjuaeui-realtime.workspace = true
+# Enable the `AgentInstance::Mock` variant so tests can build fake agents
+# through the trait-object escape hatch without spawning real CLI processes.
+tjuaeui-ai-agent = { workspace = true, features = ["test-support"] }
+base64.workspace = true
+git2.workspace = true
+http-body-util.workspace = true
+rust_xlsxwriter.workspace = true
+sqlx = { workspace = true, features = ["migrate"] }
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+wiremock = "0.6"

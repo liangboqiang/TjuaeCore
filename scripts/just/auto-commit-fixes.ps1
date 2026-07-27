@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $changed = git diff --name-only
 if ($LASTEXITCODE -ne 0) {

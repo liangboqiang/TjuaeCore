@@ -1,266 +1,209 @@
-# AGENTS.md
+# TjuaeCore 智能体协作规范
 
-<!-- Maintenance rule: Only add content that tells AI assistants WHAT TO DO or WHAT NOT TO DO.
-     Implementation details, design rationale, and "how the system works" belong in ARCHITECTURE.md.
-     If a section doesn't contain an actionable rule or constraint, it doesn't belong here.
-     Rules must reference stable concepts (layers, contracts, conventions) — never anchor them to
-     specific field, type, or method names or file paths. Those drift and go stale fast; symbol-level
-     detail belongs in code comments or ARCHITECTURE.md, not here. -->
+本文件只记录 AI 智能体和贡献者必须执行的规则。实现原理与设计背景请查阅
+[ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-Project-specific rules and conventions for AI assistants and contributors.
+## 最高优先级规则
 
-## High-Priority Rules
+### 不得猜测 Agent CLI 行为
 
-### NEVER guess an agent CLI's behavior — only assert what an approved source proves
+不得根据 CLI 名称、经验或“看起来应该如此”来推断 `claude`、`codex`、
+`gemini`、`opencode`、`hermes`、`tjuae-cli` 等程序的协议、字段语义、时序、
+默认值或能力。相关结论必须明确引用以下至少一种一手证据：
 
-Absolutely forbidden: inferring, guessing, or "reasoning about likely behavior" of any agent CLI
-(claude, codex, gemini, opencode, hermes, aionrs, …) — its wire protocol, message shapes, field
-semantics, timing, defaults, or capabilities — from a CLI's name, a plausible mental model, prior
-training knowledge, or how you *think* it probably works. Every claim about an agent CLI's behavior
-MUST be backed by one of these approved sources, cited explicitly by path:
+1. `~/tjuae/protocols/samples/` 中真实采集的协议流量。
+2. 本机 Cargo registry 中 `agent-client-protocol` 与
+   `agent-client-protocol-schema` 的源码。
+3. 官方适配器或 CLI 自身生成的 Schema，例如
+   `samples/codex-cli/<ver>/schema-full/`。
+4. CLI 自身的 `--help`、自描述 Schema，或从真实 CLI 录制并通过的集成夹具。
 
-1. **Captured real data** — actual sampled wire traffic under
-   `~/aion/protocols/samples/` (e.g. `codex-cli/<ver>/`, `claude-cli/<ver>/`, `codex-acp/`,
-   `opencode/`, `capture/`). This is ground truth for what the CLI actually emitted.
-2. **The ACP library source** — `agent-client-protocol` (main crate + `agent-client-protocol-schema`),
-   vendored at `~/.cargo/registry/src/*/agent-client-protocol-*` — for the canonical ACP wire types
-   and semantics we translate to.
-3. **An official adapter's code** — the codex `app-server` machine-generated JSON schema under
-   `~/aion/protocols/samples/codex-cli/<ver>/schema-full/` (ground truth from the codex binary
-   itself), the official claude-code / claude-code-acp adapter source, or an equivalent
-   first-party adapter — for inferring a CLI's contract from the reference implementation.
+若证据不足，必须写明“尚未验证，需要抓包或读取 Schema”，不得把推测写成
+事实。说明 CLI 行为时，应在同一段中标出证据路径。
 
-Additional reliable sources, when a claim can be grounded in them: **the CLI binary's own
-`--help` / self-describing schema output** (run it and read it), and **our own passing
-integration/live-e2e fixtures** that were recorded against the real CLI (not hand-authored
-mocks). If none of these can substantiate a claim, the honest answer is "not yet verified —
-need a capture/schema", and the next step is to capture or read a source — NOT to guess.
+### 未亲自核验，不得断言
 
-When you state any agent-CLI behavior, cite the source inline: `verified: samples/codex-cli/0.137.0/schema-full/ClientRequest.json`
-or `verified: agent-client-protocol-schema-0.12.0/src/session.rs`. A claim with no such citation
-is a guess and violates this rule. This is a non-negotiable, standing constraint — it outranks
-convenience and applies to every statement, plan, commit message, and design doc.
+- 子智能体报告只能作为线索；转述关键结论前必须打开其引用的文件和行号核验。
+- 声称某项能力“不存在”前，必须先搜索相关符号，再阅读实际入口和处理器。
+- 测试输入必须真正覆盖所声称验证的事件和路径。只覆盖
+  `start/text/finish` 的简单用例不能证明工具调用、权限、子智能体或模式切换。
+- 跨层问题必须沿后端、协议、前端逐层追踪，定位真实分歧点。
+- 结论应使用“已验证：<文件:行号>”“尚未检查”或“子智能体报告，未核验”等
+  与证据强度一致的表达。
 
-### Do NOT state a claim as fact until you have verified it in the code yourself
+## 日志
 
-This rule exists because of a repeated, costly failure mode: forming a confident conclusion from a *proxy* for the truth instead of the truth itself, then reporting it to the user as fact. Concrete instances that must never recur:
+修改关键路径或难以观察的流程时，应明确评估是否需要补充日志。简单重构、
+纯测试修改和文案修改通常无需新增日志。
 
-- **Trusting a sub-agent's conclusion without checking its evidence.** A spawned agent reported "the frontend has NO question renderer; the break is in the frontend." That was false — the frontend renders whatever `options[]` the backend sends; the real bug was the backend hard-coding `[Allow, Reject]` options for an AskUserQuestion. The conclusion was relayed to the user verbatim. **A sub-agent's report is a lead, not a fact. Before you repeat any load-bearing claim from an agent, open the cited file:line and confirm it says what the agent said.**
-- **Declaring equivalence/correctness from a thin test.** A frame-by-frame A/B was run with one trivial prompt ("Reply PONG") that only exercised `start/text/finish`, then "core turn flow is equivalent" was declared. The prompt never triggered tool-output streaming, subagents, plans, permissions, AskUserQuestion, or mode-switch — where all the real divergences were. **A green result on inputs that don't exercise the behavior is not evidence about that behavior. Before claiming a class of behavior works, confirm your test actually produces that class of event.**
+- `debug`：高频、开发期细节和状态转移。
+- `info`：低频生命周期边界、重要状态变化和非敏感关联信息。
+- `warn`：已被安全处理的异常或格式错误数据。
+- `error`：契约破坏或操作失败。
 
-Enforced behaviors:
-1. **Cite from primary source.** Any claim about what code does must be backed by a file you (this agent) have read this session — not a sub-agent's summary, not memory, not inference from names. Sub-agent findings must be spot-checked against the code before being surfaced.
-2. **Verify the negative before asserting absence.** Never say "X has no Y / feature Z doesn't exist / the frontend can't do this" until you have grepped for it AND read the relevant handler. Absence is a strong claim; a single missed file falsifies it (e.g. `sideQuestion.ts`, `MessageAcpPermission` rendering dynamic `options[]`).
-3. **Match the test to the claim.** When verifying behavior, the test input must exercise the exact events/paths the claim covers. Trivial/happy-path inputs prove only the trivial path. When you cannot exercise a path, say so explicitly rather than implying it passed.
-4. **Trace to the break, don't guess the layer.** For a cross-layer bug (backend→wire→frontend), follow the actual data through every link and locate where it diverges from expected. Do not attribute the break to a layer by plausibility.
-5. **Calibrate language to evidence.** Say "verified: <file:line>", "not yet checked", or "a sub-agent claims X (unverified)". Never launder an unverified lead into a flat assertion.
+生产日志不得包含提示词、工具输入输出、文件内容、命令正文、令牌、密钥或原始
+供应商请求/响应。确需本地调试时，必须置于显式开发开关之后且默认关闭。
 
-See also the standing discipline in the root `AGENTS.md` / memory `aioncore-verification-blindspot-g6`: self-consistent-all-green ≠ correct — verify outward (against a real agent) AND against the old/reference implementation, not just against your own happy path.
+## 架构
 
-## Logging
+Cargo workspace 分为 Foundation → Capability → Domain → Composition 四层，
+依赖只能向下流动。
 
-When planning or changing a critical path or hard-to-observe flow, evaluate whether logging needs to change. In implementation plans for such changes, briefly state whether logs will be added, existing observability is sufficient, or logs are intentionally unnecessary. Do not add logs for simple refactors, test-only changes, UI copy/style changes, or when existing tests, errors, metrics, or logs already provide enough observability.
+- 上层可依赖下层。
+- 同层模块只能通过 trait 抽象协作。
+- 下层不得依赖上层。
+- 禁止循环依赖。
+- 修改基础层 crate 前必须评估影响范围。
 
-Add structured logs only when they help make production behavior diagnosable or provide extra development detail. Production normally runs at `info`, while development runs at `debug`; therefore, information needed to troubleshoot production issues must be available at `info`, `warn`, or `error`, not only `debug`.
+### 领域 crate 结构
 
-Use log levels as follows:
-- `debug` for high-frequency or detailed development-only flow details and state transitions
-- `info` for low-volume production-diagnostic lifecycle boundaries, important state changes, and non-sensitive correlation context
-- `warn` for malformed or unexpected data that is safely handled
-- `error` for contract violations or failed operations
+- `lib.rs`：只导出模块，不放业务逻辑。
+- `routes.rs`：导出 `domain_routes(state) -> Router`，Handler 只做请求与响应转换。
+- `service.rs`：业务逻辑唯一归属，不得导入 `axum`。
+- `state.rs`：定义 `#[derive(Clone)]` 的 RouterState，并用 `Arc` 持有依赖。
 
-Production-visible logs must not include sensitive payloads such as prompts, tool input/output, file contents, command bodies, tokens, secrets, or raw provider requests/responses. If such payloads are needed for local debugging, they must be behind explicit development-only guards and never enabled by default.
+### API 约定
 
-## Architecture
+- 路由前缀使用 `/api/`，资源名使用 kebab-case。
+- 成功响应使用 `ApiResponse<T>`，失败响应使用 `ErrorResponse`。
+- 请求和响应类型统一定义在 `tjuaeui-api-types`。
+- `tjuaeui-api-types` 不得依赖 `axum`、`tower` 等 HTTP 框架。
+- `tjuaeui_common::ApiError` 只用于路由和中间件等 HTTP 边界；领域服务使用本
+  crate 错误，并在路由层映射。
 
-> For detailed background and design decisions, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+### WebSocket 事件
 
-Cargo workspace organized in four layers: Foundation → Capability → Domain → Composition. Dependencies flow strictly downward.
+- 名称格式为 `domain.camelCaseAction`。
+- 消息类型使用 `WebSocketMessage<T>`。
+- 新事件不得沿用旧的 kebab-case 或三级名称。
 
-### Crate Hierarchy & Dependencies
+### 数据层
 
-- ✅ Upper layers may depend on lower layers (including cross-layer)
-- ✅ Same-layer interaction through trait abstractions only
-- ❌ No lower-layer depending on upper-layer
-- ❌ No circular dependencies
-- Changes to foundation crates require impact assessment
+- Repository trait 位于 `tjuaeui-db`，以 `I` 开头。
+- SQLite 实现以 `Sqlite` 开头。
+- Row model 放在 `tjuaeui-db/src/models/`。
+- 参数对象与对应 repository 同文件。
+- Migration 命名为 `NNN_descriptive_name.sql`，不得手工修改数据库。
+- Service 依赖 trait，不直接依赖具体实现。
 
-### Domain Crate Structure
+### 依赖注入
 
-Every domain crate must follow:
-- `lib.rs` — module exports only, no business logic
-- `routes.rs` — export `domain_routes(state) -> Router`, handlers do request/response transformation only
-- `service.rs` — sole location for business logic, must not import axum
-- `state.rs` — `#[derive(Clone)]` RouterState holding Arc-wrapped dependencies
+- `AppServices` 是唯一的服务构造中心。
+- 领域 crate 只定义 RouterState，不在内部构造依赖。
+- 组装统一在 `tjuaeui-app` 的 `build_*_state()` 中完成。
 
-### API Conventions
+### 安全
 
-- Route prefix: `/api/`
-- Resource names: kebab-case
-- Response format: `ApiResponse<T>` (success) / `ErrorResponse` (failure)
-- All request/response types defined in `aionui-api-types`
-- `aionui-api-types` must NOT depend on axum/tower or any HTTP framework
-- Use `aionui_common::ApiError` only at API/HTTP boundaries such as routes and middleware. Service/domain code must prefer crate-owned errors (`ConversationError`, `TeamError`, etc.) and map them to `ApiError` in route modules.
+- 新接口必须评估是否需要认证中间件。
+- 状态修改操作必须受 CSRF 保护。
+- 敏感操作应评估限流。
+- 错误响应不得泄漏内部细节。
+- 禁止硬编码密钥和令牌。
 
-### WebSocket Events
+## 代码风格
 
-- Format: `domain.camelCaseAction` (two-level structure)
-- Message type: `WebSocketMessage<T>` (name + data)
-- Existing kebab-case or three-level names are legacy — new events must follow the convention
+- 使用 Rust 2024 edition 和 `rust-toolchain.toml` 固定的稳定工具链。
+- 代码注释、提交说明和面向维护者的文档使用中文；协议字段、类型名和命令保持原样。
+- 每个 `.rs` 文件遵守单一职责。
+- 单个 `.rs` 文件建议少于 1000 行；超出时优先拆分模块，测试文件除外。
 
-### Data Layer
+## 开发流程
 
-- Repository traits in `aionui-db`, prefixed with `I`
-- Concrete implementations prefixed with `Sqlite`
-- Row models in `aionui-db/src/models/`
-- Params objects co-located in repository files
-- Migrations: `NNN_descriptive_name.sql`, no manual DB modifications
-- Services depend on traits, never on concrete implementations
+### 子进程
 
-### Dependency Injection
+新增子进程必须通过 `tjuaeui_runtime::Builder` 启动，禁止直接使用
+`tokio::process::Command`。详见
+[运行时基础设施](./ARCHITECTURE.md#运行时基础设施)。
 
-- `AppServices` is the sole service construction center
-- Domain crates only define RouterState, never construct their own dependencies
-- All assembly happens in `aionui-app`'s `build_*_state()` functions
+### 推送
 
-### Security
+必须使用 `just push`，不得直接执行 `git push`。该命令会先执行 Migration、
+Lint、格式和测试门禁，并透传普通 push 参数。
 
-- New endpoints must be evaluated for auth middleware requirement
-- State-changing operations must be CSRF-protected
-- Sensitive operations should have rate limiting
-- Error responses must not leak internal details
-- Secrets must never be hardcoded
+### 在现有领域新增接口
 
-## Code Style
+1. 在 `tjuaeui-api-types/src/{domain}.rs` 定义请求和响应。
+2. 在 `crates/tjuaeui-{domain}/src/routes.rs` 添加 Handler。
+3. 在 `crates/tjuaeui-{domain}/src/service.rs` 实现业务逻辑。
+4. 在 `domain_routes()` 注册路由。
+5. 在领域 crate 或 `tjuaeui-app/tests/` 添加测试。
 
-- Rust 2024 edition, stable toolchain (pinned in `rust-toolchain.toml`)
-- Comments in English, commit messages in English
-- Each `.rs` file follows single responsibility — one module, one concern
-- Target under 1000 lines per `.rs` file; exceeding it is a signal to split into submodules, not a hard limit (test files exempt)
+### 新增 Migration
 
-## Development Workflow
+1. 查看 `crates/tjuaeui-db/migrations/` 的最大编号。
+2. 创建 `NNN_descriptive_name.sql`。
+3. 可重复创建的对象应使用 `IF NOT EXISTS`。
 
-### Subprocess Spawning
+### 新增 WebSocket 事件
 
-New subprocess spawn sites must go through `aionui_runtime`'s spawn Builder — never raw `tokio::process::Command`. See [ARCHITECTURE.md § Runtime Infrastructure](./ARCHITECTURE.md#runtime-infrastructure) for the correct constructor and details.
+1. 在 `tjuaeui-api-types` 定义事件类型。
+2. 在 Service 中通过 `event_bus.broadcast()` 发送。
+3. 名称遵守 `domain.camelCaseAction`。
 
-### Pushing Code
+## 测试
 
-Always use `just push` instead of `git push`.
-It runs the full pre-push gate (migration check, lint, format, tests) before pushing, preventing CI failures.
-Supports the same arguments as `git push` (e.g. `just push -u origin feat/branch`).
+| 位置 | 用途 |
+| --- | --- |
+| 源文件内的 `#[cfg(test)]` | 模块内部单元测试 |
+| `crates/<crate>/tests/` | 该 crate 的集成或端到端测试 |
 
-### Add Endpoint to Existing Crate
+- 数据库测试使用 `init_database_memory()`。
+- 优先使用真实内存数据库；只有隔离无关依赖时才使用 Mock。
+- 新功能必须包含测试。
 
-1. Request/response types → `aionui-api-types/src/{domain}.rs`
-2. Handler function → `crates/aionui-{domain}/src/routes.rs`
-3. Business logic → `crates/aionui-{domain}/src/service.rs`
-4. Register route in `domain_routes()` function
-5. Add test → `crates/aionui-{domain}/tests/` or `crates/aionui-app/tests/`
+### 覆盖要求
 
-### Add Migration
+正常路径必须覆盖被修改功能的完整流程。认证、消息收发、Agent 会话、文件上传
+下载和 WebSocket 事件属于必须覆盖的关键路径。
 
-1. Next number → `ls crates/aionui-db/migrations/`
-2. Create `NNN_descriptive_name.sql` with `IF NOT EXISTS`
+错误路径至少包括：
 
-### Add WebSocket Event
+- 缺失字段、错误类型或超限内容；
+- 资源不存在；
+- 未认证、越权或跨用户访问；
+- 重复创建、状态不允许等业务规则冲突。
 
-1. Event type → `aionui-api-types`
-2. Emit via `event_bus.broadcast()` in service
-3. Naming: `domain.camelCaseAction`
+错误测试必须断言明确状态码、错误码或消息，不得只断言“失败”。
 
-## Test Organization
+涉及认证、授权或数据隔离的接口还必须验证：
 
-| Location                                 | What goes there                        |
-| ---------------------------------------- | -------------------------------------- |
-| Inline `#[cfg(test)]` in each `.rs` file | Unit tests for that module's internals |
-| `crates/<crate>/tests/`                  | Integration / E2E tests for that crate |
+- 未认证请求被拒绝；
+- 用户数据相互隔离；
+- 缺失或错误 CSRF 令牌的写操作被拒绝；
+- 响应不包含密码、令牌等敏感字段。
 
-### Testing Rules
+新增 WebSocket 事件必须验证触发时机、`WebSocketMessage<T>` 结构和订阅者隔离。
 
-- Database tests use `init_database_memory()`
-- Prefer real in-memory DB over mocks; mock only to isolate unneeded dependencies
-- New features must include tests
+### 测试失败处理
 
-### Test Scope Requirements
+测试失败时先判断断言是否仍代表正确需求：
 
-**Happy Path (Critical Paths)**
+1. 断言仍正确：修实现，不改测试。
+2. 接口确实有意变化：确认变更意图后更新测试，并保留有意义的断言。
+3. 无法确认：停止修改，追踪需求和调用链。
 
-Every new or modified feature must have integration tests covering its normal flow. Critical paths that always require test coverage:
-- Authentication flow (login, token refresh, permission checks)
-- Message sending and retrieval
-- Agent session creation and interaction
-- File upload/download
-- WebSocket connection and event delivery
+禁止删除失败测试来“修复”问题，也禁止把精确断言弱化为模糊的成功判断。
 
-**Bad Path (Error Paths)**
+## 验证策略
 
-New endpoints or business logic must include tests for these scenarios:
-- Invalid input (missing fields, wrong types, oversized content)
-- Resource not found (404)
-- Insufficient permissions (unauthenticated, accessing another user's resources)
-- Business rule violations (duplicate creation, operations not allowed in current state)
-
-Bad path tests must assert specific error codes or error messages — asserting merely "not success" is not acceptable.
-
-**Security Tests**
-
-Endpoints involving authentication, authorization, or data isolation must include security tests:
-- Unauthenticated requests are rejected (401)
-- Cross-user data isolation (user A cannot access user B's resources)
-- State-changing requests are rejected when CSRF token is missing or invalid
-- Sensitive fields (passwords, tokens) never appear in responses
-
-**WebSocket Event Tests**
-
-New WebSocket events must verify:
-- The event is emitted after the correct business operation
-- Event payload conforms to `WebSocketMessage<T>` structure
-- Events are only delivered to authorized subscribers (no leakage to unrelated users)
-
-### Test Failure Handling
-
-When a test fails, do NOT modify the test to make it pass. First determine:
-
-1. **Test assertion still represents correct behavior** → fix implementation, not the test
-2. **Requirements/interface intentionally changed** → may update test, but must confirm:
-   - The change is intentional (not an unintended side effect)
-   - New assertions still validate meaningful behavior
-3. **Uncertain** → stop, trace back the change, clarify before proceeding
-
-Prohibited:
-- ❌ Deleting failing tests to "fix" the problem
-- ❌ Weakening specific assertions to vague ones (e.g., `assert_eq!(status, 201)` → `assert!(status.is_success())`)
-
-## Verification Strategy
-
-> ⚠️ **When to run what:**
-> - During development: only test the crate you're working on → `cargo test -p aionui-<crate>`
-> - After implementation complete: full verification → `cargo test --workspace`
-> - Do NOT run `cargo test --workspace` at the start of a task.
->
-> ⚠️ **Performance:**
-> - `cargo clippy --workspace` takes several minutes — use `run_in_background: true`.
-> - `cargo test --workspace` takes 10+ minutes. MUST use `run_in_background: true` when calling via Bash tool, otherwise it will timeout.
-> - `cargo clippy -p aionui-<crate>` and `cargo test -p aionui-<crate>` typically complete in under 1 minute.
-
-### During Development (fast feedback loop)
+开发过程中只验证正在修改的 crate：
 
 ```bash
-cargo test -p aionui-<crate>                          # Test the crate you changed
-cargo clippy -p aionui-<crate> -- -D warnings         # Lint the crate you changed
+cargo test -p tjuaeui-<crate>
+cargo clippy -p tjuaeui-<crate> -- -D warnings
 ```
 
-### Before Commit (affected crates)
+提交前验证所有受影响 crate：
 
 ```bash
-cargo fmt --all -- --check                                                      # Format gate (instant)
-cargo clippy -p aionui-<crate1> -p aionui-<crate2> -- -D warnings              # Lint affected crates
-cargo test -p aionui-<crate1> -p aionui-<crate2>                               # Test affected crates
+cargo fmt --all -- --check
+cargo clippy -p tjuaeui-<crate1> -p tjuaeui-<crate2> -- -D warnings
+cargo test -p tjuaeui-<crate1> -p tjuaeui-<crate2>
 ```
 
-### Before Push (full workspace)
+实现全部完成后再执行 `cargo test --workspace`。完整 workspace 的 Clippy 和测试
+耗时较长，应在后台运行。推送前执行：
 
 ```bash
-just push                                             # full pre-push gate, then push
+just push
 ```

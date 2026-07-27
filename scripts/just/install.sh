@@ -8,13 +8,13 @@ case "$(uname -s)" in
 esac
 
 case "$mode" in
-    release) binary="target/release/aioncore$exe_suffix" ;;
-    debug) binary="target/debug/aioncore$exe_suffix" ;;
-    *) echo "unknown install mode: $mode" >&2; exit 1 ;;
+    release) binary="target/release/tjuaecore$exe_suffix" ;;
+    debug) binary="target/debug/tjuaecore$exe_suffix" ;;
+    *) echo "未知安装模式：$mode" >&2; exit 1 ;;
 esac
 
 if [[ ! -f "$binary" ]]; then
-    echo "binary not found: $binary" >&2
+    echo "未找到二进制文件：$binary" >&2
     exit 1
 fi
 
@@ -27,4 +27,4 @@ if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$install_dir/$(basename "$binary")"
 fi
 
-echo "Installed $(basename "$binary") to $install_dir"
+echo "已将 $(basename "$binary") 安装到 $install_dir"

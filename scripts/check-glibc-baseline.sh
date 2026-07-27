@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <binary> <max-glibc>" >&2
+  echo "用法：$0 <二进制文件> <GLIBC 版本上限>" >&2
   exit 2
 fi
 
@@ -10,12 +10,12 @@ binary="$1"
 max_glibc="$2"
 
 if [[ ! -f "${binary}" ]]; then
-  echo "Binary not found: ${binary}" >&2
+  echo "未找到二进制文件：${binary}" >&2
   exit 2
 fi
 
 if [[ ! "${max_glibc}" =~ ^GLIBC_[0-9]+[.][0-9]+$ ]]; then
-  echo "Invalid GLIBC ceiling: ${max_glibc}" >&2
+  echo "GLIBC 版本上限无效：${max_glibc}" >&2
   exit 2
 fi
 
@@ -29,7 +29,7 @@ required_glibc="$(
 )"
 
 if [[ -z "${required_glibc}" ]]; then
-  echo "No GLIBC versioned symbols found in ${binary}" >&2
+  echo "未在 ${binary} 中找到带版本的 GLIBC 符号" >&2
   exit 2
 fi
 
@@ -40,8 +40,8 @@ highest="$(
 )"
 
 if [[ "${highest}" != "${max_glibc}" ]]; then
-  echo "Required GLIBC ${required_glibc} exceeds ${max_glibc} for ${binary}" >&2
+  echo "${binary} 需要的 GLIBC ${required_glibc} 超过了上限 ${max_glibc}" >&2
   exit 1
 fi
 
-echo "Required GLIBC ${required_glibc} is within ${max_glibc} for ${binary}"
+echo "${binary} 需要的 GLIBC ${required_glibc} 未超过上限 ${max_glibc}"
