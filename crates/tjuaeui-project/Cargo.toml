@@ -1,0 +1,19 @@
+[package]
+name = "tjuaeui-project"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tjuaeui-common.workspace = true
+tjuaeui-db.workspace = true
+url.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true

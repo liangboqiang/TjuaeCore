@@ -1,0 +1,36 @@
+[package]
+name = "tjuaeui-cron"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tjuaeui-common.workspace = true
+tjuaeui-db.workspace = true
+tjuaeui-api-types.workspace = true
+tjuaeui-realtime.workspace = true
+tjuaeui-conversation.workspace = true
+tjuaeui-ai-agent.workspace = true
+tjuaeui-auth.workspace = true
+tjuaeui-system.workspace = true
+axum.workspace = true
+cron.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+iana-time-zone.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
+# Enable the `AgentInstance::Mock` variant so tests can build fake agents
+# through the trait-object escape hatch without spawning real CLI processes.
+tjuaeui-ai-agent = { workspace = true, features = ["test-support"] }

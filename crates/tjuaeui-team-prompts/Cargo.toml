@@ -1,0 +1,11 @@
+[package]
+name = "tjuaeui-team-prompts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tjuaeui-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
