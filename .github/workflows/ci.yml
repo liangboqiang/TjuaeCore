@@ -1,0 +1,76 @@
+name: 持续集成
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  identity:
+    name: 身份与去推广门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/quality/check-identity.sh
+
+  migration-immutability:
+    name: 数据库迁移不可变检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - run: bash scripts/migration/check-immutability.test.sh
+      - run: bash scripts/migration/check-immutability.sh
+
+  fmt:
+    name: 格式检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+      - run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate-final
+
+  audit:
+    name: 安全审计
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
