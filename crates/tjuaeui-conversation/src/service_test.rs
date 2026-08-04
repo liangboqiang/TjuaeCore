@@ -7353,6 +7353,7 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
 #[tokio::test]
 async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversation() {
     let resolver = Arc::new(RecordingSkillResolver::new());
+    resolver.register_local_runtime_skill("cron", "skill-local-cron");
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
 

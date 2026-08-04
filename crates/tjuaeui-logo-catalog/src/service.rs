@@ -28,7 +28,7 @@ impl LogoCatalogService {
             .ok_or_else(|| LogoAssetError::Forbidden(format!("资源路径越出徽标根目录：{asset_path}")))?;
 
         let file = LogoAssets::get(&normalized).ok_or_else(|| LogoAssetError::NotFound("找不到徽标资源".into()))?;
-        let bytes = file.data.into_owned();
+        let bytes = canonicalize_logo_bytes(&normalized, file.data.into_owned());
 
         Ok(LogoAssetFile {
             content_type: content_type_for_path(&normalized),
@@ -53,6 +53,17 @@ impl LogoCatalogService {
             .split(',')
             .map(str::trim)
             .any(|value| value == "*" || value == expected)
+    }
+}
+
+fn canonicalize_logo_bytes(path: &str, bytes: Vec<u8>) -> Vec<u8> {
+    if !path.ends_with(".svg") || !bytes.contains(&b'\r') {
+        return bytes;
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(svg) => svg.replace("\r\n", "\n").replace('\r', "\n").into_bytes(),
+        Err(error) => error.into_bytes(),
     }
 }
 
@@ -126,7 +137,7 @@ mod tests {
         assert_eq!(asset.content_type, HeaderValue::from_static("image/svg+xml"));
         assert_eq!(
             format!("{:x}", Sha256::digest(&asset.bytes)),
-            "b2bbffdada6e138dfe7020d924638e2e7ec411aa4a016479ca301b894e1105b8"
+            "677667f668870d5e7eeee78bd3d818c6ad7eb4398749d78f0026fc9ad370dfc6"
         );
         let svg = String::from_utf8(asset.bytes).expect("brand logo is UTF-8 SVG");
         assert!(svg.contains("viewBox=\"128 128 768 768\""));
