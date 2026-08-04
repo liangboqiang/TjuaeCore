@@ -17,10 +17,12 @@ use tjuaeui_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs
 use tokio::sync::broadcast;
 
 use crate::error::AgentError;
+use crate::manager::a2a::A2aAgentManager;
 use crate::manager::acp::AcpAgentManager;
 use crate::manager::tjuae_cli::TjuaeCliAgentManager;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
+use crate::runtime_assets::{RuntimeAssetLoadReceipt, RuntimeAssetReceiptPort};
 use crate::types::SendMessageData;
 
 use tjuaeui_api_types::{
@@ -86,6 +88,19 @@ pub trait IAgentTask: Send + Sync {
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait::async_trait]
 pub trait IMockAgent: IAgentTask {
+    fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        None
+    }
+
+    /// Installs the Core-only receipt that corresponds to the build request.
+    ///
+    /// This hook exists only on the test-support mock surface. It lets task
+    /// manager fakes model the real runtime handshake without weakening the
+    /// production fail-closed receipt contract. Implementations must preserve
+    /// an explicitly configured receipt so negative boundary tests can still
+    /// exercise missing or mismatched data.
+    fn install_runtime_asset_receipt_if_missing(&self, _receipt: RuntimeAssetLoadReceipt) {}
+
     fn get_confirmations(&self) -> Vec<Confirmation> {
         Vec::new()
     }
@@ -149,6 +164,7 @@ pub trait IMockAgent: IAgentTask {
 #[derive(Clone)]
 pub enum AgentInstance {
     Acp(Arc<AcpAgentManager>),
+    A2a(Arc<A2aAgentManager>),
     TjuaeCli(Arc<TjuaeCliAgentManager>),
     /// clean-slate direct-CLI session model (claude/codex only). Wraps an
     /// `tjuaeui_session::SessionBackend` via [`SessionAgentTask`]. Every other
@@ -172,6 +188,7 @@ impl AgentInstance {
     pub fn as_task(&self) -> &dyn IAgentTask {
         match self {
             Self::Acp(m) => m.as_ref(),
+            Self::A2a(m) => m.as_ref(),
             Self::TjuaeCli(m) => m.as_ref(),
             Self::Session(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
@@ -200,6 +217,20 @@ impl AgentInstance {
         self.as_task().workspace()
     }
 
+    /// Actual runtime asset receipt, when the concrete runtime supports the
+    /// receipt contract. Unsupported managers return `None`; callers with a
+    /// managed request must fail closed rather than infer success.
+    pub fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        match self {
+            Self::TjuaeCli(manager) => manager.runtime_asset_receipt(),
+            Self::Acp(manager) => manager.runtime_asset_receipt(),
+            Self::A2a(manager) => manager.runtime_asset_receipt(),
+            Self::Session(manager) => manager.runtime_asset_receipt(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(agent) => agent.runtime_asset_receipt(),
+        }
+    }
+
     /// Current conversation status.
     pub fn status(&self) -> Option<ConversationStatus> {
         self.as_task().status()
@@ -225,6 +256,32 @@ impl AgentInstance {
         self.as_task().cancel().await
     }
 
+    /// Claim an interrupted A2A task for automatic background recovery.
+    pub async fn claim_pending_a2a_recovery(&self) -> bool {
+        match self {
+            Self::A2a(manager) => manager.claim_pending_recovery().await,
+            Self::Acp(_) | Self::TjuaeCli(_) | Self::Session(_) => false,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_) => false,
+        }
+    }
+
+    /// Resume a previously claimed interrupted A2A task.
+    pub async fn resume_pending_a2a_task(&self) -> Result<(), AgentSendError> {
+        match self {
+            Self::A2a(manager) => manager.resume_pending_task().await,
+            Self::Acp(_) | Self::TjuaeCli(_) | Self::Session(_) => Ok(()),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_) => Ok(()),
+        }
+    }
+
+    pub fn abandon_pending_a2a_recovery(&self) {
+        if let Self::A2a(manager) = self {
+            manager.abandon_pending_recovery();
+        }
+    }
+
     /// Terminate the agent process.
     pub fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AgentError> {
         self.as_task().kill(reason)
@@ -238,6 +295,7 @@ impl AgentInstance {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         match self {
             Self::Acp(m) => m.kill_and_wait(reason),
+            Self::A2a(m) => m.kill_and_wait(reason),
             Self::TjuaeCli(m) => m.kill_and_wait(reason),
             // Session teardown is Drop-driven (dropping the last SessionBackend
             // handle aborts its reader + reaps the child). Nothing to await here.
@@ -267,6 +325,7 @@ impl AgentInstance {
     pub fn get_confirmations(&self) -> Vec<tjuaeui_common::Confirmation> {
         match self {
             Self::Acp(m) => m.get_confirmations(),
+            Self::A2a(_) => Vec::new(),
             Self::TjuaeCli(m) => m.get_confirmations(),
             // Session permissions surface as AcpPermission stream events + are
             // answered via confirm(); no separate cached-confirmation list yet.
@@ -286,6 +345,7 @@ impl AgentInstance {
     ) -> Result<(), AgentError> {
         match self {
             Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
+            Self::A2a(_) => Err(AgentError::bad_request("A2A 会话不支持工具确认接口")),
             Self::TjuaeCli(m) => m.confirm(msg_id, call_id, data, always_allow),
             Self::Session(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
@@ -296,7 +356,7 @@ impl AgentInstance {
     /// Check whether an action is auto-approved in this session.
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         match self {
-            Self::Acp(_) => false,
+            Self::Acp(_) | Self::A2a(_) => false,
             Self::TjuaeCli(m) => m.check_approval(action, command_type),
             // Session (claude/codex) has no tjuae_cli-style auto-approve list.
             Self::Session(_) => false,
@@ -308,7 +368,7 @@ impl AgentInstance {
     /// Session key for test doubles that expose one.
     pub fn get_session_key(&self) -> Option<String> {
         match self {
-            Self::Acp(_) | Self::TjuaeCli(_) | Self::Session(_) => None,
+            Self::Acp(_) | Self::A2a(_) | Self::TjuaeCli(_) | Self::Session(_) => None,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_session_key(),
         }
@@ -318,6 +378,10 @@ impl AgentInstance {
     pub async fn get_mode(&self) -> Result<tjuaeui_api_types::AgentModeResponse, AgentError> {
         match self {
             Self::Acp(m) => m.mode().await,
+            Self::A2a(_) => Ok(tjuaeui_api_types::AgentModeResponse {
+                mode: "default".into(),
+                initialized: true,
+            }),
             Self::TjuaeCli(m) => m.mode().await,
             Self::Session(m) => m.mode().await,
             #[cfg(any(test, feature = "test-support"))]
@@ -341,6 +405,7 @@ impl AgentInstance {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
+            Self::A2a(_) => Ok(GetModelInfoResponse { model_info: None }),
             Self::TjuaeCli(_) => Ok(GetModelInfoResponse { model_info: None }),
             Self::Session(m) => m.get_model().await,
             #[cfg(any(test, feature = "test-support"))]
@@ -351,6 +416,9 @@ impl AgentInstance {
     pub async fn get_config_options(&self) -> Result<GetConfigOptionsResponse, AgentError> {
         match self {
             Self::Acp(m) => m.config_options().await,
+            Self::A2a(_) => Ok(GetConfigOptionsResponse {
+                config_options: Vec::new(),
+            }),
             Self::TjuaeCli(m) => m.config_options().await,
             Self::Session(m) => m.get_config_options().await,
             #[cfg(any(test, feature = "test-support"))]
@@ -367,6 +435,7 @@ impl AgentInstance {
         }
         match self {
             Self::Acp(m) => m.set_config_option_confirmed(option_id, value).await,
+            Self::A2a(_) => Err(AgentError::bad_request("A2A 会话不支持配置选项切换")),
             Self::TjuaeCli(m) => m.set_config_option(option_id, value).await,
             Self::Session(m) => m.set_config_option(option_id, value).await,
             #[cfg(any(test, feature = "test-support"))]
@@ -391,6 +460,7 @@ impl AgentInstance {
                 tjuaeui_common::normalize_keys_to_snake_case(&mut value);
                 Ok(Some(value))
             }
+            Self::A2a(_) => Ok(None),
             Self::TjuaeCli(_) => Ok(None),
             Self::Session(m) => m.get_usage().await,
             #[cfg(any(test, feature = "test-support"))]
@@ -404,6 +474,7 @@ impl AgentInstance {
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AgentError> {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
+            Self::A2a(_) => Ok(Vec::new()),
             Self::TjuaeCli(m) => m.get_slash_commands().await,
             Self::Session(m) => m.get_slash_commands().await,
             #[cfg(any(test, feature = "test-support"))]
@@ -432,6 +503,10 @@ impl AgentInstance {
                     answer: Some("Side question support will be fully wired in app integration phase.".into()),
                 })
             }
+            Self::A2a(_) => Ok(SideQuestionResponse {
+                status: "unsupported".into(),
+                answer: None,
+            }),
             Self::TjuaeCli(_) => Ok(SideQuestionResponse {
                 status: "unsupported".into(),
                 answer: None,

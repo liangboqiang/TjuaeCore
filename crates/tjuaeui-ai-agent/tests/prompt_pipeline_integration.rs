@@ -79,7 +79,7 @@ async fn fixture_params(
 
 fn fixture_skill_manager() -> Arc<AcpSkillManager> {
     let tmp = tempfile::TempDir::new().unwrap();
-    let paths = Arc::new(tjuaeui_extension::resolve_skill_paths(tmp.path(), tmp.path()));
+    let paths = Arc::new(tjuaeui_asset::resolve_skill_paths(tmp.path(), tmp.path()));
     // tmp dir needs to live until the test finishes.
     // mem::forget is acceptable in test code — we just don't need the Drop cleanup.
     std::mem::forget(tmp);

@@ -26,6 +26,33 @@ pub struct ChannelSettingsService {
     agent_metadata_repo: Option<Arc<dyn IAgentMetadataRepository>>,
     assistant_definition_repo: Option<Arc<dyn IAssistantDefinitionRepository>>,
     assistant_overlay_repo: Option<Arc<dyn IAssistantOverlayRepository>>,
+    assistant_catalog: Option<Arc<dyn ChannelAssistantCatalogPort>>,
+}
+
+/// Core 本地助手资产到当前用户内部运行投影的只读映射。
+///
+/// 渠道设置和外部 API 始终只保存 `assistant_id`（本地资产 ID）；
+/// `projection_runtime_id` 只允许在 Core 内部用于读取运行投影。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelAssistantCatalogBinding {
+    pub assistant_id: String,
+    pub projection_runtime_id: String,
+}
+
+#[async_trait::async_trait]
+pub trait ChannelAssistantCatalogPort: Send + Sync {
+    async fn list_active_assistants(&self) -> Result<Vec<ChannelAssistantCatalogBinding>, ChannelError>;
+
+    async fn resolve_active_assistant(
+        &self,
+        assistant_id: &str,
+    ) -> Result<Option<ChannelAssistantCatalogBinding>, ChannelError> {
+        Ok(self
+            .list_active_assistants()
+            .await?
+            .into_iter()
+            .find(|binding| binding.assistant_id == assistant_id))
+    }
 }
 
 /// Resolved agent configuration for a channel platform.
@@ -53,6 +80,7 @@ impl ChannelSettingsService {
             agent_metadata_repo: None,
             assistant_definition_repo: None,
             assistant_overlay_repo: None,
+            assistant_catalog: None,
         }
     }
 
@@ -68,6 +96,11 @@ impl ChannelSettingsService {
     ) -> Self {
         self.assistant_definition_repo = Some(assistant_definition_repo);
         self.assistant_overlay_repo = Some(assistant_overlay_repo);
+        self
+    }
+
+    pub fn with_assistant_catalog(mut self, assistant_catalog: Arc<dyn ChannelAssistantCatalogPort>) -> Self {
+        self.assistant_catalog = Some(assistant_catalog);
         self
     }
 
@@ -248,7 +281,17 @@ impl ChannelSettingsService {
             return Ok(None);
         };
 
-        let Some(definition) = definition_repo.get_by_assistant_id(assistant_id).await? else {
+        let projection_runtime_id = match &self.assistant_catalog {
+            Some(catalog) => {
+                let Some(binding) = catalog.resolve_active_assistant(assistant_id).await? else {
+                    return Ok(None);
+                };
+                binding.projection_runtime_id
+            }
+            None => assistant_id.to_owned(),
+        };
+
+        let Some(definition) = definition_repo.get_by_assistant_id(&projection_runtime_id).await? else {
             return Ok(None);
         };
 
@@ -358,24 +401,51 @@ impl ChannelSettingsService {
             return Ok(None);
         };
 
-        let definitions = definition_repo.list().await?;
+        let catalog_bindings = match &self.assistant_catalog {
+            Some(catalog) => Some(catalog.list_active_assistants().await?),
+            None => None,
+        };
+        let definitions = match catalog_bindings.as_ref() {
+            Some(bindings) => {
+                let mut definitions = Vec::with_capacity(bindings.len());
+                for binding in bindings {
+                    let definition = definition_repo
+                        .get_by_assistant_id(&binding.projection_runtime_id)
+                        .await?
+                        .ok_or_else(|| {
+                            ChannelError::InvalidConfig("助手 active Binding 缺少内部运行投影，已拒绝使用".to_owned())
+                        })?;
+                    definitions.push((binding.assistant_id.clone(), definition));
+                }
+                definitions
+            }
+            None => definition_repo
+                .list()
+                .await?
+                .into_iter()
+                .map(|definition| (definition.assistant_id.clone(), definition))
+                .collect(),
+        };
         let overlays = overlay_repo.list().await?;
 
-        for definition in definitions.iter().filter(|definition| definition.source == "generated") {
+        for (assistant_id, definition) in definitions
+            .iter()
+            .filter(|(_, definition)| definition.source == "generated")
+        {
             if self.effective_assistant_backend(definition, &overlays).await? == DEFAULT_AGENT_TYPE {
-                return Ok(Some(definition.assistant_id.clone()));
+                return Ok(Some(assistant_id.clone()));
             }
         }
 
         let mut any_tjuae_cli = None;
-        for definition in &definitions {
+        for (assistant_id, definition) in &definitions {
             if self.effective_assistant_backend(definition, &overlays).await? == DEFAULT_AGENT_TYPE {
-                any_tjuae_cli = Some(definition);
+                any_tjuae_cli = Some(assistant_id);
                 break;
             }
         }
-        if let Some(definition) = any_tjuae_cli {
-            return Ok(Some(definition.assistant_id.clone()));
+        if let Some(assistant_id) = any_tjuae_cli {
+            return Ok(Some(assistant_id.clone()));
         }
 
         Ok(None)
@@ -666,7 +736,6 @@ mod tests {
             default_skills_mode: "auto".to_owned(),
             default_skill_ids: "[]".to_owned(),
             custom_skill_names: "[]".to_owned(),
-            default_disabled_builtin_skill_ids: "[]".to_owned(),
             default_mcps_mode: "auto".to_owned(),
             default_mcp_ids: "[]".to_owned(),
             created_at: 0,

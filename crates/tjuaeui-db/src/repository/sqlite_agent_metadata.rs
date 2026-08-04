@@ -560,6 +560,82 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn restore_projection_row(&self, row: &AgentMetadataRow) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO agent_metadata (\
+                id, icon, name, name_i18n, description, description_i18n, \
+                backend, agent_type, agent_source, agent_source_info, \
+                enabled, command, args, env, native_skills_dirs, behavior_policy, yolo_id, \
+                agent_capabilities, auth_methods, config_options, available_modes, \
+                available_models, available_commands, sort_order, \
+                last_check_status, last_check_kind, last_check_error_code, \
+                last_check_error_message, last_check_guidance, last_check_latency_ms, \
+                last_check_at, last_success_at, last_failure_at, command_override, env_override, \
+                created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+                icon=excluded.icon, name=excluded.name, name_i18n=excluded.name_i18n, \
+                description=excluded.description, description_i18n=excluded.description_i18n, \
+                backend=excluded.backend, agent_type=excluded.agent_type, \
+                agent_source=excluded.agent_source, agent_source_info=excluded.agent_source_info, \
+                enabled=excluded.enabled, command=excluded.command, args=excluded.args, \
+                env=excluded.env, native_skills_dirs=excluded.native_skills_dirs, \
+                behavior_policy=excluded.behavior_policy, yolo_id=excluded.yolo_id, \
+                agent_capabilities=excluded.agent_capabilities, auth_methods=excluded.auth_methods, \
+                config_options=excluded.config_options, available_modes=excluded.available_modes, \
+                available_models=excluded.available_models, available_commands=excluded.available_commands, \
+                sort_order=excluded.sort_order, last_check_status=excluded.last_check_status, \
+                last_check_kind=excluded.last_check_kind, last_check_error_code=excluded.last_check_error_code, \
+                last_check_error_message=excluded.last_check_error_message, \
+                last_check_guidance=excluded.last_check_guidance, \
+                last_check_latency_ms=excluded.last_check_latency_ms, last_check_at=excluded.last_check_at, \
+                last_success_at=excluded.last_success_at, last_failure_at=excluded.last_failure_at, \
+                command_override=excluded.command_override, env_override=excluded.env_override, \
+                created_at=excluded.created_at, updated_at=excluded.updated_at",
+        )
+        .bind(&row.id)
+        .bind(&row.icon)
+        .bind(&row.name)
+        .bind(&row.name_i18n)
+        .bind(&row.description)
+        .bind(&row.description_i18n)
+        .bind(&row.backend)
+        .bind(&row.agent_type)
+        .bind(&row.agent_source)
+        .bind(&row.agent_source_info)
+        .bind(row.enabled)
+        .bind(&row.command)
+        .bind(&row.args)
+        .bind(&row.env)
+        .bind(&row.native_skills_dirs)
+        .bind(&row.behavior_policy)
+        .bind(&row.yolo_id)
+        .bind(&row.agent_capabilities)
+        .bind(&row.auth_methods)
+        .bind(&row.config_options)
+        .bind(&row.available_modes)
+        .bind(&row.available_models)
+        .bind(&row.available_commands)
+        .bind(row.sort_order)
+        .bind(&row.last_check_status)
+        .bind(&row.last_check_kind)
+        .bind(&row.last_check_error_code)
+        .bind(&row.last_check_error_message)
+        .bind(&row.last_check_guidance)
+        .bind(row.last_check_latency_ms)
+        .bind(row.last_check_at)
+        .bind(row.last_success_at)
+        .bind(row.last_failure_at)
+        .bind(&row.command_override)
+        .bind(&row.env_override)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -764,7 +840,7 @@ mod tests {
             .iter()
             .find(|row| row.agent_type == "tjuaecli" && row.agent_source == "internal")
             .expect("seeded tjuae cli row");
-        assert_eq!(tjuae_cli.icon.as_deref(), Some("/api/assets/logos/brand/tjuae-cli.svg"));
+        assert_eq!(tjuae_cli.icon.as_deref(), Some("/api/assets/logos/brand/tjuae.svg"));
         let tjuae_cli_modes: serde_json::Value =
             serde_json::from_str(tjuae_cli.available_modes.as_deref().expect("tjuaecli modes catalog")).unwrap();
         assert_eq!(tjuae_cli_modes["current_mode_id"].as_str(), Some("default"));
@@ -1034,5 +1110,23 @@ mod tests {
         assert_eq!(row.env_override.as_deref(), Some(r#"[{"name":"K","value":"V"}]"#));
         // seed columns untouched
         assert_eq!(row.name, "agent-x");
+    }
+
+    #[tokio::test]
+    async fn projection_restore_recovers_the_exact_full_row() {
+        let (repo, _db) = setup().await;
+        repo.update_agent_overrides("2d23ff1c", Some("/tmp/override"), Some("[]"))
+            .await
+            .unwrap();
+        let previous = repo.get("2d23ff1c").await.unwrap().unwrap();
+        let replacement = custom_params("2d23ff1c", "temporary-projection");
+        repo.upsert(&replacement).await.unwrap();
+
+        repo.restore_projection_row(&previous).await.unwrap();
+        let restored = repo.get("2d23ff1c").await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(previous).unwrap()
+        );
     }
 }

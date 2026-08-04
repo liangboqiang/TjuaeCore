@@ -2,6 +2,13 @@ use tjuaeui_api_types::WebSocketMessage;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+/// 只投递给指定用户的 WebSocket 事件。
+#[derive(Debug, Clone)]
+pub struct UserTargetedEvent {
+    pub user_id: String,
+    pub event: WebSocketMessage<serde_json::Value>,
+}
+
 /// Trait for broadcasting WebSocket events to all connected clients.
 ///
 /// Business modules depend on this trait (via `Arc<dyn EventBroadcaster>`)
@@ -12,6 +19,13 @@ use tracing::warn;
 pub trait EventBroadcaster: Send + Sync {
     /// Broadcast an event to all connected WebSocket clients.
     fn broadcast(&self, event: WebSocketMessage<serde_json::Value>);
+
+    /// Send an event only to connections authenticated as `user_id`.
+    ///
+    /// The privacy-preserving default drops the event. Implementations must
+    /// explicitly opt into user targeting; silently falling back to a global
+    /// broadcast would expose another user's data.
+    fn broadcast_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 /// Default implementation of [`EventBroadcaster`] backed by
@@ -22,13 +36,15 @@ pub trait EventBroadcaster: Send + Sync {
 /// forwards received events to its per-connection `mpsc` sender.
 pub struct BroadcastEventBus {
     tx: broadcast::Sender<WebSocketMessage<serde_json::Value>>,
+    user_tx: broadcast::Sender<UserTargetedEvent>,
 }
 
 impl BroadcastEventBus {
     /// Create a new event bus with the given channel capacity.
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        let (user_tx, _user_rx) = broadcast::channel(capacity);
+        Self { tx, user_tx }
     }
 
     /// Subscribe to receive broadcast events.
@@ -36,6 +52,11 @@ impl BroadcastEventBus {
     /// Each WebSocket connection calls this once to get its own receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<WebSocketMessage<serde_json::Value>> {
         self.tx.subscribe()
+    }
+
+    /// Subscribe to user-targeted events.
+    pub fn subscribe_user(&self) -> broadcast::Receiver<UserTargetedEvent> {
+        self.user_tx.subscribe()
     }
 
     /// Returns the number of active subscribers.
@@ -50,6 +71,19 @@ impl EventBroadcaster for BroadcastEventBus {
             warn!(
                 event_name = %e.0.name,
                 "broadcast failed: no active receivers"
+            );
+        }
+    }
+
+    fn broadcast_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        let targeted = UserTargetedEvent {
+            user_id: user_id.to_owned(),
+            event,
+        };
+        if let Err(error) = self.user_tx.send(targeted) {
+            warn!(
+                event_name = %error.0.event.name,
+                "user-targeted broadcast failed: no active receivers"
             );
         }
     }
@@ -135,6 +169,21 @@ mod tests {
             assert_eq!(msg.name, format!("event-{i}"));
             assert_eq!(msg.data["seq"], i);
         }
+    }
+
+    #[tokio::test]
+    async fn user_targeted_events_use_a_separate_private_channel() {
+        let bus = BroadcastEventBus::new(16);
+        let mut public_rx = bus.subscribe();
+        let mut user_rx = bus.subscribe_user();
+
+        bus.broadcast_to_user("user-a", WebSocketMessage::new("private", json!({"id": 1})));
+
+        assert!(public_rx.try_recv().is_err());
+        let received = user_rx.recv().await.unwrap();
+        assert_eq!(received.user_id, "user-a");
+        assert_eq!(received.event.name, "private");
+        assert_eq!(received.event.data["id"], 1);
     }
 
     #[test]

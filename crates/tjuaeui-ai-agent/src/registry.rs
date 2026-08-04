@@ -214,6 +214,14 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// 持久化主动诊断发现的能力目录，并在返回前刷新内存快照。
+    ///
+    /// 会话热路径仍通过 [`CatalogSender`] 串行回写；诊断接口需要在 HTTP
+    /// 响应前保证模型缓存已经可读，因此使用这个可等待入口。
+    pub async fn apply_diagnostic_catalog(&self, id: &str, snapshot: &AgentHandshake) -> Result<(), AgentError> {
+        self.apply_handshake_inner(id, snapshot).await
+    }
+
     async fn update_cached_unavailable_reason(&self, id: &str, reason: Option<UnavailableReason>) {
         let mut guard = self.unavailable_reasons.write().await;
         if let Some(reason) = reason {
@@ -236,8 +244,9 @@ impl AgentRegistry {
     ///
     /// Startup checks whether required commands / managed runtimes resolve and
     /// runs a bounded `<primary-cli> --version` probe for builtin agents. It does not start sessions,
-    /// perform handshakes, fetch models, or overwrite persisted health-check
-    /// snapshots. User-facing health checks stay explicit.
+    /// perform handshakes, fetch models, or overwrite persisted diagnostic
+    /// snapshots. The startup diagnostic coordinator performs those deeper checks
+    /// after authentication, outside this catalog-hydration critical path.
     pub async fn hydrate(&self) -> Result<(), AgentError> {
         let rows = self
             .repo
@@ -351,7 +360,7 @@ impl AgentRegistry {
             .map(|mut meta| {
                 let (path, reason) = probe_with_reason(&meta);
                 meta.resolved_command = path;
-                meta.available = meta.resolved_command.is_some() || is_internal_commandless_agent(&meta);
+                meta.available = meta.resolved_command.is_some() || is_commandless_service_agent(&meta);
                 let reason = if meta.available { None } else { reason };
                 (meta, reason)
             })
@@ -496,7 +505,7 @@ impl AgentRegistry {
                     agent_source: meta.agent_source,
                     agent_source_info: meta.agent_source_info,
                     enabled: meta.enabled,
-                    installed: meta.available,
+                    installed: meta.available || meta.agent_type == AgentType::A2a,
                     command: meta.command,
                     args: meta.args,
                     env: Vec::new(),
@@ -547,7 +556,7 @@ impl AgentRegistry {
             agent_source: meta.agent_source,
             agent_source_info: meta.agent_source_info,
             enabled: meta.enabled,
-            installed: meta.available,
+            installed: meta.available || meta.agent_type == AgentType::A2a,
             command: meta.command,
             args: meta.args,
             env: Vec::new(),
@@ -650,7 +659,7 @@ enum AvailabilityProjection {
 ///
 /// Callers choose whether availability should come from persisted snapshots
 /// or from a live command probe. Startup hydration uses cached projection;
-/// explicit refresh and single-agent health-check reloads use probe.
+/// explicit refresh and single-Agent diagnostic reloads use probe.
 fn decode_row(
     row: AgentMetadataRow,
     availability: AvailabilityProjection,
@@ -779,10 +788,14 @@ fn is_internal_commandless_agent(meta: &AgentMetadata) -> bool {
     meta.enabled && meta.command.is_none() && meta.agent_source == AgentSource::Internal
 }
 
+fn is_commandless_service_agent(meta: &AgentMetadata) -> bool {
+    is_internal_commandless_agent(meta) || (meta.enabled && meta.command.is_none() && meta.agent_type == AgentType::A2a)
+}
+
 fn apply_probe_availability(meta: &mut AgentMetadata) -> Option<UnavailableReason> {
     let (path, reason) = probe_with_reason(meta);
     meta.resolved_command = path;
-    meta.available = meta.resolved_command.is_some() || is_internal_commandless_agent(meta);
+    meta.available = meta.resolved_command.is_some() || is_commandless_service_agent(meta);
     if meta.available { None } else { reason }
 }
 
@@ -867,7 +880,7 @@ fn apply_cached_availability(meta: &mut AgentMetadata) -> Option<UnavailableReas
         meta.available = false;
         return Some(UnavailableReason::Disabled);
     }
-    if is_internal_commandless_agent(meta) {
+    if is_commandless_service_agent(meta) {
         meta.available = true;
         return None;
     }
@@ -944,7 +957,7 @@ fn cached_unavailable_reason(meta: &AgentMetadata) -> Option<UnavailableReason> 
             detail: meta
                 .last_check_error_message
                 .clone()
-                .unwrap_or_else(|| "上次健康检查时托管运行时不可用".to_owned()),
+                .unwrap_or_else(|| "上次诊断时托管运行时不可用".to_owned()),
         }),
         _ => None,
     }
@@ -1390,10 +1403,9 @@ fn probe_resolved_command(meta: &AgentMetadata) -> Result<PathBuf, UnavailableRe
         return Err(UnavailableReason::Disabled);
     }
 
-    // Builtin claude/codex run as direct CLIs now: availability is a PATH-only
-    // probe of the primary command (packaged app ships the binary, but PATH
-    // presence is our proxy for "user installed + authenticated" — see
-    // managed_cli / cli_probe). No node/ACP-tool preparation is involved.
+    // Builtin claude/codex run as user-managed external CLIs: availability is a
+    // PATH-only probe of the primary command. Tjuae never downloads, installs,
+    // caches or bundles these programs.
     if is_builtin_managed_agent(meta) {
         let primary = crate::cli_probe::command_name(meta).ok_or(UnavailableReason::NoCommand)?;
         return probe_command_candidate(primary).ok_or_else(|| UnavailableReason::PrimaryMissing {

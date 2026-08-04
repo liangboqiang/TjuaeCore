@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::Datelike;
 use tjuaeui_ai_agent::session_context::{
-    AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, ConversationContext, TjuaeCliSessionBuildContext,
-    WorkspaceContext,
+    A2aSessionBuildContext, AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, ConversationContext,
+    TjuaeCliSessionBuildContext, WorkspaceContext,
 };
 use tjuaeui_ai_agent::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState};
 use tjuaeui_ai_agent::types::BuildTaskOptions;
@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::convert::string_to_enum;
 use crate::error::ConversationError;
+use crate::managed_skill_roots::{managed_codex_skill_root, uses_managed_codex_skills};
 use crate::task_options::provider_model_from_conversation_row;
 
 const LEGACY_CONVERSATION_ARCHIVED_MESSAGE: &str = "该历史对话已无法继续，请新建对话。";
@@ -82,6 +83,17 @@ impl<'a> SessionContextBuilder<'a> {
         let workspace = self.resolve_workspace(row, &agent_type, &extra, workspace_override)?;
         let model = provider_model_from_conversation_row(row);
         let skills = parse_string_array(extra.get("skills").cloned()).unwrap_or_default();
+        let backend = extra.get("backend").and_then(serde_json::Value::as_str);
+        let skill_roots = if !skills.is_empty() && uses_managed_codex_skills(&agent_type, backend, workspace.is_custom)
+        {
+            vec![
+                managed_codex_skill_root(self.workspace_root, &row.id)
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        } else {
+            Vec::new()
+        };
         let team = TeamSessionBinding::from_extra_value(&extra).map_err(|e| ConversationError::BadRequest {
             reason: format!("团队运行时上下文无效：{e}"),
         })?;
@@ -97,6 +109,7 @@ impl<'a> SessionContextBuilder<'a> {
             workspace,
             model,
             skills,
+            skill_roots,
             runtime_env: Vec::new(),
             team,
             kind,
@@ -181,6 +194,26 @@ impl<'a> SessionContextBuilder<'a> {
                 .build_acp_context(row, extra, team)
                 .await
                 .map(|context| AgentSessionKind::Acp(Box::new(context))),
+            AgentType::A2a => {
+                let agent_id = extra
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| ConversationError::BadRequest {
+                        reason: "A2A 对话缺少 agent_id".to_owned(),
+                    })?
+                    .to_owned();
+                let preset_context = extra
+                    .get("preset_context")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                Ok(AgentSessionKind::A2a(Box::new(A2aSessionBuildContext {
+                    agent_id,
+                    preset_context,
+                })))
+            }
             AgentType::TjuaeCli => Ok(AgentSessionKind::TjuaeCli(Box::new(build_tjuae_cli_context(
                 row, extra, team, seed,
             )))),
@@ -1097,6 +1130,49 @@ mod tests {
         let context = repos.builder().build(&row).await.unwrap();
         assert!(context.workspace.is_custom);
         assert_eq!(context.workspace.path, custom.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn auto_codex_workspace_uses_managed_skill_root() {
+        let repos = setup().await;
+        upsert_builtin(&repos, "builtin-codex-test", "codex").await;
+        let row = row(
+            "acp",
+            serde_json::json!({ "backend": "codex", "skills": ["review"] }),
+            None,
+        );
+
+        let context = repos.builder().build(&row).await.unwrap();
+        assert!(!context.workspace.is_custom);
+        assert_eq!(
+            context.skill_roots,
+            vec![
+                managed_codex_skill_root(&repos.workspace_root, "conv-1")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_codex_workspace_preserves_native_trust_semantics() {
+        let repos = setup().await;
+        upsert_builtin(&repos, "builtin-codex-test", "codex").await;
+        let custom = repos.workspace_root.join("custom-codex-workspace");
+        std::fs::create_dir_all(&custom).unwrap();
+        let row = row(
+            "acp",
+            serde_json::json!({
+                "backend": "codex",
+                "skills": ["review"],
+                "workspace": custom.to_string_lossy().to_string()
+            }),
+            None,
+        );
+
+        let context = repos.builder().build(&row).await.unwrap();
+        assert!(context.workspace.is_custom);
+        assert!(context.skill_roots.is_empty());
     }
 
     #[test]

@@ -579,6 +579,7 @@ impl TeamConversationProvisioningPort for FakeConversationPorts {
                 use_model: None,
             },
             skills: config.skills.clone(),
+            skill_roots: Vec::new(),
             runtime_env: Vec::new(),
             team: team.clone(),
             kind: AgentSessionKind::Acp(Box::new(AcpSessionBuildContext {
@@ -1244,6 +1245,7 @@ fn test_acp_build_options(conversation_id: String, workspace: String) -> BuildTa
             use_model: None,
         },
         skills: Vec::new(),
+        skill_roots: Vec::new(),
         runtime_env: Vec::new(),
         team: None,
         kind: AgentSessionKind::Acp(Box::new(AcpSessionBuildContext {
@@ -1260,7 +1262,10 @@ struct EmptyTeamAssistantCatalog;
 
 #[async_trait::async_trait]
 impl TeamAssistantCatalogPort for EmptyTeamAssistantCatalog {
-    async fn list_team_selectable_assistants(&self) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
+    async fn list_team_selectable_assistants(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
         Ok(Vec::new())
     }
 }
@@ -1273,7 +1278,10 @@ struct TestTeamAssistantCatalog {
 
 #[async_trait::async_trait]
 impl TeamAssistantCatalogPort for TestTeamAssistantCatalog {
-    async fn list_team_selectable_assistants(&self) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
+    async fn list_team_selectable_assistants(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
         let agent_rows = self.agent_metadata_repo.list_all().await?;
         let definitions = self.assistant_definition_repo.list().await?;
         let mut result = Vec::new();
@@ -1297,6 +1305,9 @@ impl TeamAssistantCatalogPort for TestTeamAssistantCatalog {
                 backend,
                 description: definition.description.unwrap_or_default(),
                 skills: Vec::new(),
+                default_model: (definition.default_model_mode == "fixed")
+                    .then_some(definition.default_model_value)
+                    .flatten(),
             });
         }
 
@@ -1494,7 +1505,6 @@ fn setup_with_factory_metadata_team_repo_and_conversation_repo(
         agent_metadata_repo,
         Arc::new(EmptyTeamAssistantCatalog),
         Arc::new(EmptyAssistantDefinitionRepo),
-        Arc::new(EmptyAssistantOverlayRepo),
         provider_repo,
         conversation_port,
         projection_store,
@@ -1539,7 +1549,6 @@ fn setup_with_factory_metadata_assistants_and_conversation_repo(
         agent_metadata_repo,
         assistant_catalog,
         assistant_definition_repo,
-        assistant_overlay_repo,
         provider_repo,
         conversation_port,
         projection_store,
@@ -1600,7 +1609,6 @@ fn setup_with_ports_metadata_assistants_and_conversation_repo(
         agent_metadata_repo,
         assistant_catalog,
         assistant_definition_repo,
-        assistant_overlay_repo,
         provider_repo,
         conversation_port,
         projection_store,
@@ -1635,7 +1643,6 @@ fn setup_with_recording_turn_port() -> (
         Arc::new(StubAgentMetadataRepo::empty()),
         Arc::new(EmptyTeamAssistantCatalog),
         Arc::new(EmptyAssistantDefinitionRepo),
-        Arc::new(EmptyAssistantOverlayRepo),
         provider_repo,
         conversation_port,
         projection_store,
@@ -1834,7 +1841,6 @@ fn setup_with_recording_broadcaster() -> (Arc<TeamSessionService>, Arc<Recording
         agent_metadata_repo,
         Arc::new(EmptyTeamAssistantCatalog),
         Arc::new(EmptyAssistantDefinitionRepo),
-        Arc::new(EmptyAssistantOverlayRepo),
         provider_repo,
         conversation_port,
         projection_store,
@@ -1887,7 +1893,6 @@ fn setup_with_factory_recording_broadcaster_and_conversation_repo(factory: Agent
         agent_metadata_repo,
         Arc::new(EmptyTeamAssistantCatalog),
         Arc::new(EmptyAssistantDefinitionRepo),
-        Arc::new(EmptyAssistantOverlayRepo),
         provider_repo,
         conversation_port,
         projection_store,
@@ -1983,7 +1988,6 @@ fn word_creator_definition() -> AssistantDefinitionRow {
         default_skills_mode: "auto".into(),
         default_skill_ids: "[]".into(),
         custom_skill_names: "[]".into(),
-        default_disabled_builtin_skill_ids: "[]".into(),
         default_mcps_mode: "auto".into(),
         default_mcp_ids: "[]".into(),
         created_at: 0,
@@ -2403,7 +2407,7 @@ async fn tc_create_team_prefers_assistant_avatar_over_backend_logo() {
             name_i18n: "{}".into(),
             description: None,
             description_i18n: "{}".into(),
-            avatar_type: "builtin_asset".into(),
+            avatar_type: "user_asset".into(),
             avatar_value: Some("avatars/assistant-lead.png".into()),
             agent_id: "claude".into(),
             rule_resource_type: "none".into(),
@@ -2419,7 +2423,6 @@ async fn tc_create_team_prefers_assistant_avatar_over_backend_logo() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -2489,7 +2492,6 @@ async fn tc_create_team_carries_assistant_identity_into_lead_conversation_extra(
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -2564,7 +2566,6 @@ async fn tc_create_team_derives_backend_from_assistant_when_backend_missing() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -2650,7 +2651,6 @@ async fn tc_create_team_ignores_requested_backend_when_assistant_id_present() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -2896,7 +2896,6 @@ async fn ta_add_agent_derives_backend_from_assistant_when_backend_missing() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -2990,7 +2989,6 @@ async fn ta_add_agent_ignores_requested_backend_when_assistant_id_present() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -4930,7 +4928,6 @@ async fn spawn_agent_in_session_succeeds_without_active_team_run() {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,

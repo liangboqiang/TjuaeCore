@@ -1,10 +1,10 @@
 # TjuaeCore
 
-TjuaeCore 是 Tjuae 的本地服务层，负责会话、数据、智能体、MCP、扩展、定时任务、
-文件处理和系统能力。它通过 HTTP 与 WebSocket 向 TjuaeUI 提供统一后端接口，
-并通过 TjuaeCLI SDK 运行内置智能体。
+TjuaeCore 是 Tjuae 的本地服务与资产事实层，负责会话、四类本地资产、运行绑定、Trace、
+MCP、定时任务、文件处理和系统能力。它通过 HTTP 与 WebSocket 向 TjuaeUI 提供统一接口，
+并通过固定版本的 TjuaeCLI SDK 执行智能体会话。
 
-当前品牌首版为 `0.2.0`。
+当前候选版本为 `0.3.0`。
 
 ## 仓库关系
 
@@ -13,10 +13,10 @@ Tjuae 由四个独立仓库组成：
 - [TjuaeUI](https://github.com/liangboqiang/TjuaeUI)：桌面、移动和 Web 入口。
 - [TjuaeCore](https://github.com/liangboqiang/TjuaeCore)：本仓库，本地服务和系统能力。
 - [TjuaeCLI](https://github.com/liangboqiang/TjuaeCLI)：命令行客户端与智能体 SDK。
-- [TjuaeHub](https://github.com/liangboqiang/TjuaeHub)：扩展 Schema、目录和构建工具。
+- [TjuaeHub](https://github.com/liangboqiang/TjuaeHub)：四类远程原子资产、Schema、审核和分发。
 
-依赖方向为 `UI → Core → CLI SDK`。Core 可读取 Hub 提供的扩展 Schema 和目录
-数据，不依赖 UI 的具体实现。
+运行依赖方向为 `UI → Core → CLI SDK`。Hub 是独立远程库；Core 按不可变 `dist` 提交读取并
+验证市场索引和包，安装后创建用户本地副本。Hub 资产不会越过 Core 直接参与会话运行。
 
 ## 环境要求
 
@@ -59,22 +59,25 @@ just check
 数据库 Migration 一旦发布不得修改。品牌首版重建 Migration 基线时，必须显式
 使用仓库门禁认可的例外开关，并在提交说明中记录原因。
 
-## 扩展契约
+## 资产契约
 
-- Manifest：`tjuae-extension.json`
-- Engine 字段：`engine.tjuae`
-- 扩展搜索路径：`TJUAE_EXTENSIONS_PATH`
-- 扩展状态文件：`TJUAE_EXTENSION_STATES_FILE`
+- 四类原子资产固定为 `assistant`、`engineAdapter`、`skill`、`mcp`。
+- Core 本地资产与 Hub 远程资产是两份实体，通过 TrackingLink、BaseSnapshot、提交和摘要关联。
+- 公开 Definition、用户 typed Overlay 和加密 Credential 分离；秘密不会写入 Hub、Trace 或日志。
+- 启用使用事务投影与 `AssetRuntimeBinding`；引擎和 MCP 必须先完成匹配当前版本的试跑。
+- 第三方 CLI 由用户自行安装和登录；Core 只从用户 PATH 或显式 Overlay 路径检测，不下载、
+  安装、更新、缓存或分发任何第三方 CLI。
+- 应用扩展仍可提供主题、频道、WebUI 和设置页，但不能贡献四类原子资产或执行资产生命周期脚本。
 
-本仓库不提供旧名称、旧配置路径、旧协议字段或旧扩展格式的运行时兼容层。
+本仓库不提供旧资产清单、旧直接 CRUD、旧产品路径或旧协议字段的运行时兼容层。
 
 ## 发布
 
-Release tag 使用 `v<version>`。`v0.2.0` 对应的产物命名为：
+Release tag 使用 `v<version>`。`v0.3.0` 对应的产物命名为：
 
 ```text
-tjuaecore-v0.2.0-<target>.tar.gz
-tjuaecore-v0.2.0-<target>.zip
+tjuaecore-v0.3.0-<target>.tar.gz
+tjuaecore-v0.3.0-<target>.zip
 ```
 
 发布流程不依赖外部发版服务：主分支通过 `just verify` 和安全审计后，

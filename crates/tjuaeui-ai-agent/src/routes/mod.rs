@@ -1,8 +1,7 @@
 //! HTTP routes for the ai-agent crate, grouped by capability.
 //!
-//! - [`agent`] — agent-registry endpoints (`/api/agents*`, including
-//!   custom-agent CRUD and the ACP health-check probe).
-//! - [`remote`] — remote-agent pairing endpoints (`/api/remote-agents/*`).
+//! - [`agent`] — engine-management endpoints (`/api/engines*`) backed by the
+//!   internal agent registry.
 //!
 //! Session-scoped endpoints (mode / model / config / usage /
 //! agent-capabilities / slash-commands / side-question / workspace /
@@ -11,10 +10,7 @@
 
 pub mod agent;
 pub(crate) mod error_mapping;
-pub mod remote;
 pub mod state;
 
-pub use agent::agent_routes;
-pub use remote::remote_agent_routes;
+pub use agent::engine_routes;
 pub use state::AgentRouterState;
-pub use state::RemoteAgentRouterState;

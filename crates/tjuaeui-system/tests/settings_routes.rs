@@ -85,6 +85,40 @@ async fn get_settings_default_values() {
     assert_eq!(json["data"]["cron_notification_enabled"], false);
     assert_eq!(json["data"]["command_queue_enabled"], false);
     assert_eq!(json["data"]["save_upload_to_workspace"], false);
+    assert_eq!(json["data"]["network_proxy"]["mode"], "follow_system");
+    assert_eq!(json["data"]["network_proxy"]["proxy_url"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn patch_manual_proxy_and_read_effective_status() {
+    let (app, _db) = setup().await;
+    let req = json_request(
+        "PATCH",
+        "/api/settings",
+        serde_json::json!({
+            "network_proxy": {
+                "mode": "manual",
+                "proxy_url": "127.0.0.1:7897",
+                "no_proxy": "internal.example"
+            }
+        }),
+    );
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["data"]["network_proxy"]["proxy_url"], "http://127.0.0.1:7897");
+
+    let response = app
+        .oneshot(get_request("/api/settings/network-proxy/status"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["data"]["mode"], "manual");
+    assert_eq!(json["data"]["state"], "active");
+    assert_eq!(json["data"]["source"], "manual");
+
+    tjuaeui_runtime::set_network_proxy_config(tjuaeui_runtime::NetworkProxyConfig::default()).unwrap();
 }
 
 #[tokio::test]
@@ -228,7 +262,11 @@ async fn put_and_get_boolean_value() {
 async fn put_and_get_number_value() {
     let (app, db) = setup().await;
 
-    let req = json_request("PUT", "/api/settings/client", serde_json::json!({"pet.size": 360}));
+    let req = json_request(
+        "PUT",
+        "/api/settings/client",
+        serde_json::json!({"ui.zoomFactor": 1.25}),
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -236,14 +274,18 @@ async fn put_and_get_number_value() {
 
     let resp = app2.oneshot(get_request("/api/settings/client")).await.unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["pet.size"], 360);
+    assert_eq!(json["data"]["ui.zoomFactor"], 1.25);
 }
 
 #[tokio::test]
 async fn put_and_get_string_value() {
     let (app, db) = setup().await;
 
-    let req = json_request("PUT", "/api/settings/client", serde_json::json!({"theme": "dark"}));
+    let req = json_request(
+        "PUT",
+        "/api/settings/client",
+        serde_json::json!({"theme.activeId": "dark"}),
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -251,7 +293,7 @@ async fn put_and_get_string_value() {
 
     let resp = app2.oneshot(get_request("/api/settings/client")).await.unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["theme"], "dark");
+    assert_eq!(json["data"]["theme.activeId"], "dark");
 }
 
 #[tokio::test]
@@ -259,12 +301,20 @@ async fn put_null_deletes_key() {
     let (app, db) = setup().await;
 
     // First write a value
-    let req = json_request("PUT", "/api/settings/client", serde_json::json!({"theme": "dark"}));
+    let req = json_request(
+        "PUT",
+        "/api/settings/client",
+        serde_json::json!({"theme.activeId": "dark"}),
+    );
     app.oneshot(req).await.unwrap();
 
     // Then delete it with null
     let app2 = settings_routes(build_state(&db));
-    let req = json_request("PUT", "/api/settings/client", serde_json::json!({"theme": null}));
+    let req = json_request(
+        "PUT",
+        "/api/settings/client",
+        serde_json::json!({"theme.activeId": null}),
+    );
     app2.oneshot(req).await.unwrap();
 
     // Verify it's gone

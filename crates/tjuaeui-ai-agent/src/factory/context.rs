@@ -7,8 +7,10 @@ use crate::session_context::AgentSessionContext;
 
 pub(super) struct FactoryContext {
     pub conversation_id: String,
+    pub user_id: String,
     pub workspace: String,
     pub is_custom_workspace: bool,
+    pub skill_roots: Vec<String>,
     pub runtime_env: Vec<(String, String)>,
 }
 
@@ -16,8 +18,10 @@ impl FactoryContext {
     pub async fn resolve(context: &AgentSessionContext) -> Result<Self, AgentError> {
         Ok(Self {
             conversation_id: context.conversation.conversation_id.clone(),
+            user_id: context.conversation.user_id.clone(),
             workspace: context.workspace.path.clone(),
             is_custom_workspace: context.workspace.is_custom,
+            skill_roots: context.skill_roots.clone(),
             runtime_env: context.runtime_env.clone(),
         })
     }
@@ -51,6 +55,7 @@ mod tests {
                 use_model: None,
             },
             skills: vec![],
+            skill_roots: vec![],
             runtime_env: vec![("TJUAE_USER_ID".into(), "user-1".into())],
             team: None,
             kind: AgentSessionKind::Acp(Box::new(AcpSessionBuildContext {
@@ -65,5 +70,6 @@ mod tests {
         let ctx = FactoryContext::resolve(&context).await.unwrap();
 
         assert_eq!(ctx.runtime_env, vec![("TJUAE_USER_ID".to_owned(), "user-1".to_owned())]);
+        assert_eq!(ctx.user_id, "user-1");
     }
 }

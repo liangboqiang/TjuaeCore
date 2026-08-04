@@ -462,6 +462,7 @@ mod tests {
                 use_model: None,
             },
             skills: vec![],
+            skill_roots: vec![],
             runtime_env: vec![],
             team: None,
             kind: AgentSessionKind::Acp(Box::new(AcpSessionBuildContext {
@@ -592,6 +593,23 @@ mod tests {
         let h2 = mgr.get_or_build_task("conv-1", options).await.unwrap();
 
         assert!(!same_mock(&h1, &h2));
+        assert_eq!(mgr.active_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_or_build_rebuilds_when_runtime_asset_snapshot_changes_or_is_removed() {
+        let mgr = make_manager();
+        let mut first_options = make_options("conv-1");
+        first_options.runtime_capabilities.runtime_asset_snapshot_id = Some("sha256-first".to_owned());
+        let first = mgr.get_or_build_task("conv-1", first_options).await.unwrap();
+
+        let mut changed_options = make_options("conv-1");
+        changed_options.runtime_capabilities.runtime_asset_snapshot_id = Some("sha256-changed".to_owned());
+        let changed = mgr.get_or_build_task("conv-1", changed_options).await.unwrap();
+        assert!(!same_mock(&first, &changed));
+
+        let removed = mgr.get_or_build_task("conv-1", make_options("conv-1")).await.unwrap();
+        assert!(!same_mock(&changed, &removed));
         assert_eq!(mgr.active_count(), 1);
     }
 

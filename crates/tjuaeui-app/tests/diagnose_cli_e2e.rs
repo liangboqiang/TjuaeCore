@@ -19,6 +19,10 @@ type SharedCapture = Arc<Mutex<Capture>>;
 fn diagnose_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tjuaecore"));
     command.arg("diagnose");
+    // Keep loopback probe traffic inside the test process even when the
+    // developer machine has a system proxy or Clash enabled.
+    command.env("NO_PROXY", "127.0.0.1,localhost");
+    command.env("no_proxy", "127.0.0.1,localhost");
     command
 }
 
@@ -482,21 +486,4 @@ async fn diagnose_logs_tail_reads_latest_tjuaecore_log_and_filters_errors() {
     assert!(!stdout_text.contains("sk-log-secret"));
     assert!(!stdout_text.contains("boot"));
     assert!(!stdout_text.contains("other conversation"));
-}
-
-#[test]
-fn builtin_troubleshooting_skill_uses_diagnose_cli_not_python_helper() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/builtin-skills/tjuaeui-troubleshooting");
-    let skill = std::fs::read_to_string(root.join("SKILL.md")).unwrap();
-
-    for forbidden in ["python3", "tjuae_diag.py", "lsof", "ps -", "curl"] {
-        assert!(
-            !skill.contains(forbidden),
-            "tjuaeui-troubleshooting skill must not mention {forbidden}"
-        );
-    }
-    assert!(skill.contains("\"$TJUAE_HELPER_BIN\" diagnose capabilities"));
-    assert!(skill.contains("\"$TJUAE_HELPER_BIN\" diagnose overview"));
-    assert!(skill.contains("\"$TJUAE_HELPER_BIN\" diagnose conversations get"));
-    assert!(skill.contains("\"$TJUAE_HELPER_BIN\" diagnose http get"));
 }

@@ -18,18 +18,27 @@ use crate::types::{
 /// Returns `true` if the token is valid, `false` if expired or revoked.
 pub type TokenValidator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Resolves the authenticated user id represented by a connection token.
+pub type UserIdResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Manages active WebSocket connections, heartbeat detection,
 /// and provides broadcast/unicast messaging.
 pub struct WebSocketManager {
     connections: Arc<DashMap<ConnectionId, ClientInfo>>,
     next_id: AtomicU64,
+    user_id_resolver: UserIdResolver,
 }
 
 impl WebSocketManager {
     pub fn new() -> Self {
+        Self::with_user_id_resolver(Arc::new(|token| Some(token.to_owned())))
+    }
+
+    pub fn with_user_id_resolver(user_id_resolver: UserIdResolver) -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
             next_id: AtomicU64::new(1),
+            user_id_resolver,
         }
     }
 
@@ -72,6 +81,19 @@ impl WebSocketManager {
     /// broadcast backpressure is logged and the connection is left alive.
     /// Closed channels trigger client removal.
     pub fn broadcast_all(&self, msg: WebSocketMessage<serde_json::Value>) {
+        self.broadcast_matching(msg, |_| true);
+    }
+
+    /// Send a message only to connections authenticated as `user_id`.
+    ///
+    /// Invalid or expired tokens are skipped. The resolver is injected by the
+    /// composition layer so this crate never needs to know JWT internals.
+    pub fn broadcast_to_user(&self, user_id: &str, msg: WebSocketMessage<serde_json::Value>) {
+        let resolver = Arc::clone(&self.user_id_resolver);
+        self.broadcast_matching(msg, |token| resolver(token).as_deref() == Some(user_id));
+    }
+
+    fn broadcast_matching(&self, msg: WebSocketMessage<serde_json::Value>, predicate: impl Fn(&str) -> bool) {
         let text = match serde_json::to_string(&msg) {
             Ok(t) => t,
             Err(e) => {
@@ -82,6 +104,9 @@ impl WebSocketManager {
 
         let mut disconnected = Vec::new();
         for entry in self.connections.iter() {
+            if !predicate(&entry.value().token) {
+                continue;
+            }
             let conn_id = *entry.key();
             match entry.value().tx.try_send(WsOutbound::Text(text.clone())) {
                 Ok(()) => {}
@@ -172,6 +197,10 @@ impl Default for WebSocketManager {
 impl EventBroadcaster for WebSocketManager {
     fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
         self.broadcast_all(event);
+    }
+
+    fn broadcast_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        WebSocketManager::broadcast_to_user(self, user_id, event);
     }
 }
 
@@ -414,6 +443,27 @@ mod tests {
 
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_err());
+    }
+
+    #[test]
+    fn broadcast_to_user_never_reaches_another_users_connection() {
+        let manager =
+            WebSocketManager::with_user_id_resolver(Arc::new(|token| token.strip_prefix("token:").map(str::to_owned)));
+        let (alice_tx, mut alice_rx) = new_client_tx();
+        let (bob_tx, mut bob_rx) = new_client_tx();
+        let (invalid_tx, mut invalid_rx) = new_client_tx();
+        manager.add_client("token:alice".into(), alice_tx);
+        manager.add_client("token:bob".into(), bob_tx);
+        manager.add_client("invalid".into(), invalid_tx);
+
+        manager.broadcast_to_user(
+            "alice",
+            WebSocketMessage::new("conversation.traceUpdated", json!({"trace_id": "turn-1"})),
+        );
+
+        assert!(alice_rx.try_recv().is_ok());
+        assert!(bob_rx.try_recv().is_err());
+        assert!(invalid_rx.try_recv().is_err());
     }
 
     #[test]

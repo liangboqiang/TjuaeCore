@@ -1,21 +1,21 @@
 #![allow(clippy::disallowed_types)]
 
-//! Agent-related API routes.
+//! Engine-management API routes backed by the internal agent registry.
 //!
 //! Endpoints:
 //!
-//! - `GET  /api/agents/management` — list diagnostics-first agent rows
-//! - `POST /api/agents/custom/try-connect` — test custom agent configuration (e.g. ACP connection)
+//! - `GET  /api/engines/management` — list diagnostics-first engine rows
+//! - `POST /api/engines/{id}/diagnostics` — diagnose one persisted engine
+//! - `POST /api/engines/diagnostics/run` — start a bounded background batch
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{get, post};
 
 use tjuaeui_api_types::{
-    AgentLogoEntry, AgentManagementRow, AgentMetadata, AgentOverridesResponse, ApiResponse, CustomAgentUpsertRequest,
-    DeleteCustomAgentResponse, ProviderHealthCheckRequest, ProviderHealthCheckResponse, SetAgentOverridesRequest,
-    SetEnabledRequest, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
+    AgentDiagnosticRun, AgentLogoEntry, AgentManagementRow, AgentOverridesResponse, ApiResponse,
+    ProviderHealthCheckRequest, ProviderHealthCheckResponse, StartAgentDiagnosticsRequest,
 };
 use tjuaeui_auth::CurrentUser;
 use tjuaeui_common::ApiError;
@@ -23,20 +23,15 @@ use tjuaeui_common::ApiError;
 use crate::routes::error_mapping::agent_error_to_api_error;
 use crate::routes::state::AgentRouterState;
 
-pub fn agent_routes(state: AgentRouterState) -> Router {
+pub fn engine_routes(state: AgentRouterState) -> Router {
     Router::new()
-        .route("/api/agents/logos", get(list_agent_logos))
-        .route("/api/agents/management", get(list_management_agents))
-        .route("/api/agents/{id}/health-check", post(health_check_by_id))
-        .route("/api/agents/provider-health-check", post(provider_health_check))
-        .route("/api/agents/{id}/enabled", patch(set_agent_enabled))
-        .route(
-            "/api/agents/{id}/overrides",
-            get(get_agent_overrides).put(set_agent_overrides),
-        )
-        .route("/api/agents/custom", post(create_custom))
-        .route("/api/agents/custom/{id}", put(update_custom).delete(delete_custom))
-        .route("/api/agents/custom/try-connect", post(try_connect_custom))
+        .route("/api/engines/logos", get(list_agent_logos))
+        .route("/api/engines/management", get(list_management_agents))
+        .route("/api/engines/{id}/diagnostics", post(diagnose_agent_by_id))
+        .route("/api/engines/diagnostics/run", post(start_agent_diagnostics))
+        .route("/api/engines/diagnostics/current", get(current_agent_diagnostics))
+        .route("/api/engines/provider-health-check", post(provider_health_check))
+        .route("/api/engines/{id}/overrides", get(get_agent_overrides))
         .with_state(state)
 }
 
@@ -66,7 +61,7 @@ async fn list_management_agents(
     )))
 }
 
-async fn health_check_by_id(
+async fn diagnose_agent_by_id(
     State(state): State<AgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(id): Path<String>,
@@ -74,10 +69,32 @@ async fn health_check_by_id(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .health_check_agent_by_id(&id)
+            .diagnose_agent_by_id(&id)
             .await
             .map_err(agent_error_to_api_error)?,
     )))
+}
+
+async fn start_agent_diagnostics(
+    State(state): State<AgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<StartAgentDiagnosticsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<AgentDiagnosticRun>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .start_agent_diagnostics(request)
+            .await
+            .map_err(agent_error_to_api_error)?,
+    )))
+}
+
+async fn current_agent_diagnostics(
+    State(state): State<AgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Option<AgentDiagnosticRun>>>, ApiError> {
+    Ok(Json(ApiResponse::ok(state.service.current_agent_diagnostics().await)))
 }
 
 async fn provider_health_check(
@@ -95,81 +112,6 @@ async fn provider_health_check(
     )))
 }
 
-async fn try_connect_custom(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<TryConnectCustomAgentRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<TryConnectCustomAgentResponse>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .try_connect_custom_agent(req)
-            .await
-            .map_err(agent_error_to_api_error)?,
-    )))
-}
-
-async fn create_custom(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<CustomAgentUpsertRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentMetadata>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .create_custom_agent(req)
-            .await
-            .map_err(agent_error_to_api_error)?,
-    )))
-}
-
-async fn update_custom(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
-    body: Result<Json<CustomAgentUpsertRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentMetadata>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .update_custom_agent(&id, req)
-            .await
-            .map_err(agent_error_to_api_error)?,
-    )))
-}
-
-async fn delete_custom(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<DeleteCustomAgentResponse>>, ApiError> {
-    state
-        .service
-        .delete_custom_agent(&id)
-        .await
-        .map_err(agent_error_to_api_error)?;
-    Ok(Json(ApiResponse::ok(DeleteCustomAgentResponse { deleted: true })))
-}
-
-async fn set_agent_enabled(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
-    body: Result<Json<SetEnabledRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentMetadata>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .set_agent_enabled(&id, req.enabled)
-            .await
-            .map_err(agent_error_to_api_error)?,
-    )))
-}
-
 async fn get_agent_overrides(
     State(state): State<AgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -179,22 +121,6 @@ async fn get_agent_overrides(
         state
             .service
             .get_agent_overrides(&id)
-            .await
-            .map_err(agent_error_to_api_error)?,
-    )))
-}
-
-async fn set_agent_overrides(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
-    body: Result<Json<SetAgentOverridesRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentManagementRow>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .set_agent_overrides(&id, req)
             .await
             .map_err(agent_error_to_api_error)?,
     )))

@@ -240,6 +240,10 @@ fn platform_spec() -> Result<PlatformSpec, NodeRuntimeError> {
     }
 }
 
+pub fn managed_node_runtime_key() -> Result<&'static str, NodeRuntimeError> {
+    platform_spec().map(|spec| spec.runtime_key)
+}
+
 pub fn managed_node_contract_for_export(
     bundle_root: &Path,
     exported_node_root: &Path,

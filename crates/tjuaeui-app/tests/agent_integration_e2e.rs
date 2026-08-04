@@ -267,7 +267,7 @@ async fn management_endpoint_keeps_deprecated_runtime_rows_for_diagnostics() {
     services.agent_registry.hydrate().await.unwrap();
     services.agent_registry.refresh_availability().await;
 
-    let req = get_with_token("/api/agents/management", &token);
+    let req = get_with_token("/api/engines/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -299,7 +299,7 @@ async fn management_endpoint_handles_openclaw_as_acp_backend() {
     assert_eq!(meta.args, vec!["acp"]);
     assert_eq!(meta.agent_source, AgentSource::Builtin);
 
-    let req = get_with_token("/api/agents/management", &token);
+    let req = get_with_token("/api/engines/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -309,7 +309,7 @@ async fn management_endpoint_handles_openclaw_as_acp_backend() {
     let openclaw = agents
         .iter()
         .find(|agent| agent["backend"].as_str() == Some("openclaw"))
-        .expect("OpenClaw ACP row should be visible from /api/agents/management");
+        .expect("OpenClaw ACP row should be visible from /api/engines/management");
     assert!(meta.available || openclaw["status"] != "available");
     assert_eq!(openclaw["agent_type"], "acp");
     assert_eq!(openclaw["command"], "openclaw");
@@ -321,7 +321,7 @@ async fn agent_logos_endpoint_returns_backend_to_logo_catalog() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
 
-    let req = get_with_token("/api/agents/logos", &token);
+    let req = get_with_token("/api/engines/logos", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -350,7 +350,7 @@ async fn agent_logos_endpoint_returns_backend_to_logo_catalog() {
     // agent_type ("tjuaecli") so tjuae_cli conversations resolve a logo.
     assert_eq!(
         logo_for("tjuaecli").as_deref(),
-        Some("/api/assets/logos/brand/tjuae-cli.svg")
+        Some("/api/assets/logos/brand/tjuae.svg")
     );
 
     // Every entry carries a non-empty backend + logo, and backends are unique.
@@ -372,7 +372,7 @@ async fn agent_logos_endpoint_includes_disabled_and_missing_rows() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
 
-    // A custom/internal row that would be hidden from /api/agents (no command
+    // A custom/internal row that would be hidden from /api/engines (no command
     // on PATH) must still contribute its logo so historical conversations
     // referencing it can render an icon.
     services
@@ -380,7 +380,7 @@ async fn agent_logos_endpoint_includes_disabled_and_missing_rows() {
         .repo_handle()
         .upsert(&UpsertAgentMetadataParams {
             id: "logo-only-row",
-            icon: Some("/api/assets/logos/brand/tjuae-cli.svg"),
+            icon: Some("/api/assets/logos/brand/tjuae.svg"),
             name: "Logo Only",
             name_i18n: None,
             description: None,
@@ -409,7 +409,7 @@ async fn agent_logos_endpoint_includes_disabled_and_missing_rows() {
     services.agent_registry.hydrate().await.unwrap();
     services.agent_registry.refresh_availability().await;
 
-    let req = get_with_token("/api/agents/logos", &token);
+    let req = get_with_token("/api/engines/logos", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -422,7 +422,7 @@ async fn agent_logos_endpoint_includes_disabled_and_missing_rows() {
         entry.is_some(),
         "disabled row with an icon must still appear in the logo catalog"
     );
-    assert_eq!(entry.unwrap()["logo"], "/api/assets/logos/brand/tjuae-cli.svg");
+    assert_eq!(entry.unwrap()["logo"], "/api/assets/logos/brand/tjuae.svg");
 }
 
 // ── Message flow with mock agent ────────────────────────────────
@@ -622,30 +622,28 @@ async fn side_question_with_mock_agent() {
     );
 }
 
-// ── Agent overrides roundtrip ───────────────────────────────────
+// ── Engine projection overrides are read-only ──────────────────
 
 #[tokio::test]
-async fn agent_overrides_roundtrip_and_management_summary() {
+async fn direct_engine_override_write_is_removed_and_management_stays_redacted() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     upsert_visible_agent_metadata(&services, "ovr-agent", "acp").await;
     services.agent_registry.hydrate().await.unwrap();
     services.agent_registry.refresh_availability().await;
 
-    // PUT overrides
+    // Runtime configuration must go through the typed local asset Overlay.
+    // The legacy direct projection write route is deliberately read-only.
     let body = json!({
         "command_override": "true",
         "env_override": [{"name": "ANTHROPIC_API_KEY", "value": "sk-x"}, {"name": "PATH", "value": "/evil"}]
     });
-    let req = json_with_token("PUT", "/api/agents/ovr-agent/overrides", body, &token, &csrf);
+    let req = json_with_token("PUT", "/api/engines/ovr-agent/overrides", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let put_body = body_json(resp).await;
-    assert_eq!(put_body["data"]["last_check_kind"], "manual");
-    assert_eq!(put_body["data"]["last_check_status"], "offline");
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    // management row: safe fields, blocked PATH not counted
-    let mreq = get_with_token("/api/agents/management", &token);
+    // The rejected request cannot change the diagnostic projection.
+    let mreq = get_with_token("/api/engines/management", &token);
     let mbody = body_json(app.clone().oneshot(mreq).await.unwrap()).await;
     let mbody_str = serde_json::to_string(&mbody).unwrap();
     let row = mbody["data"]
@@ -654,8 +652,8 @@ async fn agent_overrides_roundtrip_and_management_summary() {
         .iter()
         .find(|r| r["id"] == "ovr-agent")
         .expect("row present");
-    assert_eq!(row["has_command_override"], true);
-    assert_eq!(row["env_override_key_count"], 1); // PATH excluded
+    assert_eq!(row["has_command_override"], false);
+    assert_eq!(row["env_override_key_count"], 0);
     assert!(
         row["env"].as_array().is_none_or(|arr| arr.is_empty()),
         "management row env must be empty or absent"
@@ -665,16 +663,16 @@ async fn agent_overrides_roundtrip_and_management_summary() {
         "management response must not leak secret values"
     );
 
-    // GET overrides: plaintext echo
-    let greq = get_with_token("/api/agents/ovr-agent/overrides", &token);
+    // The read-only diagnostic endpoint never echoes the rejected secret.
+    let greq = get_with_token("/api/engines/ovr-agent/overrides", &token);
     let gbody = body_json(app.clone().oneshot(greq).await.unwrap()).await;
-    assert_eq!(gbody["data"]["command_override"], "true");
+    assert!(gbody["data"]["command_override"].is_null());
     let envs = gbody["data"]["env_override"].as_array().unwrap();
-    assert!(envs.iter().any(|e| e["name"] == "ANTHROPIC_API_KEY"));
+    assert!(envs.is_empty());
 }
 
 #[tokio::test]
-async fn npx_bridged_agent_rejects_command_override() {
+async fn npx_bridged_agent_has_no_direct_override_write_route() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
 
@@ -714,38 +712,31 @@ async fn npx_bridged_agent_rejects_command_override() {
     services.agent_registry.hydrate().await.unwrap();
     services.agent_registry.refresh_availability().await;
 
-    // A launch-path (command) override must be rejected for bridge-launched rows,
-    // otherwise the npx wrapper args get forwarded to the resolved binary.
+    // Both command and environment configuration belong to the typed asset
+    // Overlay, so the internal projection endpoint has no PUT handler.
     let command_body = json!({
         "command_override": "C:\\Users\\aixux\\AppData\\Roaming\\npm\\kilo.cmd"
     });
-    let req = json_with_token("PUT", "/api/agents/npx-agent/overrides", command_body, &token, &csrf);
+    let req = json_with_token("PUT", "/api/engines/npx-agent/overrides", command_body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    // Env-only overrides remain allowed for the same npx agent (API keys, proxies, …).
     let env_body = json!({
         "env_override": [{"name": "ANTHROPIC_API_KEY", "value": "sk-x"}]
     });
-    let req = json_with_token("PUT", "/api/agents/npx-agent/overrides", env_body, &token, &csrf);
+    let req = json_with_token("PUT", "/api/engines/npx-agent/overrides", env_body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    // The rejected command override must not have been persisted.
-    let greq = get_with_token("/api/agents/npx-agent/overrides", &token);
+    // Neither rejected write may be persisted.
+    let greq = get_with_token("/api/engines/npx-agent/overrides", &token);
     let gbody = body_json(app.clone().oneshot(greq).await.unwrap()).await;
     assert!(gbody["data"]["command_override"].is_null());
-    assert!(
-        gbody["data"]["env_override"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["name"] == "ANTHROPIC_API_KEY")
-    );
+    assert!(gbody["data"]["env_override"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn internal_tjuae_cli_rejects_overrides() {
+async fn internal_tjuae_cli_has_no_direct_override_write_route() {
     let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     upsert_visible_agent_metadata(&services, "632f31d2", "tjuaecli").await;
@@ -756,18 +747,18 @@ async fn internal_tjuae_cli_rejects_overrides() {
         "command_override": "irm https://claude.ai/install.ps1 | iex",
         "env_override": [{"name": "ANTHROPIC_API_KEY", "value": "sk-x"}]
     });
-    let req = json_with_token("PUT", "/api/agents/632f31d2/overrides", command_body, &token, &csrf);
+    let req = json_with_token("PUT", "/api/engines/632f31d2/overrides", command_body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     let env_body = json!({
         "env_override": [{"name": "ANTHROPIC_API_KEY", "value": "sk-x"}]
     });
-    let req = json_with_token("PUT", "/api/agents/632f31d2/overrides", env_body, &token, &csrf);
+    let req = json_with_token("PUT", "/api/engines/632f31d2/overrides", env_body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    let greq = get_with_token("/api/agents/632f31d2/overrides", &token);
+    let greq = get_with_token("/api/engines/632f31d2/overrides", &token);
     let gbody = body_json(app.clone().oneshot(greq).await.unwrap()).await;
     assert!(gbody["data"]["command_override"].is_null());
     assert!(gbody["data"]["env_override"].as_array().unwrap().is_empty());

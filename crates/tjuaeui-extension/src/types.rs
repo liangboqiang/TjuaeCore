@@ -87,106 +87,6 @@ pub struct PermissionSummary {
 // B. Contribution types (what an extension provides)
 // ---------------------------------------------------------------------------
 
-/// ACP adapter contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtAcpAdapter {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_args: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_required: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_mode: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub api_key_fields: Vec<serde_json::Value>,
-}
-
-/// MCP server contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtMcpServer {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(flatten)]
-    pub config: serde_json::Value,
-}
-
-/// Assistant contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtAssistant {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "agentId")]
-    pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enabledSkills")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
-/// Autonomous agent contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtAgent {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enabledSkills")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
-/// Skill contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtSkill {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 /// Theme contributed by an extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtTheme {
@@ -239,7 +139,7 @@ pub struct ExtWebui {
 /// Settings tab position relative to a built-in tab.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SettingsTabPosition {
-    #[serde(rename = "relativeTo", alias = "anchor", alias = "relative_to")]
+    #[serde(rename = "relativeTo")]
     pub relative_to: String,
     pub placement: String,
 }
@@ -252,11 +152,9 @@ fn default_settings_tab_order() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtSettingsTab {
     pub id: String,
-    #[serde(alias = "name")]
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    #[serde(alias = "entryPoint")]
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<SettingsTabPosition>,
@@ -281,17 +179,8 @@ pub struct ExtModelProvider {
 
 /// All contributions declared by an extension.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ExtContributes {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_adapters: Vec<ExtAcpAdapter>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<ExtMcpServer>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assistants: Vec<ExtAssistant>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<ExtAgent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<ExtSkill>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub themes: Vec<ExtTheme>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -327,21 +216,10 @@ pub struct EngineConfig {
     pub tjuae: Option<String>,
 }
 
-/// Lifecycle hook declarations (paths relative to extension root).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct LifecycleHooks {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_install: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_uninstall: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_activate: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_deactivate: Option<String>,
-}
-
-/// Complete extension manifest parsed from `tjuae-extension.json`.
+/// 应用扩展清单。助手、引擎适配器、技能和 MCP 均属于 Core
+/// 资产，不能通过此清单声明或安装。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionManifest {
     pub name: String,
     pub version: String,
@@ -369,8 +247,6 @@ pub struct ExtensionManifest {
     pub permissions: Option<ExtPermissions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contributes: Option<ExtContributes>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle: Option<LifecycleHooks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub i18n: Option<I18nConfig>,
 }
@@ -436,148 +312,8 @@ pub struct ExtensionLifecyclePayload {
 }
 
 // ---------------------------------------------------------------------------
-// F. Hub types
+// F. Resolved contribution types (post-processing output)
 // ---------------------------------------------------------------------------
-
-/// Installation status of a Hub extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HubExtensionStatus {
-    NotInstalled,
-    Installed,
-    UpdateAvailable,
-    Installing,
-    InstallFailed,
-}
-
-/// A Hub extension entry with runtime status.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubExtensionWithStatus {
-    pub name: String,
-    pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub bundled: bool,
-    pub status: HubExtensionStatus,
-}
-
-// ---------------------------------------------------------------------------
-// G. Resolved contribution types (post-processing output)
-// ---------------------------------------------------------------------------
-
-/// Resolved ACP adapter (after env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedAcpAdapter {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acp_args: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_required: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_streaming: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_mode: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub api_key_fields: Vec<serde_json::Value>,
-}
-
-/// Resolved MCP server (after env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedMcpServer {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(flatten)]
-    pub config: serde_json::Value,
-}
-
-/// Resolved assistant (after @file: and env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedAssistant {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
-/// Resolved agent (after @file: and env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedAgent {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
-/// Resolved skill contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedSkill {
-    pub extension_name: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
 
 /// Resolved theme (CSS content loaded into memory).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -660,11 +396,6 @@ pub struct ResolvedModelProvider {
 /// All resolved contributions from enabled extensions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ResolvedContributions {
-    pub acp_adapters: Vec<ResolvedAcpAdapter>,
-    pub mcp_servers: Vec<ResolvedMcpServer>,
-    pub assistants: Vec<ResolvedAssistant>,
-    pub agents: Vec<ResolvedAgent>,
-    pub skills: Vec<ResolvedSkill>,
     pub themes: Vec<ResolvedTheme>,
     pub channel_plugins: Vec<ResolvedChannelPlugin>,
     pub webui: Vec<WebuiContribution>,

@@ -11,10 +11,9 @@ tjuaeui-common = { workspace = true }
 tjuaeui-api-types = { workspace = true }
 tjuaeui-db = { workspace = true }
 tjuaeui-auth = { workspace = true }
-tjuaeui-extension = { workspace = true }
+tjuaeui-asset = { workspace = true }
 axum = { workspace = true }
 dirs = { workspace = true }
-include_dir = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

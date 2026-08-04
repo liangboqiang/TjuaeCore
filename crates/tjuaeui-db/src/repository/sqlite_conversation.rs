@@ -475,12 +475,11 @@ impl IConversationRepository for SqliteConversationRepository {
                 resolved_thought_level_value,
                 default_skills_mode,
                 resolved_skill_ids,
-                resolved_disabled_builtin_skill_ids,
                 default_mcps_mode,
                 resolved_mcp_ids,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
                 assistant_definition_id = excluded.assistant_definition_id,
                 assistant_id = excluded.assistant_id,
@@ -495,7 +494,6 @@ impl IConversationRepository for SqliteConversationRepository {
                 resolved_thought_level_value = excluded.resolved_thought_level_value,
                 default_skills_mode = excluded.default_skills_mode,
                 resolved_skill_ids = excluded.resolved_skill_ids,
-                resolved_disabled_builtin_skill_ids = excluded.resolved_disabled_builtin_skill_ids,
                 default_mcps_mode = excluded.default_mcps_mode,
                 resolved_mcp_ids = excluded.resolved_mcp_ids,
                 updated_at = excluded.updated_at",
@@ -514,7 +512,6 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(params.resolved_thought_level_value)
         .bind(params.default_skills_mode)
         .bind(params.resolved_skill_ids)
-        .bind(params.resolved_disabled_builtin_skill_ids)
         .bind(params.default_mcps_mode)
         .bind(params.resolved_mcp_ids)
         .bind(now)

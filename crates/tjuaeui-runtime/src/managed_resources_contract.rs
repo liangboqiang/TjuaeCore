@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub const MANAGED_RESOURCES_CONTRACT_FILE: &str = "manifest.json";
-pub const MANAGED_RESOURCES_CONTRACT_SCHEMA_VERSION: u8 = 2;
-const REQUIRED_CLI_NAMES: [&str; 2] = ["claude", "codex"];
+pub const MANAGED_RESOURCES_CONTRACT_SCHEMA_VERSION: u8 = 3;
 const SUPPORTED_RUNTIME_KEYS: [&str; 6] = [
     "win32-x64",
     "win32-arm64",
@@ -15,46 +13,25 @@ const SUPPORTED_RUNTIME_KEYS: [&str; 6] = [
     "linux-arm64",
 ];
 
+/// Internal runtimes shipped by Tjuae.
+///
+/// Third-party agent CLIs are deliberately absent: users install and update
+/// them independently, while Core only probes commands already present on the
+/// host. Keeping this contract Node-only makes that boundary machine-verifiable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedResourcesContract {
     pub schema_version: u8,
     pub runtime_key: String,
     pub node: ManagedNodeResourceContract,
-    pub clis: Vec<ManagedCliResourceContract>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedNodeResourceContract {
     pub version: String,
     pub root: String,
     pub executable: String,
-}
-
-/// A bundled agent CLI (claude / codex). Unlike the removed ACP-tool contract
-/// there is no node bridge or local manifest — the CLI is a native binary (plus,
-/// for codex, sidecars under its `vendor/<triple>` subtree captured via
-/// `required_files` / `required_directories`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManagedCliResourceContract {
-    pub name: String,
-    pub version: String,
-    /// Relative to the managed-resources root, e.g. `cli/claude/2.1.215/darwin-arm64`.
-    pub root: String,
-    /// Must equal the contract `runtime_key`.
-    pub platform_directory: String,
-    /// The main executable, relative to `root` (e.g. `claude` or
-    /// `vendor/aarch64-apple-darwin/bin/codex`).
-    pub executable: String,
-    /// Extra files that must exist relative to `root` (e.g. codex sidecars
-    /// `codex-path/rg`, `codex-resources/zsh/bin/zsh`). May be empty (claude).
-    #[serde(default)]
-    pub required_files: Vec<String>,
-    /// Extra directories that must exist relative to `root`. May be empty.
-    #[serde(default)]
-    pub required_directories: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,14 +56,21 @@ pub fn validate_contract(
     root: &Path,
     contract: &ManagedResourcesContract,
 ) -> Result<(), ManagedResourcesContractError> {
-    validate_schema(contract)?;
-    validate_node_schema(&contract.node)?;
-    validate_clis_schema(contract)?;
-    validate_node_paths(root, &contract.node)?;
-    for cli in &contract.clis {
-        validate_cli_paths(root, cli)?;
+    if contract.schema_version != MANAGED_RESOURCES_CONTRACT_SCHEMA_VERSION {
+        return Err(ManagedResourcesContractError::invalid(format!(
+            "unsupported schemaVersion {}",
+            contract.schema_version
+        )));
     }
-    Ok(())
+    require_non_empty("runtimeKey", &contract.runtime_key)?;
+    if !SUPPORTED_RUNTIME_KEYS.contains(&contract.runtime_key.as_str()) {
+        return Err(ManagedResourcesContractError::invalid(format!(
+            "unsupported runtimeKey {}",
+            contract.runtime_key
+        )));
+    }
+    validate_node_schema(&contract.node)?;
+    validate_node_paths(root, &contract.node)
 }
 
 pub fn write_contract(
@@ -116,70 +100,10 @@ pub fn relative_contract_path(base: &Path, path: &Path) -> Result<String, Manage
     Ok(value)
 }
 
-fn validate_schema(contract: &ManagedResourcesContract) -> Result<(), ManagedResourcesContractError> {
-    if contract.schema_version != MANAGED_RESOURCES_CONTRACT_SCHEMA_VERSION {
-        return Err(ManagedResourcesContractError::invalid(format!(
-            "unsupported schemaVersion {}",
-            contract.schema_version
-        )));
-    }
-    require_non_empty("runtimeKey", &contract.runtime_key)?;
-    if !SUPPORTED_RUNTIME_KEYS.contains(&contract.runtime_key.as_str()) {
-        return Err(ManagedResourcesContractError::invalid(format!(
-            "unsupported runtimeKey {}",
-            contract.runtime_key
-        )));
-    }
-    Ok(())
-}
-
 fn validate_node_schema(node: &ManagedNodeResourceContract) -> Result<(), ManagedResourcesContractError> {
     require_non_empty("node.version", &node.version)?;
     validate_contract_relative_path_field("node.root", &node.root)?;
-    validate_contract_relative_path_field("node.executable", &node.executable)?;
-    Ok(())
-}
-
-fn validate_clis_schema(contract: &ManagedResourcesContract) -> Result<(), ManagedResourcesContractError> {
-    let mut names = HashSet::new();
-
-    for cli in &contract.clis {
-        require_non_empty("clis[].name", &cli.name)?;
-        if !names.insert(cli.name.as_str()) {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "duplicate clis name {}",
-                cli.name
-            )));
-        }
-
-        let label = format!("clis[{}]", cli.name);
-        require_non_empty(format!("{label}.version"), &cli.version)?;
-        validate_contract_relative_path_field(format!("{label}.root"), &cli.root)?;
-        require_non_empty(format!("{label}.platformDirectory"), &cli.platform_directory)?;
-        if cli.platform_directory != contract.runtime_key {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "clis[{}].platformDirectory {} does not match runtimeKey {}",
-                cli.name, cli.platform_directory, contract.runtime_key
-            )));
-        }
-        validate_contract_relative_path_field(format!("{label}.executable"), &cli.executable)?;
-        for (index, entry) in cli.required_files.iter().enumerate() {
-            validate_contract_relative_path_field(format!("{label}.requiredFiles[{index}]"), entry)?;
-        }
-        for (index, entry) in cli.required_directories.iter().enumerate() {
-            validate_contract_relative_path_field(format!("{label}.requiredDirectories[{index}]"), entry)?;
-        }
-    }
-
-    for required_name in REQUIRED_CLI_NAMES {
-        if !names.contains(required_name) {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "missing required clis name {required_name}"
-            )));
-        }
-    }
-
-    Ok(())
+    validate_contract_relative_path_field("node.executable", &node.executable)
 }
 
 fn validate_node_paths(root: &Path, node: &ManagedNodeResourceContract) -> Result<(), ManagedResourcesContractError> {
@@ -197,45 +121,6 @@ fn validate_node_paths(root: &Path, node: &ManagedNodeResourceContract) -> Resul
             executable.display()
         )));
     }
-    Ok(())
-}
-
-fn validate_cli_paths(root: &Path, cli: &ManagedCliResourceContract) -> Result<(), ManagedResourcesContractError> {
-    let cli_root = root.join(&cli.root);
-    if !cli_root.is_dir() {
-        return Err(ManagedResourcesContractError::invalid(format!(
-            "required directory missing: {}",
-            cli_root.display()
-        )));
-    }
-
-    let executable = cli_root.join(&cli.executable);
-    if !executable.is_file() {
-        return Err(ManagedResourcesContractError::invalid(format!(
-            "required file missing: {}",
-            executable.display()
-        )));
-    }
-
-    for required_file in &cli.required_files {
-        let path = cli_root.join(required_file);
-        if !path.is_file() {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "required file missing: {}",
-                path.display()
-            )));
-        }
-    }
-    for required_directory in &cli.required_directories {
-        let path = cli_root.join(required_directory);
-        if !path.is_dir() {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "required directory missing: {}",
-                path.display()
-            )));
-        }
-    }
-
     Ok(())
 }
 
@@ -282,104 +167,48 @@ mod tests {
                 root: "node/node-v24.11.0-win-x64".into(),
                 executable: "node.exe".into(),
             },
-            clis: vec![
-                ManagedCliResourceContract {
-                    name: "claude".into(),
-                    version: "2.1.215".into(),
-                    root: "cli/claude/2.1.215/win32-x64".into(),
-                    platform_directory: "win32-x64".into(),
-                    executable: "claude.exe".into(),
-                    required_files: vec![],
-                    required_directories: vec![],
-                },
-                ManagedCliResourceContract {
-                    name: "codex".into(),
-                    version: "0.144.6".into(),
-                    root: "cli/codex/0.144.6/win32-x64".into(),
-                    platform_directory: "win32-x64".into(),
-                    executable: "vendor/x86_64-pc-windows-msvc/bin/codex.exe".into(),
-                    required_files: vec!["vendor/x86_64-pc-windows-msvc/codex-path/rg.exe".into()],
-                    required_directories: vec!["vendor/x86_64-pc-windows-msvc".into()],
-                },
-            ],
         }
     }
 
     #[test]
-    fn contract_serializes_v2_camel_case_schema() {
-        let contract = example_contract("win32-x64");
-        let value = serde_json::to_value(&contract).expect("serialize");
-
-        assert_eq!(value["schemaVersion"], 2);
+    fn contract_serializes_node_only_v3_schema() {
+        let value = serde_json::to_value(example_contract("win32-x64")).expect("serialize");
+        assert_eq!(value["schemaVersion"], 3);
         assert_eq!(value["runtimeKey"], "win32-x64");
-        assert!(value.get("schema_version").is_none());
-        assert_eq!(value["clis"][0]["name"], "claude");
-        assert_eq!(
-            value["clis"][1]["executable"],
-            "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
-        );
+        assert!(value.get("clis").is_none());
     }
 
     #[test]
-    fn validate_contract_rejects_duplicate_cli_names() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut contract = example_contract("win32-x64");
-        contract.clis[1].name = "claude".into();
-
-        let error = validate_contract(temp.path(), &contract).expect_err("duplicate name should fail");
-
-        assert!(error.to_string().contains("duplicate clis name claude"));
+    fn contract_deserialization_rejects_third_party_cli_payloads() {
+        let value = serde_json::json!({
+            "schemaVersion": 3,
+            "runtimeKey": "win32-x64",
+            "node": {
+                "version": "24.11.0",
+                "root": "node/node-v24.11.0-win-x64",
+                "executable": "node.exe"
+            },
+            "clis": [{"name": "codex"}]
+        });
+        assert!(serde_json::from_value::<ManagedResourcesContract>(value).is_err());
     }
 
     #[test]
-    fn validate_contract_rejects_missing_required_cli_name() {
+    fn validate_contract_rejects_unsafe_node_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut contract = example_contract("win32-x64");
-        contract.clis.retain(|cli| cli.name != "codex");
-
-        let error = validate_contract(temp.path(), &contract).expect_err("missing required name should fail");
-
-        assert!(error.to_string().contains("missing required clis name codex"));
-    }
-
-    #[test]
-    fn validate_contract_rejects_unsafe_relative_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        for bad in ["/abs/path", "cli\\claude", "", "../escape", "cli/../escape"] {
+        for bad in ["/abs/path", "node\\runtime", "", "../escape", "node/../escape"] {
             let mut contract = example_contract("win32-x64");
-            contract.clis[0].root = bad.into();
-
+            contract.node.root = bad.into();
             let error = validate_contract(temp.path(), &contract).expect_err("unsafe path should fail");
-
             assert!(error.to_string().contains("invalid relative contract path"), "{error}");
         }
     }
 
     #[test]
-    fn validate_contract_rejects_platform_mismatch() {
+    fn validate_contract_rejects_missing_node_runtime() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut contract = example_contract("win32-x64");
-        contract.clis[0].platform_directory = "linux-x64".into();
-
-        let error = validate_contract(temp.path(), &contract).expect_err("platform mismatch should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("platformDirectory linux-x64 does not match runtimeKey win32-x64")
-        );
-    }
-
-    #[test]
-    fn validate_contract_rejects_missing_required_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let contract = example_contract("win32-x64");
-        std::fs::create_dir_all(temp.path().join("node").join("node-v24.11.0-win-x64")).expect("create node root");
-
-        let error = validate_contract(temp.path(), &contract).expect_err("missing paths should fail");
-
-        assert!(
-            error.to_string().contains("required file missing")
-                || error.to_string().contains("required directory missing")
-        );
+        let error =
+            validate_contract(temp.path(), &example_contract("win32-x64")).expect_err("missing node should fail");
+        assert!(error.to_string().contains("required directory missing"));
     }
 }

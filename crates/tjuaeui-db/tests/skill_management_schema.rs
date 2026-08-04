@@ -25,32 +25,12 @@ async fn migration_creates_skill_management_tables() {
         ]
     );
 
-    let import_columns: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM pragma_table_info('skill_import_records') ORDER BY cid")
-            .fetch_all(pool)
+    let import_table_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'skill_import_records'")
+            .fetch_one(pool)
             .await
             .unwrap();
-    let import_columns: Vec<String> = import_columns.into_iter().map(|row| row.0).collect();
-    assert_eq!(
-        import_columns,
-        vec![
-            "id",
-            "operation_id",
-            "source_label",
-            "source_path",
-            "source_name",
-            "skill_id",
-            "skill_name",
-            "status",
-            "error_code",
-            "error_path",
-            "actual_bytes",
-            "limit_bytes",
-            "line",
-            "column",
-            "created_at",
-        ]
-    );
+    assert_eq!(import_table_count, 0);
 }
 
 #[tokio::test]

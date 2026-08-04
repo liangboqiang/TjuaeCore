@@ -15,7 +15,7 @@ use tjuaeui_ai_agent::types::{
 };
 use tjuaeui_ai_agent::{
     AcpError, AgentAvailabilityFeedbackPort, AgentError, AgentSendError, AgentSessionKind, IWorkerTaskManager,
-    RuntimeTokenService,
+    RuntimeAssetLoadReceipt, RuntimeTokenService, core_only_runtime_asset_receipt,
 };
 
 use serde_json::json;
@@ -28,34 +28,66 @@ use tjuaeui_api_types::{
     CloneConversationRequest, CreateConversationRequest, ListConversationsQuery, SearchMessagesQuery,
     SendMessageRequest, UpdateConversationRequest, WebSocketMessage,
 };
+use tjuaeui_asset::{AssetError, AssistantRuleDispatcher};
 use tjuaeui_common::{
     AgentKillReason, AgentType, Confirmation, ConversationSource, ConversationStatus, PaginatedResult,
     ProviderWithModel, TimestampMs,
 };
 use tjuaeui_db::models::{
     AcpSessionRow, AgentMetadataRow, ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow,
-    MessageRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams,
+    ConversationTraceRuntimeAssetRefRow, ConversationTraceRuntimeAssetSnapshotRow, MessageRow,
+    UpdateAgentHandshakeParams, UpsertAgentMetadataParams,
 };
 use tjuaeui_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, DbError, IAcpSessionRepository,
     IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
     IAssistantPreferenceRepository, IConversationRepository, MessageRowUpdate, MessageSearchRow, PersistedSessionState,
     SaveRuntimeStateParams, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
-    SqliteAssistantPreferenceRepository, UpdateAgentAvailabilitySnapshotParams, UpsertAssistantDefinitionParams,
-    UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams,
-    init_database_memory,
+    SqliteAssistantPreferenceRepository, SqliteConversationRepository, SqliteConversationTraceRepository,
+    UpdateAgentAvailabilitySnapshotParams, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
+    UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams, init_database_memory,
 };
-use tjuaeui_db::{MessagePageCursor, MessagePageDirection, MessagePageParams, MessagePageResult};
-use tjuaeui_extension::{AssistantRuleDispatcher, ExtensionError};
+use tjuaeui_db::{
+    ConversationTraceRow, IConversationTraceRepository, MessagePageCursor, MessagePageDirection, MessagePageParams,
+    MessagePageResult,
+};
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::{Notify, broadcast};
 
 use crate::service::ConversationService;
-use crate::skill_resolver::{FixedSkillResolver, ResolvedAgentSkill, SkillResolver};
+use crate::skill_resolver::{
+    FixedSkillResolver, ResolvedAgentSkill, ResolvedRuntimeSkill, RuntimeSkillResolutionError, SkillResolver,
+};
 use crate::{ConversationAgentTurnRequest, ConversationAgentTurnStatus, ConversationError};
 
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
+#[path = "service_test/runtime_asset_provenance_test.rs"]
+mod runtime_asset_provenance_test;
+
+#[test]
+fn turn_ids_embed_a_full_128_bit_uuid() {
+    let turn_id = ConversationService::mint_turn_id();
+    let uuid = turn_id
+        .strip_prefix("turn_")
+        .expect("turn id must keep the public turn_ prefix");
+    assert_eq!(uuid.len(), 36);
+    assert_eq!(
+        uuid.chars()
+            .enumerate()
+            .filter_map(|(index, ch)| (ch == '-').then_some(index))
+            .collect::<Vec<_>>(),
+        vec![8, 13, 18, 23]
+    );
+    assert_eq!(
+        uuid.chars()
+            .filter(|ch| *ch != '-')
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .count(),
+        32,
+        "turn id must carry all 128 UUID bits rather than an 8-hex short id"
+    );
+}
 
 #[derive(Clone, Debug)]
 struct SkillLinkCall {
@@ -65,8 +97,8 @@ struct SkillLinkCall {
 }
 
 struct RecordingSkillResolver {
-    names: Vec<String>,
     links: Arc<Mutex<Vec<SkillLinkCall>>>,
+    runtime_assets: Mutex<std::collections::HashMap<String, ResolvedRuntimeSkill>>,
 }
 
 struct StaticAssistantDispatcher {
@@ -75,52 +107,86 @@ struct StaticAssistantDispatcher {
 
 #[async_trait::async_trait]
 impl AssistantRuleDispatcher for StaticAssistantDispatcher {
-    async fn read_rule(&self, id: &str, _locale: Option<&str>) -> Result<String, ExtensionError> {
+    async fn read_rule(&self, _user_id: &str, id: &str, _locale: Option<&str>) -> Result<String, AssetError> {
         Ok(self.rules.get(id).cloned().unwrap_or_default())
-    }
-
-    async fn write_rule(&self, _id: &str, _locale: Option<&str>, _content: &str) -> Result<(), ExtensionError> {
-        Ok(())
-    }
-
-    async fn delete_rule(&self, _id: &str) -> Result<bool, ExtensionError> {
-        Ok(true)
-    }
-
-    async fn read_skill(&self, _id: &str, _locale: Option<&str>) -> Result<String, ExtensionError> {
-        Ok(String::new())
-    }
-
-    async fn write_skill(&self, _id: &str, _locale: Option<&str>, _content: &str) -> Result<(), ExtensionError> {
-        Ok(())
-    }
-
-    async fn delete_skill(&self, _id: &str) -> Result<bool, ExtensionError> {
-        Ok(true)
     }
 }
 
 impl RecordingSkillResolver {
-    fn new(names: Vec<String>) -> Self {
+    fn new() -> Self {
         Self {
-            names,
             links: Arc::new(Mutex::new(Vec::new())),
+            runtime_assets: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    fn register_local_runtime_skill(&self, reference: &str, local_asset_id: &str) {
+        let source_path = std::env::temp_dir().join(format!(
+            "skill-source-{reference}-{}",
+            tjuaeui_common::generate_short_id()
+        ));
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::write(source_path.join("SKILL.md"), format!("# {reference}\n")).unwrap();
+        let local_definition_digest = tjuaeui_asset::scan_definition(&source_path).unwrap().digest;
+        self.runtime_assets.lock().unwrap().insert(
+            reference.to_owned(),
+            ResolvedRuntimeSkill {
+                name: reference.to_owned(),
+                source_path,
+                provenance: tjuaeui_asset::RuntimeAssetProvenance {
+                    local_asset_id: local_asset_id.to_owned(),
+                    kind: tjuaeui_api_types::AssetKind::Skill,
+                    local_definition_digest,
+                    runtime_id: reference.to_owned(),
+                    upstream_package: None,
+                    upstream_asset_id: None,
+                    upstream_version: None,
+                    upstream_revision: None,
+                },
+            },
+        );
     }
 }
 
 #[async_trait::async_trait]
 impl SkillResolver for RecordingSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        self.names.clone()
-    }
-
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill> {
         names
             .iter()
-            .map(|name| ResolvedAgentSkill {
-                name: name.clone(),
-                source_path: std::env::temp_dir().join(format!("skill-source-{name}")),
+            .map(|name| {
+                let source_path = self
+                    .runtime_assets
+                    .lock()
+                    .unwrap()
+                    .get(name)
+                    .map(|asset| asset.source_path.clone())
+                    .unwrap_or_else(|| {
+                        let source_path = std::env::temp_dir().join(format!("skill-source-{name}"));
+                        std::fs::create_dir_all(&source_path).unwrap();
+                        std::fs::write(source_path.join("SKILL.md"), format!("# {name}\n")).unwrap();
+                        source_path
+                    });
+                ResolvedAgentSkill {
+                    name: name.clone(),
+                    source_path,
+                }
+            })
+            .collect()
+    }
+
+    async fn resolve_runtime_skills(
+        &self,
+        _user_id: &str,
+        references: &[String],
+    ) -> Result<Vec<ResolvedRuntimeSkill>, RuntimeSkillResolutionError> {
+        let runtime_assets = self.runtime_assets.lock().unwrap();
+        references
+            .iter()
+            .map(|reference| {
+                runtime_assets
+                    .get(reference)
+                    .cloned()
+                    .ok_or_else(|| RuntimeSkillResolutionError::ProjectionMissing(reference.clone()))
             })
             .collect()
     }
@@ -380,7 +446,6 @@ impl IConversationRepository for MockRepo {
             resolved_thought_level_value: params.resolved_thought_level_value.map(ToOwned::to_owned),
             default_skills_mode: params.default_skills_mode.to_owned(),
             resolved_skill_ids: params.resolved_skill_ids.to_owned(),
-            resolved_disabled_builtin_skill_ids: params.resolved_disabled_builtin_skill_ids.to_owned(),
             default_mcps_mode: params.default_mcps_mode.to_owned(),
             resolved_mcp_ids: params.resolved_mcp_ids.to_owned(),
             created_at: 1,
@@ -993,7 +1058,7 @@ fn make_service() -> (
     Arc<MockRepo>,
     Arc<dyn IWorkerTaskManager>,
 ) {
-    make_service_with_resolver(Arc::new(FixedSkillResolver { names: vec![] }))
+    make_service_with_resolver(Arc::new(FixedSkillResolver))
 }
 
 fn make_service_with_resolver(
@@ -1047,7 +1112,7 @@ fn make_service_with_workspace_root(
     let svc = ConversationService::new(
         workspace_root,
         broadcaster.clone(),
-        Arc::new(FixedSkillResolver { names: vec![] }),
+        Arc::new(FixedSkillResolver),
         task_mgr.clone(),
         repo.clone(),
         agent_metadata_repo,
@@ -1090,7 +1155,7 @@ fn make_service_with_mock_task_manager(
     let svc = ConversationService::new(
         std::env::temp_dir(),
         broadcaster.clone(),
-        Arc::new(FixedSkillResolver { names: vec![] }),
+        Arc::new(FixedSkillResolver),
         task_mgr_dyn,
         repo.clone(),
         agent_metadata_repo,
@@ -1296,7 +1361,6 @@ async fn upsert_test_assistant_definition_with_thought_level(
         default_skills_mode: "auto",
         default_skill_ids: "[]",
         custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
         default_mcps_mode: "auto",
         default_mcp_ids: "[]",
     })
@@ -1639,7 +1703,7 @@ async fn create_stores_model_as_json() {
 
 #[tokio::test]
 async fn create_derives_tjuae_cli_type_from_assistant_backend_when_type_is_missing() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -1690,7 +1754,7 @@ async fn create_derives_tjuae_cli_type_from_assistant_backend_when_type_is_missi
 
 #[tokio::test]
 async fn create_derives_acp_type_from_assistant_backend_when_type_is_missing() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -1736,7 +1800,7 @@ async fn create_derives_acp_type_from_assistant_backend_when_type_is_missing() {
 
 #[tokio::test]
 async fn create_derives_acp_type_from_openclaw_agent_metadata_when_type_is_missing() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -1784,7 +1848,7 @@ async fn create_derives_acp_type_from_openclaw_agent_metadata_when_type_is_missi
 
 #[tokio::test]
 async fn create_derives_acp_type_from_custom_agent_metadata_when_type_is_missing() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -1833,7 +1897,7 @@ async fn create_derives_acp_type_from_custom_agent_metadata_when_type_is_missing
 
 #[tokio::test]
 async fn create_rejects_assistant_bound_to_deprecated_agent_metadata() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -1882,7 +1946,7 @@ async fn create_rejects_assistant_bound_to_deprecated_agent_metadata() {
 
 #[tokio::test]
 async fn create_rejects_assistant_with_unregistered_agent_metadata() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -2546,6 +2610,7 @@ struct MockAgent {
     confirmations: Mutex<Vec<Confirmation>>,
     approval_memory: Mutex<std::collections::HashMap<String, bool>>,
     allow_direct_confirm: bool,
+    runtime_asset_receipt: Mutex<Option<RuntimeAssetLoadReceipt>>,
     /// Optional workspace override; falls back to "/tmp/test" when `None`.
     workspace_override: Option<String>,
 }
@@ -2585,6 +2650,7 @@ impl MockAgent {
             confirmations: Mutex::new(vec![]),
             approval_memory: Mutex::new(std::collections::HashMap::new()),
             allow_direct_confirm: false,
+            runtime_asset_receipt: Mutex::new(None),
             workspace_override: None,
         }
     }
@@ -2604,6 +2670,7 @@ impl MockAgent {
             confirmations: Mutex::new(confirmations),
             approval_memory: Mutex::new(std::collections::HashMap::new()),
             allow_direct_confirm: false,
+            runtime_asset_receipt: Mutex::new(None),
             workspace_override: None,
         }
     }
@@ -2623,6 +2690,7 @@ impl MockAgent {
             confirmations: Mutex::new(vec![]),
             approval_memory: Mutex::new(std::collections::HashMap::new()),
             allow_direct_confirm: true,
+            runtime_asset_receipt: Mutex::new(None),
             workspace_override: None,
         }
     }
@@ -2634,6 +2702,11 @@ impl MockAgent {
 
     fn with_mode(self, mode: &str) -> Self {
         *self.mode.lock().unwrap() = mode.to_owned();
+        self
+    }
+
+    fn with_runtime_asset_receipt(self, receipt: RuntimeAssetLoadReceipt) -> Self {
+        *self.runtime_asset_receipt.lock().unwrap() = Some(receipt);
         self
     }
 
@@ -2686,6 +2759,17 @@ impl IAgentTask for MockAgent {
 
 #[async_trait::async_trait]
 impl IMockAgent for MockAgent {
+    fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.lock().unwrap().clone()
+    }
+
+    fn install_runtime_asset_receipt_if_missing(&self, receipt: RuntimeAssetLoadReceipt) {
+        let mut current = self.runtime_asset_receipt.lock().unwrap();
+        if current.is_none() {
+            *current = Some(receipt);
+        }
+    }
+
     fn get_confirmations(&self) -> Vec<Confirmation> {
         self.confirmations.lock().unwrap().clone()
     }
@@ -2778,6 +2862,7 @@ struct BlockingCancelAgent {
     finish_notify: Notify,
     cancel_count: AtomicUsize,
     cancel_error: bool,
+    runtime_asset_receipt: Mutex<Option<RuntimeAssetLoadReceipt>>,
 }
 
 impl BlockingCancelAgent {
@@ -2795,6 +2880,7 @@ impl BlockingCancelAgent {
             finish_notify: Notify::new(),
             cancel_count: AtomicUsize::new(0),
             cancel_error: false,
+            runtime_asset_receipt: Mutex::new(None),
         }
     }
 
@@ -2859,7 +2945,18 @@ impl IAgentTask for BlockingCancelAgent {
     }
 }
 
-impl IMockAgent for BlockingCancelAgent {}
+impl IMockAgent for BlockingCancelAgent {
+    fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.lock().unwrap().clone()
+    }
+
+    fn install_runtime_asset_receipt_if_missing(&self, receipt: RuntimeAssetLoadReceipt) {
+        let mut current = self.runtime_asset_receipt.lock().unwrap();
+        if current.is_none() {
+            *current = Some(receipt);
+        }
+    }
+}
 
 // ── Mock WorkerTaskManager ──────────────────────────────────────
 
@@ -2898,6 +2995,18 @@ struct RebuildingScriptedTaskManager {
     captured_options: Mutex<Vec<BuildTaskOptions>>,
 }
 
+fn install_mock_core_only_receipt(agent: &AgentInstance, options: &BuildTaskOptions) {
+    let Some(request) = options.runtime_asset_request.as_ref() else {
+        return;
+    };
+    let Ok(receipt) = core_only_runtime_asset_receipt(request) else {
+        return;
+    };
+    if let AgentInstance::Mock(mock) = agent {
+        mock.install_runtime_asset_receipt_if_missing(receipt);
+    }
+}
+
 impl RebuildingScriptedTaskManager {
     fn new(agents: Vec<AgentInstance>) -> Self {
         Self {
@@ -2933,12 +3042,15 @@ impl IWorkerTaskManager for RebuildingScriptedTaskManager {
         options: BuildTaskOptions,
     ) -> Result<AgentInstance, AgentError> {
         self.build_count.fetch_add(1, Ordering::SeqCst);
-        self.captured_options.lock().unwrap().push(options);
-        self.agents
+        let agent = self
+            .agents
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| AgentError::bad_gateway("no scripted agent left"))
+            .ok_or_else(|| AgentError::bad_gateway("no scripted agent left"))?;
+        install_mock_core_only_receipt(&agent, &options);
+        self.captured_options.lock().unwrap().push(options);
+        Ok(agent)
     }
 
     fn kill(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AgentError> {
@@ -3128,13 +3240,15 @@ impl IWorkerTaskManager for MockTaskManager {
     async fn get_or_build_task(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
+        options: BuildTaskOptions,
     ) -> Result<AgentInstance, AgentError> {
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
+            install_mock_core_only_receipt(existing, &options);
             return Ok(existing.clone());
         }
         let instance = AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id)));
+        install_mock_core_only_receipt(&instance, &options);
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
@@ -3198,11 +3312,13 @@ impl IWorkerTaskManager for SlowBuildTaskManager {
     async fn get_or_build_task(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
+        options: BuildTaskOptions,
     ) -> Result<AgentInstance, AgentError> {
         tokio::time::sleep(self.delay).await;
         self.built.store(true, Ordering::SeqCst);
-        Ok(AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id))))
+        let instance = AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id)));
+        install_mock_core_only_receipt(&instance, &options);
+        Ok(instance)
     }
 
     fn kill(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AgentError> {
@@ -3252,16 +3368,18 @@ impl IWorkerTaskManager for MockTaskManagerWithWorkspace {
     async fn get_or_build_task(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
+        options: BuildTaskOptions,
     ) -> Result<AgentInstance, AgentError> {
         let workspace = self.workspace.clone();
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
+            install_mock_core_only_receipt(existing, &options);
             return Ok(existing.clone());
         }
         let mut agent = MockAgent::new(conversation_id);
         agent.workspace_override = Some(workspace);
         let instance = AgentInstance::Mock(Arc::new(agent));
+        install_mock_core_only_receipt(&instance, &options);
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
@@ -3301,6 +3419,7 @@ struct ScriptedAgent {
     scripts: Mutex<VecDeque<Vec<AgentStreamEvent>>>,
     sent_contents: Mutex<Vec<String>>,
     send_error: Option<AgentSendError>,
+    runtime_asset_receipt: Mutex<Option<RuntimeAssetLoadReceipt>>,
 }
 
 impl ScriptedAgent {
@@ -3314,6 +3433,7 @@ impl ScriptedAgent {
             scripts: Mutex::new(VecDeque::from(scripts)),
             sent_contents: Mutex::new(vec![]),
             send_error: None,
+            runtime_asset_receipt: Mutex::new(None),
         }
     }
 
@@ -3389,7 +3509,18 @@ impl IAgentTask for ScriptedAgent {
     }
 }
 
-impl IMockAgent for ScriptedAgent {}
+impl IMockAgent for ScriptedAgent {
+    fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.lock().unwrap().clone()
+    }
+
+    fn install_runtime_asset_receipt_if_missing(&self, receipt: RuntimeAssetLoadReceipt) {
+        let mut current = self.runtime_asset_receipt.lock().unwrap();
+        if current.is_none() {
+            *current = Some(receipt);
+        }
+    }
+}
 
 // ── send_message tests ──────────────────────────────────────────
 
@@ -3516,7 +3647,7 @@ async fn run_agent_turn_injects_conversation_runtime_context() {
     let service = ConversationService::new(
         std::env::temp_dir(),
         Arc::new(MockBroadcaster::new()),
-        Arc::new(FixedSkillResolver { names: vec![] }),
+        Arc::new(FixedSkillResolver),
         task_mgr_dyn,
         repo,
         Arc::new(StubAgentMetadataRepo),
@@ -3754,10 +3885,8 @@ async fn save_acp_runtime_mode_updates_runtime_mode_config_selection() {
         ),
         context_usage_json: None,
     }));
-    let (svc, _, _, _) = make_service_with_resolver_and_acp_session_repo(
-        Arc::new(FixedSkillResolver { names: vec![] }),
-        acp_repo.clone(),
-    );
+    let (svc, _, _, _) =
+        make_service_with_resolver_and_acp_session_repo(Arc::new(FixedSkillResolver), acp_repo.clone());
     svc.save_acp_runtime_mode("conv_1", "full-access").await.unwrap();
 
     let saves = acp_repo.runtime_state_saves();
@@ -3914,7 +4043,6 @@ async fn set_config_option_persists_runtime_model_into_assistant_preference_when
             last_permission_value: Some("legacy-mode"),
             last_thought_level_value: Some("legacy-low"),
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4012,7 +4140,6 @@ async fn set_config_option_does_not_persist_preference_on_error() {
             last_permission_value: Some("original-mode"),
             last_thought_level_value: Some("original-low"),
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4082,7 +4209,6 @@ async fn set_config_option_skips_preference_write_back_when_default_mode_is_fixe
             last_permission_value: Some("legacy-fixed-mode"),
             last_thought_level_value: None,
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4164,7 +4290,6 @@ async fn set_config_option_command_ack_does_not_persist_assistant_preference() {
             last_permission_value: Some("legacy-ack-mode"),
             last_thought_level_value: Some("legacy-ack-thought"),
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4228,7 +4353,6 @@ async fn update_tjuae_cli_model_updates_assistant_preference_only_when_snapshot_
             last_permission_value: None,
             last_thought_level_value: None,
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4291,7 +4415,6 @@ async fn update_tjuae_cli_model_updates_assistant_preference_only_when_snapshot_
             last_permission_value: None,
             last_thought_level_value: None,
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -4340,6 +4463,13 @@ async fn send_message_missing_workspace_persists_message_and_failure_tip() {
     let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
+    let trace_db = init_database_memory().await.unwrap();
+    let trace_conversations = SqliteConversationRepository::new(trace_db.pool().clone());
+    let mut trace_conversation = repo.get(&conv.id).await.unwrap().unwrap();
+    trace_conversation.user_id = "system_default_user".to_owned();
+    trace_conversations.create(&trace_conversation).await.unwrap();
+    let trace_repo = Arc::new(SqliteConversationTraceRepository::new(trace_db.pool().clone()));
+    svc.with_trace_repository(trace_repo.clone());
     broadcaster.take_events();
     let legacy_workspace = format!("/tmp/does-not-exist-{}", tjuaeui_common::generate_short_id());
     repo.update(
@@ -4420,6 +4550,56 @@ async fn send_message_missing_workspace_persists_message_and_failure_tip() {
     assert_eq!(turn_event.data["turn_id"], response.turn_id);
     assert_eq!(turn_event.data["runtime"]["is_processing"], false);
     assert_eq!(turn_event.data["runtime"]["can_send_message"], true);
+
+    let trace = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(trace) = trace_repo.get_trace(&conv.id, &response.turn_id).await.unwrap()
+                && trace.status != "running"
+            {
+                break trace;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a pre-orchestrator build_task_options failure must still terminate its trace");
+    assert_eq!(trace.status, "failed");
+    assert_eq!(trace.error_code.as_deref(), Some("WORKSPACE_PATH_RUNTIME_UNAVAILABLE"));
+    assert!(trace.incomplete);
+
+    let direct_outcome = svc
+        .run_agent_turn(ConversationAgentTurnRequest {
+            user_id: "user_1".to_owned(),
+            conversation_id: conv.id.clone(),
+            content: "scheduled run".to_owned(),
+            files: Vec::new(),
+            inject_skills: Vec::new(),
+            required_runtime_mode: None,
+            persist_user_message: false,
+            user_message_hidden: true,
+            on_started: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(direct_outcome.status, ConversationAgentTurnStatus::Failed);
+    let direct_trace = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(trace) = trace_repo.get_trace(&conv.id, &direct_outcome.turn_id).await.unwrap()
+                && trace.status != "running"
+            {
+                break trace;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run_agent_turn pre-orchestrator failure must terminate its trace");
+    assert_eq!(direct_trace.status, "failed");
+    assert_eq!(
+        direct_trace.error_code.as_deref(),
+        Some("WORKSPACE_PATH_RUNTIME_UNAVAILABLE")
+    );
+    assert!(direct_trace.incomplete);
 }
 
 #[tokio::test]
@@ -4597,7 +4777,7 @@ async fn run_agent_turn_returns_error_message_when_agent_build_fails() {
     let service = ConversationService::new(
         std::env::temp_dir(),
         broadcaster,
-        Arc::new(FixedSkillResolver { names: vec![] }),
+        Arc::new(FixedSkillResolver),
         task_mgr,
         repo,
         Arc::new(StubAgentMetadataRepo),
@@ -5322,10 +5502,8 @@ async fn send_message_auto_replays_clean_retryable_acp_error_once() {
 #[tokio::test]
 async fn auto_replay_rebuild_keeps_existing_acp_session_id_in_build_options() {
     let acp_session_repo = Arc::new(StubAcpSessionRepo::with_session_id("sess-existing"));
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service_with_resolver_and_acp_session_repo(
-        Arc::new(FixedSkillResolver { names: vec![] }),
-        acp_session_repo,
-    );
+    let (svc, _broadcaster, _repo, _default_task_mgr) =
+        make_service_with_resolver_and_acp_session_repo(Arc::new(FixedSkillResolver), acp_session_repo);
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let first = Arc::new(ScriptedAgent::new(
@@ -5363,6 +5541,7 @@ async fn auto_replay_rebuild_keeps_existing_acp_session_id_in_build_options() {
             AgentSessionKind::Acp(ctx) => {
                 assert_eq!(ctx.session_id.as_deref(), Some("sess-existing"));
             }
+            AgentSessionKind::A2a(_) => panic!("test conversation should build ACP options"),
             AgentSessionKind::TjuaeCli(_) => panic!("test conversation should build ACP options"),
         }
     }
@@ -6276,10 +6455,8 @@ async fn check_approval_not_found() {
 // ── Skill snapshot tests ───────────────────────────────────────────
 
 #[tokio::test]
-async fn create_writes_extra_skills_from_auto_inject_and_preset() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
+async fn create_writes_extra_skills_from_explicit_selection() {
+    let resolver = Arc::new(FixedSkillResolver);
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
     let workspace = ensure_test_workspace_path();
 
@@ -6289,8 +6466,7 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
         "extra": {
             "workspace": workspace,
             "backend": "claude",
-            "preset_enabled_skills": ["pdf", "cron"],
-            "exclude_auto_inject_skills": ["todo-tracker"],
+            "preset_enabled_skills": ["pdf", "cron", "pdf"],
         },
     }))
     .unwrap();
@@ -6298,14 +6474,11 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
 
     assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
     assert!(resp.extra.get("preset_enabled_skills").is_none());
-    assert!(resp.extra.get("exclude_auto_inject_skills").is_none());
 }
 
 #[tokio::test]
 async fn create_resolves_assistant_snapshot_and_updates_preferences() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([("preset-1".to_string(), "assistant rule body".to_string())]),
     });
@@ -6340,7 +6513,6 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
             default_skills_mode: "auto",
             default_skill_ids: "[]",
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -6363,7 +6535,6 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
             last_permission_value: Some("workspace-write"),
             last_thought_level_value: Some("high"),
             last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
             last_mcp_ids: r#"["legacy-mcp"]"#,
         })
         .await
@@ -6378,7 +6549,6 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
             "conversation_overrides": {
                 "model": "new-model",
                 "skill_ids": ["pdf"],
-                "disabled_builtin_skill_ids": ["todo-tracker"],
             }
         },
         "extra": {
@@ -6408,7 +6578,7 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
     assert_eq!(resp.extra["session_mode"], json!("workspace-write"));
     assert_eq!(resp.extra["current_mode_id"], json!("workspace-write"));
     assert_eq!(resp.extra["current_model_id"], json!("new-model"));
-    assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
+    assert_eq!(resp.extra["skills"], json!(["pdf"]));
     assert!(resp.extra.get("assistant_snapshot").is_none());
 
     let snapshot = repo.get_assistant_snapshot(&resp.id).await.unwrap().unwrap();
@@ -6424,7 +6594,6 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
     let updated_pref = preference_repo.get("asstdef_preset_1").await.unwrap().unwrap();
     assert_eq!(updated_pref.last_model_id.as_deref(), Some("new-model"));
     assert_eq!(updated_pref.last_skill_ids, r#"["pdf"]"#);
-    assert_eq!(updated_pref.last_disabled_builtin_skill_ids, r#"["todo-tracker"]"#);
 
     let fetched = svc.get("user-1", &resp.id).await.unwrap();
     assert_eq!(
@@ -6465,7 +6634,7 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
 
 #[tokio::test]
 async fn existing_conversation_reads_current_assistant_identity() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -6500,7 +6669,6 @@ async fn existing_conversation_reads_current_assistant_identity() {
             default_skills_mode: "auto",
             default_skill_ids: "[]",
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -6556,7 +6724,6 @@ async fn existing_conversation_reads_current_assistant_identity() {
             default_skills_mode: "auto",
             default_skill_ids: "[]",
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -6597,7 +6764,7 @@ async fn create_routes_asset_avatar_in_assistant_identity_through_backend() {
         rules: std::collections::HashMap::new(),
     });
     let (svc, _broadcaster, _repo, definition_repo, state_repo, _preference_repo) =
-        make_service_with_assistant_support(Arc::new(FixedSkillResolver { names: vec![] }), dispatcher).await;
+        make_service_with_assistant_support(Arc::new(FixedSkillResolver), dispatcher).await;
     let workspace = ensure_test_workspace_path();
 
     definition_repo
@@ -6627,7 +6794,6 @@ async fn create_routes_asset_avatar_in_assistant_identity_through_backend() {
             default_skills_mode: "auto",
             default_skill_ids: "[]",
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -6665,7 +6831,7 @@ async fn create_routes_asset_avatar_in_assistant_identity_through_backend() {
 
 #[tokio::test]
 async fn assistant_backed_acp_build_options_include_snapshot_rule_as_preset_context() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([("preset-acp-rule".to_string(), "assistant rule body".to_string())]),
     });
@@ -6694,19 +6860,28 @@ async fn assistant_backed_acp_build_options_include_snapshot_rule_as_preset_cont
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "preset-acp-rule").await;
     let row = repo.get(&conv.id).await.unwrap().unwrap();
+    let _runtime_fixture = runtime_asset_provenance_test::wire_local_assistant_runtime_provenance(
+        &svc,
+        "user_1",
+        "asstdef_preset_acp_rule",
+        "preset-acp-rule",
+        "codex",
+    )
+    .await;
     let options = svc.build_task_options(&row).await.unwrap();
 
     match options.context.kind {
         AgentSessionKind::Acp(ctx) => {
             assert_eq!(ctx.config.preset_context.as_deref(), Some("assistant rule body"));
         }
+        AgentSessionKind::A2a(_) => panic!("test conversation should build ACP options"),
         AgentSessionKind::TjuaeCli(_) => panic!("test conversation should build ACP options"),
     }
 }
 
 #[tokio::test]
 async fn assistant_backed_tjuae_cli_build_options_include_snapshot_rule_as_preset_rules() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([(
             "preset-tjuaecli-rule".to_string(),
@@ -6739,11 +6914,20 @@ async fn assistant_backed_tjuae_cli_build_options_include_snapshot_rule_as_prese
     let conv =
         create_assistant_backed_conversation(&svc, "user_1", Some("tjuaecli"), "tjuaecli", "preset-tjuaecli-rule")
             .await;
+    let _runtime_fixture = runtime_asset_provenance_test::wire_local_assistant_runtime_provenance(
+        &svc,
+        "user_1",
+        "asstdef_preset_tjuaecli_rule",
+        "preset-tjuaecli-rule",
+        "tjuaecli",
+    )
+    .await;
     let row = repo.get(&conv.id).await.unwrap().unwrap();
     let options = svc.build_task_options(&row).await.unwrap();
 
     match options.context.kind {
         AgentSessionKind::Acp(_) => panic!("test conversation should build TjuaeCLI options"),
+        AgentSessionKind::A2a(_) => panic!("test conversation should build TjuaeCLI options"),
         AgentSessionKind::TjuaeCli(ctx) => {
             assert_eq!(ctx.config.preset_rules.as_deref(), Some("assistant rule body"));
         }
@@ -6752,9 +6936,7 @@ async fn assistant_backed_tjuae_cli_build_options_include_snapshot_rule_as_prese
 
 #[tokio::test]
 async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([("preset-1".to_string(), "assistant rule body".to_string())]),
     });
@@ -6789,7 +6971,6 @@ async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
             default_skills_mode: "auto",
             default_skill_ids: "[]",
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -6812,7 +6993,6 @@ async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
             last_permission_value: Some("workspace-write"),
             last_thought_level_value: Some("medium"),
             last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
             last_mcp_ids: r#"["legacy-mcp"]"#,
         })
         .await
@@ -6851,7 +7031,7 @@ async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
 
 #[tokio::test]
 async fn create_prefers_snapshot_runtime_identity_over_legacy_extra_identity() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::new(),
     });
@@ -6913,9 +7093,7 @@ async fn create_prefers_snapshot_runtime_identity_over_legacy_extra_identity() {
 
 #[tokio::test]
 async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([("preset-fixed".to_string(), "assistant rule body".to_string())]),
     });
@@ -6950,7 +7128,6 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
             default_skills_mode: "fixed",
             default_skill_ids: r#"["pdf"]"#,
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: r#"["todo-tracker"]"#,
             default_mcps_mode: "fixed",
             default_mcp_ids: r#"["mcp-fixed"]"#,
         })
@@ -6973,7 +7150,6 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
             last_permission_value: Some("workspace-write"),
             last_thought_level_value: Some("legacy-thought"),
             last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
             last_mcp_ids: r#"["legacy-mcp"]"#,
         })
         .await
@@ -6989,7 +7165,6 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
                 "model": "new-model",
                 "permission": "workspace-read",
                 "skill_ids": ["pdf", "cron"],
-                "disabled_builtin_skill_ids": [],
                 "mcp_ids": ["mcp-temp"]
             }
         },
@@ -7005,15 +7180,12 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
     assert_eq!(updated_pref.last_model_id.as_deref(), Some("new-model"));
     assert_eq!(updated_pref.last_permission_value.as_deref(), Some("workspace-read"));
     assert_eq!(updated_pref.last_skill_ids, r#"["legacy-skill"]"#);
-    assert_eq!(updated_pref.last_disabled_builtin_skill_ids, r#"["legacy-disabled"]"#);
     assert_eq!(updated_pref.last_mcp_ids, r#"["legacy-mcp"]"#);
 }
 
 #[tokio::test]
-async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_values_empty() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
+async fn create_with_unset_preferences_keeps_snapshot_values_empty() {
+    let resolver = Arc::new(FixedSkillResolver);
     let dispatcher = Arc::new(StaticAssistantDispatcher {
         rules: std::collections::HashMap::from([("preset-auto".to_string(), "assistant rule body".to_string())]),
     });
@@ -7048,7 +7220,6 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
             default_skills_mode: "fixed",
             default_skill_ids: r#"["pdf"]"#,
             custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
             default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
@@ -7071,7 +7242,6 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
             last_permission_value: None,
             last_thought_level_value: None,
             last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
             last_mcp_ids: "[]",
         })
         .await
@@ -7103,8 +7273,8 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
 }
 
 #[tokio::test]
-async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
-    let resolver = Arc::new(FixedSkillResolver { names: vec![] });
+async fn create_writes_empty_skills_without_explicit_selection() {
+    let resolver = Arc::new(FixedSkillResolver);
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
     let workspace = ensure_test_workspace_path();
 
@@ -7120,7 +7290,7 @@ async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
 
 #[tokio::test]
 async fn create_links_skills_into_custom_workspace_for_native_acp_agent() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+    let resolver = Arc::new(RecordingSkillResolver::new());
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) =
         make_service_with_resolver_and_agent_metadata_repo(resolver, Arc::new(ClaudeNativeSkillMetadataRepo));
@@ -7130,7 +7300,8 @@ async fn create_links_skills_into_custom_workspace_for_native_acp_agent() {
         "type": "acp",
         "extra": {
             "workspace": workspace,
-            "backend": "claude"
+            "backend": "claude",
+            "preset_enabled_skills": ["cron"]
         },
     }))
     .unwrap();
@@ -7147,13 +7318,16 @@ async fn create_links_skills_into_custom_workspace_for_native_acp_agent() {
 
 #[tokio::test]
 async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+    let resolver = Arc::new(RecordingSkillResolver::new());
+    resolver.register_local_runtime_skill("cron", "skill-local-cron");
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "tjuaecli",
-        "extra": {},
+        "extra": {
+            "preset_enabled_skills": ["cron"]
+        },
     }))
     .unwrap();
     let resp = svc.create("user-1", req).await.unwrap();
@@ -7177,8 +7351,39 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
 }
 
 #[tokio::test]
+async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversation() {
+    let resolver = Arc::new(RecordingSkillResolver::new());
+    let links = resolver.links.clone();
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": {
+            "backend": "codex",
+            "preset_enabled_skills": ["cron"]
+        },
+    }))
+    .unwrap();
+    let resp = svc.create("user-1", req).await.unwrap();
+    let workspace = PathBuf::from(resp.extra["workspace"].as_str().unwrap());
+    let managed_root = crate::managed_skill_roots::managed_codex_skill_root(&std::env::temp_dir(), &resp.id);
+
+    assert!(managed_root.join("cron").is_dir());
+    assert!(!workspace.join(".codex").exists());
+    {
+        let calls = links.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].workspace, managed_root);
+        assert_eq!(calls[0].rel_dirs, vec!["."]);
+    }
+
+    svc.delete("user-1", &resp.id).await.unwrap();
+    assert!(!managed_root.exists());
+}
+
+#[tokio::test]
 async fn warmup_restores_skill_links_for_custom_workspace() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+    let resolver = Arc::new(RecordingSkillResolver::new());
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) =
         make_service_with_resolver_and_agent_metadata_repo(resolver, Arc::new(ClaudeNativeSkillMetadataRepo));
@@ -7188,7 +7393,8 @@ async fn warmup_restores_skill_links_for_custom_workspace() {
         "type": "acp",
         "extra": {
             "workspace": workspace,
-            "backend": "claude"
+            "backend": "claude",
+            "preset_enabled_skills": ["cron"]
         },
     }))
     .unwrap();
@@ -7281,149 +7487,6 @@ async fn update_allows_other_extra_fields() {
     assert_eq!(updated.extra["display_density"], "compact");
 }
 
-#[tokio::test]
-async fn get_backfills_legacy_row_and_persists() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into(), "todo-tracker".into()],
-    });
-    let (svc, _broadcaster, repo, _task_mgr) = make_service_with_resolver(resolver);
-
-    // Seed a legacy row directly via the repo — simulates a pre-migration
-    // conversation that the service has never touched.
-    let legacy_row = ConversationRow {
-        id: "legacy-1".into(),
-        user_id: "user-1".into(),
-        name: "legacy".into(),
-        r#type: "acp".into(),
-        extra: serde_json::to_string(&json!({
-            "workspace": "/tmp/x",
-            "enabled_skills": ["pdf"],
-            "exclude_builtin_skills": ["todo-tracker"],
-            "loaded_skills": [{"name": "cron", "description": "stale"}],
-        }))
-        .unwrap(),
-        model: None,
-        status: Some("finished".into()),
-        source: Some("tjuaeui".into()),
-        channel_chat_id: None,
-        pinned: false,
-        pinned_at: None,
-        created_at: 0,
-        updated_at: 0,
-        project_id: None,
-        folder_id: None,
-    };
-    repo.create(&legacy_row).await.unwrap();
-
-    let resp = svc.get("user-1", "legacy-1").await.unwrap();
-    assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
-    assert!(resp.extra.get("enabled_skills").is_none());
-    assert!(resp.extra.get("exclude_builtin_skills").is_none());
-    assert!(resp.extra.get("loaded_skills").is_none());
-
-    // Second read returns the same result.
-    let resp2 = svc.get("user-1", "legacy-1").await.unwrap();
-    assert_eq!(resp2.extra["skills"], json!(["cron", "pdf"]));
-
-    // Verify the row on disk was persisted with the new shape.
-    let persisted = repo.get("legacy-1").await.unwrap().unwrap();
-    let persisted_extra: serde_json::Value = serde_json::from_str(&persisted.extra).unwrap();
-    assert_eq!(persisted_extra["skills"], json!(["cron", "pdf"]));
-    assert!(persisted_extra.get("enabled_skills").is_none());
-    assert!(persisted_extra.get("exclude_builtin_skills").is_none());
-    assert!(persisted_extra.get("loaded_skills").is_none());
-}
-
-#[tokio::test]
-async fn list_backfills_mixed_rows() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into()],
-    });
-    let (svc, _broadcaster, repo, _task_mgr) = make_service_with_resolver(resolver);
-
-    // Row 1: legacy (needs backfill).
-    let legacy = ConversationRow {
-        id: "a".into(),
-        user_id: "u".into(),
-        name: "a".into(),
-        r#type: "acp".into(),
-        extra: serde_json::to_string(&json!({
-            "workspace": "/tmp/a",
-            "enabled_skills": ["pdf"],
-        }))
-        .unwrap(),
-        model: None,
-        status: None,
-        source: None,
-        channel_chat_id: None,
-        pinned: false,
-        pinned_at: None,
-        created_at: 1,
-        updated_at: 1,
-        project_id: None,
-        folder_id: None,
-    };
-    // Row 2: already migrated.
-    let modern = ConversationRow {
-        id: "b".into(),
-        user_id: "u".into(),
-        name: "b".into(),
-        r#type: "acp".into(),
-        extra: serde_json::to_string(&json!({
-            "workspace": "/tmp/b",
-            "skills": ["cron", "pdf"],
-        }))
-        .unwrap(),
-        model: None,
-        status: None,
-        source: None,
-        channel_chat_id: None,
-        pinned: false,
-        pinned_at: None,
-        created_at: 2,
-        updated_at: 2,
-        project_id: None,
-        folder_id: None,
-    };
-    repo.create(&legacy).await.unwrap();
-    repo.create(&modern).await.unwrap();
-
-    let resp = svc.list("u", ListConversationsQuery::default()).await.unwrap();
-    let extras: Vec<_> = resp.items.iter().map(|c| c.extra.clone()).collect();
-    assert!(extras.iter().any(|e| e["skills"] == json!(["cron", "pdf"])));
-}
-
-#[tokio::test]
-async fn create_honors_legacy_alias_fields_from_clone_merge() {
-    let resolver = Arc::new(FixedSkillResolver {
-        names: vec!["cron".into()],
-    });
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
-
-    // Legacy-shaped extra — what clone_create might merge in from an
-    // unmigrated source conversation.
-    let workspace = ensure_test_workspace_path();
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": {
-            "workspace": workspace,
-            "backend": "claude",
-            "enabled_skills": ["pdf"],
-            "exclude_builtin_skills": ["cron"],
-            "loaded_skills": [{"name": "cron", "description": "stale"}],
-        },
-    }))
-    .unwrap();
-    let resp = svc.create("u", req).await.unwrap();
-
-    // Legacy enabled_skills ["pdf"] surfaces as preset; legacy exclude drops
-    // cron; snapshot = {} ∪ ["pdf"] = ["pdf"].
-    assert_eq!(resp.extra["skills"], json!(["pdf"]));
-    assert!(resp.extra.get("enabled_skills").is_none());
-    assert!(resp.extra.get("exclude_builtin_skills").is_none());
-    assert!(resp.extra.get("loaded_skills").is_none());
-}
-
 // ── insert_raw_message ────────────────────────────────────────────
 // Exercised by the team wake path (mirroring non-user mailbox rows into
 // the target agent's conversation so the UI shows who spoke). Covers both
@@ -7478,11 +7541,12 @@ async fn insert_raw_message_persists_row_and_broadcasts_stream() {
 /// value and persists an assistant snapshot carrying the runtime permission
 /// gate inputs (`default_permission_mode` / `resolved_permission_value`).
 async fn seed_tjuae_cli_conversation_with_snapshot(
+    service: &ConversationService,
     repo: &Arc<MockRepo>,
     session_mode: &str,
     default_permission_mode: &str,
     resolved_permission_value: Option<&str>,
-) -> ConversationRow {
+) -> (ConversationRow, runtime_asset_provenance_test::AssistantRuntimeFixture) {
     let row = ConversationRow {
         id: format!("tjuaecli-seed-{}", tjuaeui_common::generate_short_id()),
         user_id: "user_1".into(),
@@ -7520,18 +7584,26 @@ async fn seed_tjuae_cli_conversation_with_snapshot(
         resolved_thought_level_value: None,
         default_skills_mode: "auto",
         resolved_skill_ids: "[]",
-        resolved_disabled_builtin_skill_ids: "[]",
         default_mcps_mode: "auto",
         resolved_mcp_ids: "[]",
     })
     .await
     .unwrap();
-    row
+    let runtime_fixture = runtime_asset_provenance_test::wire_local_assistant_runtime_provenance(
+        service,
+        &row.user_id,
+        "asstdef-seed",
+        "assistant-seed",
+        "agent-seed",
+    )
+    .await;
+    (row, runtime_fixture)
 }
 
 fn tjuae_cli_session_mode(options: &BuildTaskOptions) -> Option<String> {
     match &options.context.kind {
         AgentSessionKind::TjuaeCli(ctx) => ctx.config.session_mode.clone(),
+        AgentSessionKind::A2a(_) => panic!("expected TjuaeCLI build options"),
         AgentSessionKind::Acp(_) => panic!("expected TjuaeCLI build options"),
     }
 }
@@ -7541,7 +7613,8 @@ async fn tjuae_cli_rebuild_auto_mode_preserves_runtime_yolo() {
     // AC#1: an `auto` tjuae_cli session that was switched to yolo at runtime must
     // keep yolo after a rebuild (model switch / agent restart).
     let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let row = seed_tjuae_cli_conversation_with_snapshot(&repo, "default", "auto", Some("yolo")).await;
+    let (row, _runtime_fixture) =
+        seed_tjuae_cli_conversation_with_snapshot(&svc, &repo, "default", "auto", Some("yolo")).await;
 
     let options = svc.build_task_options(&row).await.unwrap();
 
@@ -7553,7 +7626,8 @@ async fn tjuae_cli_rebuild_existing_data_auto_overrides_create_time_seed() {
     // AC#2: existing data — create-time non-yolo seed is overridden by the
     // authoritative resolved runtime value.
     let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let row = seed_tjuae_cli_conversation_with_snapshot(&repo, "auto_edit", "auto", Some("yolo")).await;
+    let (row, _runtime_fixture) =
+        seed_tjuae_cli_conversation_with_snapshot(&svc, &repo, "auto_edit", "auto", Some("yolo")).await;
 
     let options = svc.build_task_options(&row).await.unwrap();
 
@@ -7565,7 +7639,8 @@ async fn tjuae_cli_rebuild_fixed_mode_blocks_runtime_escalation() {
     // AC#3 (hard safety gate): a `fixed` assistant must NOT adopt the runtime
     // residue, even if `resolved_permission_value` was written to yolo.
     let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let row = seed_tjuae_cli_conversation_with_snapshot(&repo, "default", "fixed", Some("yolo")).await;
+    let (row, _runtime_fixture) =
+        seed_tjuae_cli_conversation_with_snapshot(&svc, &repo, "default", "fixed", Some("yolo")).await;
 
     let options = svc.build_task_options(&row).await.unwrap();
 
@@ -7581,12 +7656,35 @@ async fn cron_required_runtime_mode_wins_over_resolved_permission_seed() {
     // not bypass or reorder this override.
     let task_mgr = Arc::new(MockTaskManager::new());
     let (svc, broadcaster, repo) = make_service_with_mock_task_manager(task_mgr.clone());
-    let row = seed_tjuae_cli_conversation_with_snapshot(&repo, "default", "auto", Some("yolo")).await;
+    let (row, _runtime_fixture) =
+        seed_tjuae_cli_conversation_with_snapshot(&svc, &repo, "default", "auto", Some("yolo")).await;
+    let trace_database = init_database_memory().await.unwrap();
+    let now = tjuaeui_common::now_ms();
+    sqlx::query(
+        "INSERT OR IGNORE INTO users (id, username, password_hash, created_at, updated_at)
+         VALUES (?, ?, '', ?, ?)",
+    )
+    .bind(&row.user_id)
+    .bind(format!("trace-{}", row.user_id))
+    .bind(now)
+    .bind(now)
+    .execute(trace_database.pool())
+    .await
+    .unwrap();
+    let trace_conversations = SqliteConversationRepository::new(trace_database.pool().clone());
+    trace_conversations.create(&row).await.unwrap();
+    svc.with_trace_repository(Arc::new(SqliteConversationTraceRepository::new(
+        trace_database.pool().clone(),
+    )));
     broadcaster.take_events();
+    let options = svc.build_task_options(&row).await.unwrap();
+    let runtime_asset_receipt =
+        core_only_runtime_asset_receipt(options.runtime_asset_request.as_ref().unwrap()).unwrap();
 
     let agent = Arc::new(
         MockAgent::new(&row.id)
             .with_mode("yolo")
+            .with_runtime_asset_receipt(runtime_asset_receipt)
             .with_config_options(vec![AcpConfigOptionDto {
                 id: "mode".to_owned(),
                 name: Some("Mode".to_owned()),
@@ -7621,4 +7719,134 @@ async fn cron_required_runtime_mode_wins_over_resolved_permission_seed() {
         &[("mode".to_owned(), "default".to_owned())],
         "cron required-runtime-mode must override the rebuild permission seed"
     );
+}
+
+#[tokio::test]
+async fn trace_reads_are_owner_scoped_and_return_sanitized_shapes() {
+    let database = init_database_memory().await.unwrap();
+    let conversation_repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let trace_repo = Arc::new(SqliteConversationTraceRepository::new(database.pool().clone()));
+    let now = tjuaeui_common::now_ms();
+    conversation_repo
+        .create(&ConversationRow {
+            id: "trace-owner-conversation".to_owned(),
+            user_id: "system_default_user".to_owned(),
+            name: "Trace owner test".to_owned(),
+            r#type: "tjuae_cli".to_owned(),
+            extra: "{}".to_owned(),
+            model: None,
+            status: Some("finished".to_owned()),
+            source: Some("tjuaeui".to_owned()),
+            channel_chat_id: None,
+            pinned: false,
+            pinned_at: None,
+            created_at: now,
+            updated_at: now,
+            project_id: None,
+            folder_id: None,
+        })
+        .await
+        .unwrap();
+    trace_repo
+        .start_trace(&ConversationTraceRow {
+            trace_id: "trace-owner-turn".to_owned(),
+            conversation_id: "trace-owner-conversation".to_owned(),
+            status: "running".to_owned(),
+            backend: Some("codex".to_owned()),
+            model: None,
+            mode: None,
+            started_at: now,
+            first_event_at: None,
+            first_output_at: None,
+            ended_at: None,
+            duration_ms: None,
+            input_size: 0,
+            output_size: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost_usd: None,
+            error_code: None,
+            retryable: None,
+            incomplete: false,
+            truncated: false,
+            span_count: 0,
+            dropped_span_count: 0,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let runtime_assets = vec![ConversationTraceRuntimeAssetRefRow {
+        local_asset_id: "assistant-owner".to_owned(),
+        kind: "assistant".to_owned(),
+        local_definition_digest: format!("sha256-{}", "b".repeat(64)),
+        runtime_content_digest: format!("sha256-{}", "c".repeat(64)),
+        upstream_package: None,
+        upstream_asset_id: None,
+        upstream_version: None,
+        upstream_revision: None,
+    }];
+    let runtime_snapshot_id = tjuaeui_common::compute_runtime_asset_snapshot_id(
+        runtime_assets
+            .iter()
+            .map(|asset| tjuaeui_common::RuntimeAssetDigestInput {
+                local_asset_id: &asset.local_asset_id,
+                kind: &asset.kind,
+                local_definition_digest: &asset.local_definition_digest,
+                runtime_content_digest: &asset.runtime_content_digest,
+                upstream_package: asset.upstream_package.as_deref(),
+                upstream_asset_id: asset.upstream_asset_id.as_deref(),
+                upstream_version: asset.upstream_version.as_deref(),
+                upstream_revision: asset.upstream_revision.as_deref(),
+            })
+            .collect(),
+    );
+    trace_repo
+        .save_runtime_asset_snapshot(&ConversationTraceRuntimeAssetSnapshotRow {
+            user_id: "system_default_user".to_owned(),
+            conversation_id: "trace-owner-conversation".to_owned(),
+            trace_id: "trace-owner-turn".to_owned(),
+            runtime_snapshot_id: runtime_snapshot_id.clone(),
+            assets: runtime_assets,
+            created_at: now + 1,
+        })
+        .await
+        .unwrap();
+
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let task_manager: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let service = ConversationService::new(
+        std::env::temp_dir(),
+        broadcaster,
+        Arc::new(FixedSkillResolver),
+        task_manager,
+        conversation_repo,
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+    );
+    service.with_trace_repository(trace_repo);
+
+    let denied = service
+        .list_traces("another-user", "trace-owner-conversation", None)
+        .await;
+    assert!(matches!(denied, Err(ConversationError::NotFound { .. })));
+
+    let list = service
+        .list_traces("system_default_user", "trace-owner-conversation", None)
+        .await
+        .unwrap();
+    assert_eq!(list.items.len(), 1);
+    assert_eq!(list.items[0].trace_id, "trace-owner-turn");
+    assert_eq!(list.items[0].runtime_snapshot_id, Some(runtime_snapshot_id.clone()));
+
+    let detail = service
+        .get_trace("system_default_user", "trace-owner-conversation", "trace-owner-turn")
+        .await
+        .unwrap();
+    assert_eq!(detail.trace.trace_id, "trace-owner-turn");
+    assert!(detail.spans.is_empty());
+    let runtime_snapshot = detail.runtime_asset_snapshot.unwrap();
+    assert_eq!(runtime_snapshot.runtime_snapshot_id, runtime_snapshot_id);
+    assert_eq!(runtime_snapshot.assets.len(), 1);
+    assert_eq!(runtime_snapshot.assets[0].local_asset_id, "assistant-owner");
 }

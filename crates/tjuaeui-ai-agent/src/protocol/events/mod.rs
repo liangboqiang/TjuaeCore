@@ -48,6 +48,12 @@ pub enum AgentStreamEvent {
     AcpPromptHookWarning(serde_json::Value),
     SlashCommandsUpdated(serde_json::Value),
     AvailableCommands(AvailableCommandsEventData),
+    /// A non-text A2A message or artifact part.
+    ///
+    /// This has a dedicated event instead of using `System`, because the
+    /// renderer intentionally ignores generic system events. External URLs
+    /// remain inert until the user explicitly confirms opening them.
+    A2aPart(A2aPartEventData),
     Finish(FinishEventData),
     Error(ErrorEventData),
     System(serde_json::Value),
@@ -83,6 +89,40 @@ pub struct SessionAssignedEventData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextEventData {
     pub content: String,
+}
+
+/// A structured, non-text part returned by an A2A Agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct A2aPartEventData {
+    pub kind: A2aPartKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    /// Standard base64 without a data-URL prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum A2aPartKind {
+    Resource,
+    Data,
+    InlineFile,
+    Artifact,
 }
 
 /// Data for the `Tips` event.
@@ -139,6 +179,35 @@ mod tests {
         } else {
             panic!("Expected Text event");
         }
+    }
+
+    #[test]
+    fn a2a_part_event_roundtrip_preserves_downloadable_bytes() {
+        let event = AgentStreamEvent::A2aPart(A2aPartEventData {
+            kind: A2aPartKind::InlineFile,
+            artifact_id: None,
+            name: None,
+            description: None,
+            url: None,
+            data: None,
+            bytes_base64: Some("AQID".into()),
+            byte_length: Some(3),
+            filename: Some("sample.bin".into()),
+            media_type: Some("application/octet-stream".into()),
+        });
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "a2a_part");
+        assert_eq!(json["data"]["kind"], "inline_file");
+        assert_eq!(json["data"]["bytes_base64"], "AQID");
+        assert_eq!(json["data"]["byte_length"], 3);
+
+        let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
+        let AgentStreamEvent::A2aPart(data) = parsed else {
+            panic!("Expected A2A part event");
+        };
+        assert_eq!(data.filename.as_deref(), Some("sample.bin"));
+        assert_eq!(data.byte_length, Some(3));
     }
 
     #[test]

@@ -18,12 +18,17 @@ struct Capture {
     resource_id: Option<String>,
     payload: Option<serde_json::Value>,
 }
-
 type SharedCapture = Arc<Mutex<Option<Capture>>>;
 
 fn config_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tjuaecore"));
     command.arg("config");
+    // These tests intentionally talk to an ephemeral loopback probe server.
+    // Keep user/system proxy settings from rerouting 127.0.0.1 through a
+    // desktop proxy and turning deterministic local requests into HTTP 502.
+    command
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
     command
 }
 
@@ -241,30 +246,6 @@ async fn fake_provider_update(
     }))
 }
 
-async fn fake_external_paths_list() -> axum::Json<serde_json::Value> {
-    axum::Json(json!({
-        "success": true,
-        "data": [{
-            "name": "Team Skills",
-            "path": "/skills/team"
-        }]
-    }))
-}
-
-async fn fake_external_paths_add(
-    State(capture): State<SharedCapture>,
-    axum::Json(payload): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    *capture.lock().unwrap() = Some(Capture {
-        payload: Some(payload),
-        ..Capture::default()
-    });
-    axum::Json(json!({
-        "success": true,
-        "data": null
-    }))
-}
-
 async fn fake_agent_custom_update(
     State(capture): State<SharedCapture>,
     Path(agent_id): Path<String>,
@@ -380,12 +361,8 @@ async fn spawn_config_probe_server(capture: SharedCapture) -> (String, tokio::ta
         .route("/api/mcp/oauth/logout", post(fake_mcp_oauth_logout))
         .route("/api/providers", get(fake_provider_list).post(fake_provider_create))
         .route("/api/providers/{provider_id}", put(fake_provider_update))
-        .route(
-            "/api/skills/external-paths",
-            get(fake_external_paths_list).post(fake_external_paths_add),
-        )
-        .route("/api/agents/management", get(fake_agent_management_list))
-        .route("/api/agents/custom/{agent_id}", put(fake_agent_custom_update))
+        .route("/api/engines/management", get(fake_agent_management_list))
+        .route("/api/engines/custom/{agent_id}", put(fake_agent_custom_update))
         .route("/api/cron/jobs", get(fake_cron_jobs_list).post(fake_cron_job_create))
         .route(
             "/api/cron/jobs/{job_id}/skill",
@@ -399,47 +376,15 @@ async fn spawn_config_probe_server(capture: SharedCapture) -> (String, tokio::ta
 }
 
 #[tokio::test]
-async fn config_mcp_oauth_logout_reads_status_before_and_after_write() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
-
-    let mut child = config_command()
+async fn config_mcp_oauth_mutation_is_not_available() {
+    let output = config_command()
         .args(["mcp", "oauth", "logout"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-mcp")
-        .env("TJUAE_USER_ID", "user-mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(br#"{ "server_url": "https://mcp.example.test" }"#)
+        .output()
         .await
         .unwrap();
-    drop(child.stdin.take());
 
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "mcp oauth logout failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let captured = capture
-        .lock()
-        .unwrap()
-        .take()
-        .expect("server should receive oauth logout");
-    assert_eq!(captured.payload.unwrap()["server_url"], "https://mcp.example.test");
-    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["meta"]["before"]["authenticated"], true);
-    assert_eq!(stdout["meta"]["after"]["authenticated"], true);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'oauth'"));
 }
 
 #[tokio::test]
@@ -478,14 +423,21 @@ async fn config_capabilities_prints_agent_readable_contract_without_runtime_env(
     let domains = stdout["data"]["domains"]
         .as_array()
         .expect("domains should be an array");
-    let assistant_rule_write = domains
+    let commands = domains
         .iter()
         .flat_map(|domain| domain["commands"].as_array().into_iter().flatten())
-        .find(|command| command["command"] == "config assistants rule write")
-        .expect("assistant rule write should be advertised");
-    assert_eq!(assistant_rule_write["input"], "stdin_json");
-    assert_eq!(assistant_rule_write["readback"], true);
-    assert_eq!(assistant_rule_write["selectors"], json!(["assistant_id"]));
+        .collect::<Vec<_>>();
+    for removed in [
+        "config assistants rule write",
+        "config agents custom update",
+        "config mcp servers update",
+        "config mcp oauth logout",
+    ] {
+        assert!(
+            commands.iter().all(|command| command["command"] != removed),
+            "removed direct asset writer must not be advertised: {removed}"
+        );
+    }
 
     let cron_current_update = domains
         .iter()
@@ -596,44 +548,6 @@ async fn config_conversation_rename_patches_name_and_reads_resource_before_and_a
 }
 
 #[tokio::test]
-async fn config_external_paths_add_reads_collection_before_and_after_write() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
-
-    let mut child = config_command()
-        .args(["skills", "external-paths", "add"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-skill")
-        .env("TJUAE_USER_ID", "user-skill")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(br#"{ "name": "Team Skills", "path": "/skills/team" }"#)
-        .await
-        .unwrap();
-    drop(child.stdin.take());
-
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "external path add failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(stdout["meta"]["before"].is_array());
-    assert!(stdout["meta"]["after"].is_array());
-}
-
-#[tokio::test]
 async fn config_payload_commands_resolve_current_conversation_and_user_selectors() {
     let capture = Arc::new(Mutex::new(None));
     let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
@@ -691,60 +605,15 @@ async fn config_payload_commands_resolve_current_conversation_and_user_selectors
 }
 
 #[tokio::test]
-async fn config_mcp_server_update_reads_server_id_from_stdin_and_redacts_metadata() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
-
-    let mut child = config_command()
+async fn config_mcp_server_mutation_is_not_available() {
+    let output = config_command()
         .args(["mcp", "servers", "update"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-mcp")
-        .env("TJUAE_USER_ID", "user-mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(
-            br#"{
-  "server_id": "server/one",
-  "transport": {
-    "type": "http",
-    "url": "https://mcp.example.test",
-    "headers": {
-      "Authorization": "Bearer INPUT_SECRET"
-    }
-  }
-}"#,
-        )
+        .output()
         .await
         .unwrap();
-    drop(child.stdin.take());
 
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "mcp server update failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let captured = capture
-        .lock()
-        .unwrap()
-        .take()
-        .expect("server should receive mcp update");
-    assert_eq!(captured.resource_id.as_deref(), Some("server/one"));
-    let payload = captured.payload.unwrap();
-    assert!(payload.get("server_id").is_none());
-    let stdout_text = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout_text.contains("SECRET_MCP_HEADER"));
-    assert!(!stdout_text.contains("INPUT_SECRET"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'update'"));
 }
 
 #[tokio::test]
@@ -786,46 +655,15 @@ async fn config_provider_create_redacts_api_key_from_stdout() {
 }
 
 #[tokio::test]
-async fn config_agent_custom_update_reads_agent_id_from_stdin() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
-
-    let mut child = config_command()
+async fn config_custom_agent_mutation_is_not_available() {
+    let output = config_command()
         .args(["agents", "custom", "update"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-agent")
-        .env("TJUAE_USER_ID", "user-agent")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(br#"{ "agent_id": "agent/custom", "name": "Updated Agent", "command": "agent-cli" }"#)
+        .output()
         .await
         .unwrap();
-    drop(child.stdin.take());
 
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "agent custom update failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let captured = capture
-        .lock()
-        .unwrap()
-        .take()
-        .expect("server should receive agent update");
-    assert_eq!(captured.resource_id.as_deref(), Some("agent/custom"));
-    let payload = captured.payload.unwrap();
-    assert!(payload.get("agent_id").is_none());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'custom'"));
 }
 
 #[tokio::test]
@@ -953,51 +791,15 @@ async fn config_assistant_rule_read_resolves_current_assistant_selector() {
 }
 
 #[tokio::test]
-async fn config_assistant_rule_write_redacts_rule_content_from_metadata() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture).await;
-
-    let mut child = config_command()
+async fn config_assistant_rule_mutation_is_not_available() {
+    let output = config_command()
         .args(["assistants", "rule", "write"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-current")
-        .env("TJUAE_USER_ID", "user-current")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(
-            br#"{
-  "assistant_id": "current",
-  "locale": "zh-CN",
-  "content": "SECRET_RULE_BODY"
-}"#,
-        )
+        .output()
         .await
         .unwrap();
-    drop(child.stdin.take());
 
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "assistant rule write failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout_text = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout_text.contains("SECRET_RULE_BODY"));
-    assert!(!stdout_text.contains("current rule"));
-    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["data"], true);
-    assert_eq!(stdout["meta"]["before"]["redacted"], true);
-    assert_eq!(stdout["meta"]["after"]["redacted"], true);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand 'write'"));
 }
 
 #[tokio::test]
@@ -1080,38 +882,4 @@ async fn config_context_fails_with_stable_error_when_conversation_env_missing() 
     assert!(stderr.contains(
         "CONFIG_ENV_MISSING command=\"config context\" field=\"TJUAE_CONVERSATION_ID\": missing required environment variable"
     ));
-}
-
-#[test]
-fn builtin_config_skills_use_config_cli_not_python_or_cron_helper() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/builtin-skills/auto-inject");
-    let tjuaeui_config = std::fs::read_to_string(root.join("tjuaeui-config/SKILL.md")).unwrap();
-    let cron = std::fs::read_to_string(root.join("cron/SKILL.md")).unwrap();
-
-    for forbidden in ["python3", "tjuaeui_api.py", "lsof", "netstat", "curl"] {
-        assert!(
-            !tjuaeui_config.contains(forbidden),
-            "tjuaeui-config skill must not mention {forbidden}"
-        );
-    }
-    assert!(tjuaeui_config.contains("\"$TJUAE_HELPER_BIN\" config context"));
-    assert!(tjuaeui_config.contains("\"$TJUAE_HELPER_BIN\" config capabilities"));
-    assert!(tjuaeui_config.contains("assistant_id\": \"current"));
-    for command in [
-        "\"$TJUAE_HELPER_BIN\" config mcp servers",
-        "\"$TJUAE_HELPER_BIN\" config providers",
-        "\"$TJUAE_HELPER_BIN\" config settings",
-        "\"$TJUAE_HELPER_BIN\" config agents",
-        "\"$TJUAE_HELPER_BIN\" config cron jobs",
-        "\"$TJUAE_HELPER_BIN\" config skills external-paths",
-    ] {
-        assert!(
-            tjuaeui_config.contains(command),
-            "tjuaeui-config skill must document {command}"
-        );
-    }
-
-    assert!(!cron.contains("cron-helper"));
-    assert!(cron.contains("\"$TJUAE_HELPER_BIN\" config cron current list"));
-    assert!(cron.contains("\"job_id\""));
 }

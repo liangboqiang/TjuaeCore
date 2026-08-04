@@ -469,9 +469,9 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
                  agent_id, rule_resource_type, rule_resource_ref, \
                  recommended_prompts, recommended_prompts_i18n, default_model_mode, default_model_value, \
                  default_permission_mode, default_permission_value, default_skills_mode, default_skill_ids, \
-                 custom_skill_names, default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids, \
+                 custom_skill_names, default_mcps_mode, default_mcp_ids, \
                  created_at, updated_at, deleted_at, default_thought_level_mode, default_thought_level_value) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(definition_id)
         .bind(assistant_id)
@@ -494,7 +494,6 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
         .bind("auto")
         .bind(None::<String>)
         .bind("auto")
-        .bind("[]")
         .bind("[]")
         .bind("[]")
         .bind("auto")
@@ -570,9 +569,9 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
                 (conversation_id, assistant_definition_id, assistant_id, assistant_source, agent_id, \
                  rules_content, default_model_mode, resolved_model_id, default_permission_mode, \
                  resolved_permission_value, default_skills_mode, resolved_skill_ids, \
-                 resolved_disabled_builtin_skill_ids, default_mcps_mode, resolved_mcp_ids, \
+                 default_mcps_mode, resolved_mcp_ids, \
                  created_at, updated_at, default_thought_level_mode, resolved_thought_level_value) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(conversation_id)
         .bind(definition_id)
@@ -585,7 +584,6 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
         .bind("auto")
         .bind(None::<String>)
         .bind("auto")
-        .bind("[]")
         .bind("[]")
         .bind("auto")
         .bind("[]")

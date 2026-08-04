@@ -1,8 +1,8 @@
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::{SkillImportRecordRow, SkillRow};
-use crate::repository::skill::{CreateSkillImportRecordParams, ISkillRepository, UpsertSkillParams};
+use crate::models::SkillRow;
+use crate::repository::skill::{ISkillRepository, UpsertSkillParams};
 
 /// SQLite-backed implementation of [`ISkillRepository`].
 #[derive(Clone, Debug)]
@@ -100,54 +100,6 @@ impl ISkillRepository for SqliteSkillRepository {
             .await?
             .ok_or_else(|| DbError::NotFound(format!("skill '{name}'")))
     }
-
-    async fn create_import_record(
-        &self,
-        params: CreateSkillImportRecordParams<'_>,
-    ) -> Result<SkillImportRecordRow, DbError> {
-        let id = tjuaeui_common::generate_prefixed_id("skill_import");
-        let now = tjuaeui_common::now_ms();
-
-        sqlx::query(
-            "INSERT INTO skill_import_records \
-                (id, operation_id, source_label, source_path, source_name, skill_id, skill_name, \
-                 status, error_code, error_path, actual_bytes, limit_bytes, line, column, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(params.operation_id)
-        .bind(params.source_label)
-        .bind(params.source_path)
-        .bind(params.source_name)
-        .bind(params.skill_id)
-        .bind(params.skill_name)
-        .bind(params.status)
-        .bind(params.error_code)
-        .bind(params.error_path)
-        .bind(params.actual_bytes)
-        .bind(params.limit_bytes)
-        .bind(params.line)
-        .bind(params.column)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-
-        let row = sqlx::query_as::<_, SkillImportRecordRow>("SELECT * FROM skill_import_records WHERE id = ?")
-            .bind(&id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(row)
-    }
-
-    async fn list_import_records(&self, limit: i64) -> Result<Vec<SkillImportRecordRow>, DbError> {
-        let rows = sqlx::query_as::<_, SkillImportRecordRow>(
-            "SELECT * FROM skill_import_records ORDER BY created_at DESC, id DESC LIMIT ?",
-        )
-        .bind(limit.max(0))
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
 }
 
 #[cfg(test)]
@@ -222,36 +174,5 @@ mod tests {
         let names: Vec<_> = repo.list().await.unwrap().into_iter().map(|row| row.name).collect();
         assert_eq!(names, vec!["active"]);
         assert!(repo.find_by_name_any("deleted").await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn import_records_keep_structured_error_details() {
-        let (repo, _db) = setup().await;
-
-        let row = repo
-            .create_import_record(CreateSkillImportRecordParams {
-                operation_id: "import_1",
-                source_label: "parent-pack",
-                source_path: Some("/tmp/parent-pack"),
-                source_name: "beta-skill",
-                skill_id: None,
-                skill_name: None,
-                status: "failed",
-                error_code: Some("SKILL_IMPORT_FILE_TOO_LARGE"),
-                error_path: Some("assets/movie.mp4"),
-                actual_bytes: Some(73_400_320),
-                limit_bytes: Some(10_485_760),
-                line: None,
-                column: None,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(row.operation_id, "import_1");
-        assert_eq!(row.error_path.as_deref(), Some("assets/movie.mp4"));
-        assert_eq!(row.actual_bytes, Some(73_400_320));
-        assert_eq!(row.limit_bytes, Some(10_485_760));
-        let records = repo.list_import_records(10).await.unwrap();
-        assert_eq!(records.len(), 1);
     }
 }

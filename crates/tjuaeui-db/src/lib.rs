@@ -22,17 +22,27 @@ pub use error::{
 };
 pub use instance_lock::{DataDirInstanceGuard, instance_lock_path};
 pub use models::{
-    AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, AssistantOverrideRow, AssistantPreferenceRow,
-    AssistantRow, ConversationArtifactRow, ConversationAssistantSnapshotRow, CreateAssistantParams, FolderRow,
-    ProjectExplorerRow, ProjectKind, ProjectRow, Role, SkillImportRecordRow, SkillRow,
-    UpdateAgentAvailabilitySnapshotParams, UpdateAgentHandshakeParams, UpdateAssistantParams,
+    A2aAgentProfileRow, A2aAuditEventRow, A2aCredentialRow, A2aDelegationPermissionRow, A2aDelegationRow,
+    A2aPushSubscriptionRow, A2aTaskRow, AgentMetadataRow, AssetCredentialRow, AssetOperationRow, AssetOverlayRow,
+    AssetRecordRow, AssetRuntimeBindingRow, AssetRuntimeStateRow, AssetSnapshotRow, AssetTryRunReceiptRow,
+    AssetUpstreamRow, AssistantDefinitionRow, AssistantOverlayRow, AssistantPreferenceRow, ConversationArtifactRow,
+    ConversationAssistantSnapshotRow, ConversationTraceRow, ConversationTraceRuntimeAssetRefRow,
+    ConversationTraceRuntimeAssetSnapshotRow, ConversationTraceRuntimeAssetSnapshotSummaryRow,
+    ConversationTraceSpanRow, FolderRow, GithubPublishCredentialRow, GithubPublishOperationRow, ProjectExplorerRow,
+    ProjectKind, ProjectRow, Role, SkillRow, UpdateAgentAvailabilitySnapshotParams, UpdateAgentHandshakeParams,
     UpsertAgentMetadataParams, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
-    UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams, UpsertOverrideParams,
+    UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams,
 };
+pub use repository::UpsertSystemSettingsParams;
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
     ConversationFilters, ConversationRowUpdate, MessagePageCursor, MessagePageDirection, MessagePageParams,
     MessagePageResult, MessageRowUpdate, MessageSearchRow,
+};
+pub use repository::conversation_trace::{
+    CONVERSATION_TRACE_MAX_PER_CONVERSATION, CONVERSATION_TRACE_MAX_RUNTIME_ASSETS,
+    CONVERSATION_TRACE_MAX_SAFE_ATTRIBUTES_BYTES, CONVERSATION_TRACE_MAX_SPANS, CONVERSATION_TRACE_RETENTION_DAYS,
+    CompleteConversationTraceParams, ConversationTraceObservation, ConversationTraceSpanWriteResult,
 };
 pub use repository::cron::{
     ClaimCronRunParams, CronRunClaimResult, FinishCronRunParams, RecoverableCronRun, UpdateCronJobParams,
@@ -40,23 +50,31 @@ pub use repository::cron::{
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
-pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
-pub use repository::skill::{CreateSkillImportRecordParams, UpsertSkillParams};
+pub use repository::skill::UpsertSkillParams;
 pub use repository::team::{UpdateTaskParams, UpdateTeamParams};
 pub use repository::{
-    CreateAcpSessionParams, FeedbackDiagnosticsDbContext, FeedbackDiagnosticsProfile, FeedbackDiagnosticsProfileResult,
-    FeedbackDiagnosticsRequest, FeedbackDiagnosticsResult, IAcpSessionRepository, IAgentMetadataRepository,
-    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantOverrideRepository,
-    IAssistantPreferenceRepository, IAssistantRepository, IChannelRepository, IClientPreferenceRepository,
-    IConversationRepository, ICronRepository, IFeedbackDiagnosticsRepository, IMcpServerRepository,
-    IOAuthTokenRepository, IProjectStore, IProviderRepository, IRemoteAgentRepository, ISettingsRepository,
-    ISkillRepository, ITeamRepository, IUserRepository, PersistedSessionState, SaveRuntimeStateParams,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
-    SqliteAssistantRepository, SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteCronRepository, SqliteFeedbackDiagnosticsRepository, SqliteMcpServerRepository, SqliteOAuthTokenRepository,
-    SqliteProjectStore, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
-    SqliteSkillRepository, SqliteTeamRepository, SqliteUserRepository,
+    CommitAssetRuntimeBindingParams, CommitResolvedAssetParams, CommitTrackedAssetParams, ConfigureAssetOverlayParams,
+    CreateA2aDelegationParams, CreateA2aDelegationPermissionParams, CreateAcpSessionParams, CreateAssetSnapshotParams,
+    CreateAssetTryRunReceiptParams, EncryptedAssetSecretUpdate, FeedbackDiagnosticsDbContext,
+    FeedbackDiagnosticsProfile, FeedbackDiagnosticsProfileResult, FeedbackDiagnosticsRequest,
+    FeedbackDiagnosticsResult, IA2aRepository, IAcpSessionRepository, IAgentMetadataRepository, IAssetRepository,
+    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantPreferenceRepository, IChannelRepository,
+    IClientPreferenceRepository, IConversationRepository, IConversationTraceRepository, ICronRepository,
+    IFeedbackDiagnosticsRepository, IGithubPublishCredentialRepository, IGithubPublishOperationRepository,
+    IMcpServerRepository, IOAuthTokenRepository, IProjectStore, IProviderRepository, ISettingsRepository,
+    ISkillRepository, ITeamRepository, IUserRepository, PersistedSessionState, RecordA2aAuditParams,
+    RecordA2aPushDeliveryParams, RecordA2aPushDeliveryResult, SaveRuntimeStateParams, SetAssetRuntimeStateParams,
+    SqliteA2aRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssetRepository,
+    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository,
+    SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    SqliteConversationTraceRepository, SqliteCronRepository, SqliteFeedbackDiagnosticsRepository,
+    SqliteGithubPublishCredentialRepository, SqliteGithubPublishOperationRepository, SqliteMcpServerRepository,
+    SqliteOAuthTokenRepository, SqliteProjectStore, SqliteProviderRepository, SqliteSettingsRepository,
+    SqliteSkillRepository, SqliteTeamRepository, SqliteUserRepository, StartAssetOperationParams,
+    StartGithubPublishOperationParams, UpdateA2aDelegationParams, UpdateAssetOperationParams,
+    UpdateGithubPublishOperationParams, UpsertA2aAgentProfileParams, UpsertA2aCredentialParams,
+    UpsertA2aPushSubscriptionParams, UpsertA2aTaskParams, UpsertAssetRecordParams, UpsertAssetUpstreamParams,
+    UpsertGithubPublishCredentialParams,
 };
 
 // Re-export sqlx pool type for downstream crates

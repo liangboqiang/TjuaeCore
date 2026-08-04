@@ -17,6 +17,15 @@ pub(crate) fn agent_error_to_api_error(err: AgentError) -> ApiError {
         AgentError::RateLimited => ApiError::RateLimited,
         AgentError::ConversationArchived(message) => ApiError::ConversationArchived(message),
         AgentError::WorkspacePathRuntimeUnavailable(path) => ApiError::WorkspacePathRuntimeUnavailable(path),
+        AgentError::RuntimeAssetContract { reason, diagnostic } => ApiError::coded(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            reason.as_code(),
+            "无法确认运行资产已按请求实际加载",
+            Some(serde_json::json!({
+                "reasonCode": reason.as_code(),
+                "diagnostic": diagnostic,
+            })),
+        ),
         AgentError::Internal(message) => ApiError::Internal(message),
         AgentError::Acp(err) => acp_error_to_api_error(err),
     }
@@ -68,7 +77,26 @@ fn acp_error_public_message(err: &AcpError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_assets::RuntimeAssetFailureReason;
     use axum::http::StatusCode;
+
+    #[test]
+    fn runtime_asset_contract_maps_to_structured_safe_api_diagnostic() {
+        let error = agent_error_to_api_error(AgentError::runtime_asset_contract(
+            RuntimeAssetFailureReason::ReceiptUnsupported,
+            "当前运行时版本未提供实际加载回执",
+        ));
+
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.error_code(), "TJUAE_RUNTIME_ASSET_RECEIPT_UNSUPPORTED");
+        assert_eq!(
+            error.error_details(),
+            Some(serde_json::json!({
+                "reasonCode": "TJUAE_RUNTIME_ASSET_RECEIPT_UNSUPPORTED",
+                "diagnostic": "当前运行时版本未提供实际加载回执",
+            }))
+        );
+    }
 
     #[test]
     fn acp_error_to_api_error_status_codes() {

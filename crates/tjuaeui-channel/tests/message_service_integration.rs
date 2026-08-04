@@ -16,10 +16,10 @@ use tjuaeui_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
 use tjuaeui_db::models::AssistantSessionRow;
 use tjuaeui_db::models::UpsertAssistantDefinitionParams;
 use tjuaeui_db::{
-    IAcpSessionRepository, IAssistantDefinitionRepository, IClientPreferenceRepository, IConversationRepository,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository, SqliteClientPreferenceRepository,
-    SqliteConversationRepository, init_database_memory,
+    IAssistantDefinitionRepository, IClientPreferenceRepository, IConversationRepository, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
+    SqliteAssistantPreferenceRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    init_database_memory,
 };
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::broadcast;
@@ -46,10 +46,6 @@ struct NoopSkillResolver;
 
 #[async_trait]
 impl SkillResolver for NoopSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     async fn resolve_skills(&self, _names: &[String]) -> Vec<ResolvedAgentSkill> {
         Vec::new()
     }
@@ -212,7 +208,6 @@ fn bare_assistant_definition_params<'a>(
         default_skills_mode: "auto",
         default_skill_ids: "[]",
         custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
         default_mcps_mode: "auto",
         default_mcp_ids: "[]",
     }
@@ -272,7 +267,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
 }
 
 #[tokio::test]
-async fn send_to_agent_persists_assistant_snapshot_for_channel_bound_assistant() {
+async fn send_to_agent_rejects_raw_channel_bound_assistant_projection() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
 
@@ -332,31 +327,11 @@ async fn send_to_agent_persists_assistant_snapshot_for_channel_bound_assistant()
         last_activity: 1,
     };
 
-    let result = message_svc
+    let error = message_svc
         .send_to_agent(&session, "hello", PluginType::Telegram)
         .await
-        .unwrap();
-
-    let snapshot = conversation_repo
-        .get_assistant_snapshot(&result.conversation_id)
-        .await
-        .unwrap();
-    assert!(
-        snapshot.is_some(),
-        "channel-created conversation should persist an assistant snapshot when the platform is bound to an assistant"
-    );
-    let snapshot = snapshot.unwrap();
-    let conversation = conversation_repo.get(&result.conversation_id).await.unwrap().unwrap();
-    assert_eq!(conversation.r#type, AgentType::Acp.serde_name());
-    let session_row = acp_session_repo
-        .get(&result.conversation_id)
-        .await
-        .unwrap()
-        .expect("acp_session row should exist for ACP assistant conversations");
-    assert_eq!(session_row.agent_id, "2d23ff1c");
-    assert_eq!(snapshot.assistant_id, "bare-claude");
-    assert_eq!(snapshot.agent_id, "2d23ff1c");
-    assert_eq!(conversation.name, "Claude");
+        .expect_err("a raw projection row without an active Core binding must fail closed");
+    assert!(error.to_string().contains("资产来源不合法"));
 }
 
 #[tokio::test]
@@ -419,7 +394,7 @@ async fn send_to_agent_rejects_unresolvable_channel_assistant_binding() {
 }
 
 #[tokio::test]
-async fn send_to_agent_without_saved_binding_defaults_to_bare_tjuae_cli_assistant() {
+async fn send_to_agent_without_active_binding_rejects_bare_tjuae_cli_projection() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
 
@@ -472,26 +447,15 @@ async fn send_to_agent_without_saved_binding_defaults_to_bare_tjuae_cli_assistan
         last_activity: 1,
     };
 
-    let result = message_svc
+    let error = message_svc
         .send_to_agent(&session, "hello", PluginType::Telegram)
         .await
-        .unwrap();
-
-    let snapshot = conversation_repo
-        .get_assistant_snapshot(&result.conversation_id)
-        .await
-        .unwrap()
-        .expect("channel-created conversation should default to a bare assistant snapshot");
-    let conversation = conversation_repo.get(&result.conversation_id).await.unwrap().unwrap();
-
-    assert_eq!(snapshot.assistant_id, "bare-tjuaecli");
-    assert_eq!(snapshot.agent_id, "632f31d2");
-    assert_eq!(conversation.r#type, AgentType::TjuaeCli.serde_name());
-    assert_eq!(conversation.name, "tg-tjuaecli-70880480");
+        .expect_err("a generated bare assistant cannot replace an active Core binding");
+    assert!(error.to_string().contains("资产来源不合法"));
 }
 
 #[tokio::test]
-async fn send_to_agent_without_assistant_name_falls_back_to_legacy_channel_name() {
+async fn send_to_agent_does_not_restore_legacy_channel_assistant_fallback() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
 
@@ -548,11 +512,9 @@ async fn send_to_agent_without_assistant_name_falls_back_to_legacy_channel_name(
         last_activity: 1,
     };
 
-    let result = message_svc
+    let error = message_svc
         .send_to_agent(&session, "hello", PluginType::Telegram)
         .await
-        .unwrap();
-
-    let conversation = conversation_repo.get(&result.conversation_id).await.unwrap().unwrap();
-    assert_eq!(conversation.name, "tg-acp-codex-70880480");
+        .expect_err("legacy channel assistant fallbacks must not bypass Core bindings");
+    assert!(error.to_string().contains("资产来源不合法"));
 }

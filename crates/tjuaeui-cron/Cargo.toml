@@ -10,6 +10,7 @@ repository.workspace = true
 tjuaeui-common.workspace = true
 tjuaeui-db.workspace = true
 tjuaeui-api-types.workspace = true
+tjuaeui-asset.workspace = true
 tjuaeui-realtime.workspace = true
 tjuaeui-conversation.workspace = true
 tjuaeui-ai-agent.workspace = true

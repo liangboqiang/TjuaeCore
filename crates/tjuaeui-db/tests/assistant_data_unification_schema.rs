@@ -1,7 +1,7 @@
 use tjuaeui_db::init_database_memory;
 
 #[tokio::test]
-async fn migration_creates_assistant_unification_tables_and_keeps_legacy_tables() {
+async fn migration_creates_current_assistant_tables_and_drops_old_mirrors() {
     let db = init_database_memory().await.unwrap();
 
     let table_names: Vec<String> = sqlx::query_scalar(
@@ -9,9 +9,7 @@ async fn migration_creates_assistant_unification_tables_and_keeps_legacy_tables(
             'assistant_definitions',
             'assistant_overlays',
             'assistant_preferences',
-            'conversation_assistant_snapshots',
-            'assistants',
-            'assistant_overrides'
+            'conversation_assistant_snapshots'
         ) ORDER BY name",
     )
     .fetch_all(db.pool())
@@ -23,12 +21,19 @@ async fn migration_creates_assistant_unification_tables_and_keeps_legacy_tables(
         vec![
             "assistant_definitions".to_string(),
             "assistant_overlays".to_string(),
-            "assistant_overrides".to_string(),
             "assistant_preferences".to_string(),
-            "assistants".to_string(),
             "conversation_assistant_snapshots".to_string(),
         ]
     );
+
+    let old_mirror_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name IN ('assistants', 'assistant_overrides')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(old_mirror_count, 0);
 }
 
 #[tokio::test]
@@ -51,6 +56,7 @@ async fn assistant_definition_table_has_expected_default_columns() {
     assert!(columns.iter().any(|name| name == "default_model_mode"));
     assert!(columns.iter().any(|name| name == "default_permission_mode"));
     assert!(columns.iter().any(|name| name == "default_skill_ids"));
+    assert!(!columns.iter().any(|name| name == "default_disabled_builtin_skill_ids"));
     assert!(columns.iter().any(|name| name == "default_mcp_ids"));
     assert!(columns.iter().any(|name| name == "avatar_type"));
     assert!(columns.iter().any(|name| name == "avatar_value"));
@@ -70,6 +76,11 @@ async fn assistant_definition_table_has_expected_default_columns() {
             .await
             .unwrap_or_default();
     assert!(preference_columns.iter().any(|name| name == "assistant_definition_id"));
+    assert!(
+        !preference_columns
+            .iter()
+            .any(|name| name == "last_disabled_builtin_skill_ids")
+    );
 
     let snapshot_columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('conversation_assistant_snapshots')")
@@ -85,6 +96,11 @@ async fn assistant_definition_table_has_expected_default_columns() {
     assert!(snapshot_columns.iter().any(|name| name == "default_model_mode"));
     assert!(snapshot_columns.iter().any(|name| name == "resolved_model_id"));
     assert!(snapshot_columns.iter().any(|name| name == "resolved_skill_ids"));
+    assert!(
+        !snapshot_columns
+            .iter()
+            .any(|name| name == "resolved_disabled_builtin_skill_ids")
+    );
     assert!(snapshot_columns.iter().any(|name| name == "resolved_mcp_ids"));
 }
 
@@ -127,14 +143,14 @@ async fn assistant_definition_table_rejects_extension_source_and_owner_type() {
             name, name_i18n, description_i18n, avatar_type, agent_id,
             rule_resource_type, recommended_prompts, recommended_prompts_i18n,
             default_model_mode, default_permission_mode, default_skills_mode, default_skill_ids,
-            custom_skill_names, default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids,
+            custom_skill_names, default_mcps_mode, default_mcp_ids,
             created_at, updated_at
         ) VALUES (
             'd-ext-source', 'ext-source', 'extension', 'system', 'ext-source',
             'Ext Source', '{}', '{}', 'none', 'tjuaecli',
             'none', '[]', '{}',
             'auto', 'auto', 'fixed', '[]',
-            '[]', '[]', 'auto', '[]',
+            '[]', 'auto', '[]',
             1, 1
         )
         "#,
@@ -151,14 +167,14 @@ async fn assistant_definition_table_rejects_extension_source_and_owner_type() {
             name, name_i18n, description_i18n, avatar_type, agent_id,
             rule_resource_type, recommended_prompts, recommended_prompts_i18n,
             default_model_mode, default_permission_mode, default_skills_mode, default_skill_ids,
-            custom_skill_names, default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids,
+            custom_skill_names, default_mcps_mode, default_mcp_ids,
             created_at, updated_at
         ) VALUES (
             'd-ext-owner', 'ext-owner', 'builtin', 'extension', 'ext-owner',
             'Ext Owner', '{}', '{}', 'none', 'tjuaecli',
             'none', '[]', '{}',
             'auto', 'auto', 'fixed', '[]',
-            '[]', '[]', 'auto', '[]',
+            '[]', 'auto', '[]',
             1, 1
         )
         "#,

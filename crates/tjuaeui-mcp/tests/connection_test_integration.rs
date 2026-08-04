@@ -23,6 +23,14 @@ fn make_service_with_timeout(timeout: Duration) -> McpConnectionTestService {
     McpConnectionTestService::new(reqwest::Client::new(), Arc::new(BroadcastEventBus::new(16))).with_timeout(timeout)
 }
 
+fn make_direct_service_with_timeout(timeout: Duration) -> McpConnectionTestService {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("direct HTTP client should build");
+    McpConnectionTestService::new(client, Arc::new(BroadcastEventBus::new(16))).with_timeout(timeout)
+}
+
 // ---------------------------------------------------------------------------
 // CT-3: Command not found (ENOENT)
 // ---------------------------------------------------------------------------
@@ -51,7 +59,7 @@ async fn stdio_nonexistent_command_returns_not_found_error() {
 
 #[tokio::test]
 async fn http_unreachable_url_returns_connection_error() {
-    let svc = make_service_with_timeout(Duration::from_secs(5));
+    let svc = make_direct_service_with_timeout(Duration::from_secs(5));
     let transport = McpServerTransport::Http {
         url: "http://127.0.0.1:1/mcp-unreachable".into(),
         headers: HashMap::new(),
@@ -69,7 +77,7 @@ async fn http_unreachable_url_returns_connection_error() {
 
 #[tokio::test]
 async fn sse_unreachable_url_returns_connection_error() {
-    let svc = make_service_with_timeout(Duration::from_secs(5));
+    let svc = make_direct_service_with_timeout(Duration::from_secs(5));
     let transport = McpServerTransport::Sse {
         url: "http://127.0.0.1:1/sse-unreachable".into(),
         headers: HashMap::new(),

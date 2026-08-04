@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use tjuaeui_ai_agent::types::{BuildTaskOptions, SendMessageData};
-use tjuaeui_ai_agent::{AgentError, AgentInstance, AgentSendError, AgentSessionKind, IWorkerTaskManager};
-use tjuaeui_common::{AgentType, ConversationStatus, ErrorChain, now_ms};
+use tjuaeui_ai_agent::{
+    AgentError, AgentInstance, AgentSendError, AgentSessionKind, IWorkerTaskManager, RuntimeAssetFailureReason,
+    RuntimeAssetLoadReceipt, RuntimeAssetLoadRequest, verify_runtime_asset_receipt,
+};
+use tjuaeui_common::{AgentKillReason, AgentType, ConversationStatus, ErrorChain, now_ms};
 use tjuaeui_db::models::ConversationRow;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
@@ -13,7 +16,8 @@ use crate::runtime_state::TurnClaim;
 use crate::service::{
     ConversationService, MAX_SYSTEM_RESPONSE_CONTINUATIONS_PER_TURN, agent_error_top_level_code, persist_session_key,
 };
-use crate::stream_relay::{RelayOutcome, StreamRelay, TurnAttemptSummary};
+use crate::stream_relay::{RelayOutcome, RelayTerminal, StreamRelay, TurnAttemptSummary};
+use crate::trace::{ConversationTraceStartContext, RecordedSpanStatus, RuntimeSpan};
 use crate::turn_continuation_policy::{ContinuationDecision, TurnContinuationPolicy};
 use crate::turn_recovery_policy::{TurnRecoveryDecision, TurnRecoveryPolicy};
 use tjuaeui_api_types::{AgentErrorCode, SendMessageRequest};
@@ -21,7 +25,16 @@ use tjuaeui_api_types::{AgentErrorCode, SendMessageRequest};
 fn acp_backend_from_build_options(options: &BuildTaskOptions) -> Option<&str> {
     match &options.context.kind {
         AgentSessionKind::Acp(ctx) => ctx.config.backend.as_deref(),
+        AgentSessionKind::A2a(_) => None,
         AgentSessionKind::TjuaeCli(_) => None,
+    }
+}
+
+fn trace_backend_from_build_options(options: &BuildTaskOptions) -> Option<String> {
+    match &options.context.kind {
+        AgentSessionKind::Acp(context) => context.config.backend.clone().or_else(|| Some("acp".to_owned())),
+        AgentSessionKind::A2a(_) => Some("a2a".to_owned()),
+        AgentSessionKind::TjuaeCli(_) => Some("tjuae_cli".to_owned()),
     }
 }
 
@@ -85,9 +98,10 @@ impl ConversationTurnOrchestrator {
     }
 
     async fn run_attempt(&self, input: TurnAttemptInput) -> Result<TurnAttemptResult, ConversationTurnResult> {
-        let build_started_at = now_ms();
         let availability_agent_id = availability_agent_id(&input.build_options);
         let backend = acp_backend_from_build_options(&input.build_options).map(str::to_owned);
+        let runtime_asset_request = input.build_options.runtime_asset_request.clone();
+        let build_started_at = now_ms();
         info!(
             conversation_id = %input.conv_id,
             turn_id = %input.turn_id,
@@ -148,6 +162,95 @@ impl ConversationTurnOrchestrator {
                 });
             }
         };
+        let receipt_started_at = now_ms();
+        let runtime_asset_receipt = match confirmed_runtime_asset_receipt(runtime_asset_request.as_ref(), &agent) {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                let _ = self
+                    .task_manager
+                    .kill(&input.conv_id, Some(AgentKillReason::RuntimeCapabilityChanged));
+                let top_level_code = agent_error_top_level_code(&err);
+                self.service.record_runtime_span_best_effort(
+                    &input.conv_id,
+                    &input.turn_id,
+                    RuntimeSpan {
+                        phase: "receipt",
+                        status: RecordedSpanStatus::Failed,
+                        started_at: receipt_started_at,
+                        ended_at: now_ms(),
+                        asset_kind: None,
+                        local_asset_id: None,
+                        error_code: Some(top_level_code),
+                    },
+                );
+                let failure_message = err.to_string();
+                let send_error = AgentSendError::from_agent_error(err);
+                error!(
+                    conversation_id = %input.conv_id,
+                    turn_id = %input.turn_id,
+                    error_code = top_level_code,
+                    "Agent runtime asset receipt verification failed"
+                );
+                self.service
+                    .persist_and_broadcast_send_failure_tip(
+                        &input.conv_id,
+                        &input.turn_id,
+                        &send_error,
+                        Some(top_level_code),
+                    )
+                    .await;
+                return Err(ConversationTurnResult {
+                    status: ConversationTurnStatus::Failed,
+                    error_message: Some(failure_message),
+                });
+            }
+        };
+        if runtime_asset_receipt.is_some() {
+            self.service.record_runtime_span_best_effort(
+                &input.conv_id,
+                &input.turn_id,
+                RuntimeSpan {
+                    phase: "receipt",
+                    status: RecordedSpanStatus::Succeeded,
+                    started_at: receipt_started_at,
+                    ended_at: now_ms(),
+                    asset_kind: None,
+                    local_asset_id: None,
+                    error_code: None,
+                },
+            );
+        }
+        if let Some(receipt) = runtime_asset_receipt
+            && let Err(err) = self
+                .service
+                .record_runtime_asset_snapshot(&input.user_id, &input.conv_id, &input.turn_id, receipt)
+                .await
+        {
+            let _ = self
+                .task_manager
+                .kill(&input.conv_id, Some(AgentKillReason::RuntimeCapabilityChanged));
+            let top_level_code = agent_error_top_level_code(&err);
+            let failure_message = err.to_string();
+            let send_error = AgentSendError::from_agent_error(err);
+            error!(
+                conversation_id = %input.conv_id,
+                turn_id = %input.turn_id,
+                error_code = top_level_code,
+                "Agent runtime asset receipt persistence failed"
+            );
+            self.service
+                .persist_and_broadcast_send_failure_tip(
+                    &input.conv_id,
+                    &input.turn_id,
+                    &send_error,
+                    Some(top_level_code),
+                )
+                .await;
+            return Err(ConversationTurnResult {
+                status: ConversationTurnStatus::Failed,
+                error_message: Some(failure_message),
+            });
+        }
 
         if let Err(err) = self
             .service
@@ -214,6 +317,18 @@ impl ConversationTurnOrchestrator {
             .with_persistence(persistence.clone())
             .with_turn_completion(false)
             .with_defer_clean_terminal_errors(defer_clean_terminal_errors);
+            let relay = if let Some(writer) = self.service.trace_writer() {
+                relay
+                    .with_trace_writer(writer)
+                    .with_trace_context(ConversationTraceStartContext {
+                        backend: backend.clone(),
+                        model: None,
+                        mode: input.required_runtime_mode.clone(),
+                        input_size: i64::try_from(current_send.content.len()).unwrap_or(i64::MAX),
+                    })
+            } else {
+                relay
+            };
 
             let rx = agent.subscribe();
             if let Some(mode) = input
@@ -352,6 +467,19 @@ impl ConversationTurnOrchestrator {
         let conv_id = input.conversation.id.clone();
         let turn_id = input.turn_id.clone();
         let runtime_state = self.service.runtime_state();
+        self.service
+            .start_trace_best_effort(
+                &input.user_id,
+                &conv_id,
+                &turn_id,
+                ConversationTraceStartContext {
+                    backend: trace_backend_from_build_options(&input.build_options),
+                    model: None,
+                    mode: input.required_runtime_mode.clone(),
+                    input_size: i64::try_from(input.request.content.len()).unwrap_or(i64::MAX),
+                },
+            )
+            .await;
         let allowed_skill_names = input.build_options.context.skills.clone();
         let first_turn_msg_id = ConversationService::mint_msg_id();
         let initial_send = SendMessageData {
@@ -365,6 +493,7 @@ impl ConversationTurnOrchestrator {
         let mut replay_started_at = None;
         let mut final_error_message;
         let mut auth_failure = false;
+        let mut final_channel_closed = false;
 
         info!(conversation_id = %conv_id, turn_id = %turn_id, "conversation turn orchestrator started");
 
@@ -396,6 +525,7 @@ impl ConversationTurnOrchestrator {
             // Track the final attempt's auth signal so the post-loop availability
             // write-back can reflect "needs sign-in" (last iteration wins).
             auth_failure = terminal_is_auth_failure(&attempt_result.outcome);
+            final_channel_closed = matches!(attempt_result.outcome.terminal, RelayTerminal::ChannelClosed);
 
             let lifecycle = runtime_state.lifecycle_for(&conv_id);
             if !attempt_result.outcome.terminal.is_error() {
@@ -514,6 +644,19 @@ impl ConversationTurnOrchestrator {
             record_agent_session_success(&self.service, availability_agent_id(&input.build_options).as_deref()).await;
         }
 
+        let was_cancelled = runtime_state.is_cancelling(&conv_id);
+        let (trace_status, trace_incomplete) =
+            trace_terminal_outcome(was_cancelled, final_failed, final_channel_closed);
+        self.service
+            .complete_trace_best_effort(
+                &conv_id,
+                &turn_id,
+                trace_status,
+                final_failed.then_some("TURN_FAILED"),
+                None,
+                trace_incomplete,
+            )
+            .await;
         let was_deleting = turn_claim.release_for_turn(&turn_id);
         self.service
             .complete_released_turn(&conv_id, &turn_id, was_deleting)
@@ -530,6 +673,38 @@ impl ConversationTurnOrchestrator {
     }
 }
 
+fn confirmed_runtime_asset_receipt(
+    request: Option<&RuntimeAssetLoadRequest>,
+    agent: &AgentInstance,
+) -> Result<Option<RuntimeAssetLoadReceipt>, AgentError> {
+    confirm_runtime_asset_receipt_value(request, agent.runtime_asset_receipt())
+}
+
+fn confirm_runtime_asset_receipt_value(
+    request: Option<&RuntimeAssetLoadRequest>,
+    receipt: Option<RuntimeAssetLoadReceipt>,
+) -> Result<Option<RuntimeAssetLoadReceipt>, AgentError> {
+    match (request, receipt) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(AgentError::runtime_asset_contract(
+            RuntimeAssetFailureReason::ReceiptMissing,
+            "运行时未返回实际资产加载回执，已拒绝继续执行",
+        )),
+        (None, Some(_)) => Err(AgentError::runtime_asset_contract(
+            RuntimeAssetFailureReason::ReceiptUnexpected,
+            "运行时返回了未请求的资产加载回执，已拒绝继续执行",
+        )),
+        (Some(request), Some(receipt)) => verify_runtime_asset_receipt(request, receipt)
+            .map(Some)
+            .map_err(|error| {
+                AgentError::runtime_asset_contract(
+                    RuntimeAssetFailureReason::ReceiptMismatch,
+                    format!("实际资产加载回执与请求不一致：{error}"),
+                )
+            }),
+    }
+}
+
 fn availability_agent_id(options: &BuildTaskOptions) -> Option<String> {
     match &options.context.kind {
         AgentSessionKind::Acp(context) => context
@@ -538,6 +713,7 @@ fn availability_agent_id(options: &BuildTaskOptions) -> Option<String> {
             .as_deref()
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
+        AgentSessionKind::A2a(context) => Some(context.agent_id.clone()),
         AgentSessionKind::TjuaeCli(_) => None,
     }
 }
@@ -562,6 +738,18 @@ fn terminal_is_auth_failure(outcome: &RelayOutcome) -> bool {
                 | AgentErrorCode::UserLlmProviderAwsSsoExpired
         )
     )
+}
+
+fn trace_terminal_outcome(was_cancelled: bool, final_failed: bool, final_channel_closed: bool) -> (&'static str, bool) {
+    if was_cancelled {
+        ("cancelled", true)
+    } else if final_channel_closed {
+        ("interrupted", true)
+    } else if final_failed {
+        ("failed", true)
+    } else {
+        ("succeeded", false)
+    }
 }
 
 /// codex's canonical full-access mode id (migration 021 / `full_auto_mode_id`,
@@ -717,6 +905,59 @@ mod tests {
     use super::*;
     use crate::stream_relay::RelayTerminal;
 
+    fn runtime_asset_request() -> RuntimeAssetLoadRequest {
+        RuntimeAssetLoadRequest::new(
+            vec![tjuaeui_ai_agent::RuntimeAssetRef {
+                local_asset_id: "assistant-a".into(),
+                kind: "assistant".into(),
+                local_definition_digest: format!("sha256-{}", "a".repeat(64)),
+                runtime_content_digest: format!("sha256-{}", "b".repeat(64)),
+                upstream_package: None,
+                upstream_asset_id: None,
+                upstream_version: None,
+                upstream_revision: None,
+            }],
+            Vec::new(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn assert_runtime_asset_failure_reason(error: AgentError, expected: RuntimeAssetFailureReason) {
+        assert!(matches!(
+            error,
+            AgentError::RuntimeAssetContract { reason, .. } if reason == expected
+        ));
+    }
+
+    #[test]
+    fn runtime_asset_receipt_boundary_is_fail_closed_with_stable_reasons() {
+        let request = runtime_asset_request();
+        let valid_receipt = tjuaeui_ai_agent::core_only_runtime_asset_receipt(&request).unwrap();
+
+        assert_runtime_asset_failure_reason(
+            confirm_runtime_asset_receipt_value(Some(&request), None).unwrap_err(),
+            RuntimeAssetFailureReason::ReceiptMissing,
+        );
+        assert_runtime_asset_failure_reason(
+            confirm_runtime_asset_receipt_value(None, Some(valid_receipt.clone())).unwrap_err(),
+            RuntimeAssetFailureReason::ReceiptUnexpected,
+        );
+
+        let mut mismatched_receipt = valid_receipt.clone();
+        mismatched_receipt.assets[0].runtime_content_digest = format!("sha256-{}", "c".repeat(64));
+        assert_runtime_asset_failure_reason(
+            confirm_runtime_asset_receipt_value(Some(&request), Some(mismatched_receipt)).unwrap_err(),
+            RuntimeAssetFailureReason::ReceiptMismatch,
+        );
+
+        assert_eq!(
+            confirm_runtime_asset_receipt_value(Some(&request), Some(valid_receipt.clone())).unwrap(),
+            Some(valid_receipt)
+        );
+        assert_eq!(confirm_runtime_asset_receipt_value(None, None).unwrap(), None);
+    }
+
     fn finish_outcome(needs_auth: bool) -> RelayOutcome {
         RelayOutcome {
             system_responses: vec![],
@@ -815,6 +1056,12 @@ mod tests {
     fn plain_finish_is_not_auth_failure() {
         // A generic empty turn (or any normal finish) must NOT flip availability.
         assert!(!terminal_is_auth_failure(&finish_outcome(false)));
+    }
+
+    #[test]
+    fn ordinary_channel_close_is_an_incomplete_interrupted_trace() {
+        assert_eq!(trace_terminal_outcome(false, false, true), ("interrupted", true));
+        assert_eq!(trace_terminal_outcome(false, false, false), ("succeeded", false));
     }
 
     #[test]

@@ -7,13 +7,13 @@ on:
   workflow_call:
     inputs:
       tag_name:
-        description: "要构建并发布的标签（例如 v0.2.0）"
+        description: "要构建并发布的标签（例如 v0.3.0）"
         required: true
         type: string
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "要构建并发布的标签（例如 v0.2.0）"
+        description: "要构建并发布的标签（例如 v0.3.0）"
         required: true
         type: string
 
@@ -25,11 +25,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_HTTP_TIMEOUT: "600"
   CARGO_NET_RETRY: "10"
-  # v0.2.0 Linux ARM64 发布构建使用的 cross 提交。
+  # Linux ARM64 发布构建使用的固定 cross 提交。
   CROSS_GIT_REV: "29d00c7803f221f1b3f35e561b03792368fb8339"
   LINUX_X64_GLIBC_MAX: "GLIBC_2.34"
   LINUX_ARM64_GLIBC_MAX: "GLIBC_2.30"
   RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+  # GitHub App client ID 是公开标识，通过仓库变量注入最终二进制。
+  TJUAE_GITHUB_APP_CLIENT_ID: ${{ vars.TJUAE_GITHUB_APP_CLIENT_ID }}
 
 jobs:
   prepare-release:
@@ -96,6 +98,14 @@ jobs:
         with:
           toolchain: "1.95.0"
           targets: ${{ matrix.target }}
+
+      - name: 验证发布服务构建配置
+        shell: bash
+        run: |
+          if [[ -z "${TJUAE_GITHUB_APP_CLIENT_ID//[[:space:]]/}" ]] || [[ "${TJUAE_GITHUB_APP_CLIENT_ID}" =~ [[:space:]] ]]; then
+            echo "::error::请在 TjuaeCore 仓库变量中配置非空且不含空白的 TJUAE_GITHUB_APP_CLIENT_ID。"
+            exit 1
+          fi
 
       - name: 修复 MSVC 链接器（移除 Git 的 link.exe）
         if: runner.os == 'Windows'

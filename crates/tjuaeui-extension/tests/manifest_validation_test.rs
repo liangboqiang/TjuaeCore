@@ -14,7 +14,11 @@ fn mv1_valid_manifest_parses_and_validates() {
         "display_name": "My Cool Extension",
         "description": "A test extension",
         "contributes": {
-            "skills": [{ "name": "test-skill" }]
+            "settingsTabs": [{
+                "id": "test-settings",
+                "label": "Test settings",
+                "url": "settings/index.html"
+            }]
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
@@ -108,18 +112,37 @@ fn manifest_with_all_optional_fields() {
         "entry_point": "main.js",
         "permissions": { "storage": true, "events": true },
         "contributes": {},
-        "lifecycle": {
-            "on_install": "scripts/install.sh",
-            "on_activate": "scripts/activate.sh"
-        },
         "i18n": { "locales": ["en", "zh-CN"] }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
     let manifest = parse_manifest(&bytes).unwrap();
     assert_eq!(manifest.display_name.as_deref(), Some("Full Extension"));
     assert!(manifest.engine.is_some());
-    assert!(manifest.lifecycle.is_some());
     assert!(manifest.i18n.is_some());
+}
+
+#[test]
+fn core_asset_contributions_and_shell_lifecycle_are_rejected() {
+    for forbidden in [
+        serde_json::json!({ "contributes": { "assistants": [] } }),
+        serde_json::json!({ "contributes": { "acpAdapters": [] } }),
+        serde_json::json!({ "contributes": { "skills": [] } }),
+        serde_json::json!({ "contributes": { "mcpServers": [] } }),
+        serde_json::json!({ "lifecycle": { "onInstall": "scripts/install.ps1" } }),
+    ] {
+        let mut manifest = serde_json::json!({
+            "name": "application-extension",
+            "version": "1.0.0"
+        });
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .extend(forbidden.as_object().unwrap().clone());
+        assert!(
+            parse_manifest(&serde_json::to_vec(&manifest).unwrap()).is_err(),
+            "应用扩展清单必须拒绝 Core 资产贡献和 Shell 生命周期钩子：{manifest}"
+        );
+    }
 }
 
 #[test]
@@ -139,7 +162,6 @@ fn validate_manifest_directly() {
         entry_point: None,
         permissions: None,
         contributes: None,
-        lifecycle: None,
         i18n: None,
     };
     assert!(validate_manifest(&manifest).is_ok());

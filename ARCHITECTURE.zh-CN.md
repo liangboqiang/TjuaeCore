@@ -29,8 +29,8 @@ TjuaeCore 是 TjuaeUI 的后端服务，使用 Rust 构建（Axum + Tokio + SQLi
 │  tjuaeui-db    tjuaeui-api-types   tjuaeui-runtime  │
 │  （仓库层）    （API 契约）       （运行时/子进程）   │
 ├─────────────────────────────────────────────────┤
-│       tjuaeui-common          tjuaeui-assets       │
-│  （错误类型、枚举、加密）      （嵌入式数据）        │
+│  tjuaeui-common       tjuaeui-logo-catalog         │
+│ （错误类型、枚举、加密）    （嵌入式徽标目录）         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@ tjuaeui-common 没有任何内部依赖。
 | `tjuaeui-common` | 共享错误类型（ApiError）、枚举、ID 生成、加密工具、时间戳、分页 |
 | `tjuaeui-api-types` | 所有 HTTP/WebSocket 的请求和响应类型，是 API 契约的唯一定义处 |
 | `tjuaeui-db` | SQLite 数据库层，定义 Repository trait 和实现 |
-| `tjuaeui-assets` | 嵌入式静态资源（Agent 元数据、提示词） |
+| `tjuaeui-logo-catalog` | 通过公共只读路由提供的嵌入式徽标资源 |
 | `tjuaeui-runtime` | 托管 Node、子进程管理、PATH 增强 |
 
 ### 能力层（Capability）

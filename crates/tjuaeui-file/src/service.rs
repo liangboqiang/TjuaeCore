@@ -1259,7 +1259,7 @@ mod tests {
     #[test]
     fn list_workspace_files_sync_skips_directory_symlinks() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_dir = dir.path().join("builtin-skills/auto-inject/tjuaeui-skills");
+        let skill_dir = dir.path().join("managed-skills/auto-inject/tjuaeui-skills");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), "---\ndescription: test\n---\nbody").unwrap();
 

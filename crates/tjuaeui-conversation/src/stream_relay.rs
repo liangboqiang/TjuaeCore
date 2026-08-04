@@ -14,8 +14,14 @@ use crate::service::ConversationService;
 use crate::stream_persistence::{
     PersistedTextSegment, StreamPersistenceAdapter, TextSegmentState, ThinkingSegmentState,
 };
+use crate::trace::{
+    ConversationTraceSink, ConversationTraceStartContext, ConversationTraceWriter, RecordedSpan, RecordedSpanKind,
+    RecordedSpanStatus,
+};
 use serde_json::json;
 use tjuaeui_db::IConversationRepository;
+#[cfg(test)]
+use tjuaeui_db::IConversationTraceRepository;
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, oneshot};
@@ -112,6 +118,8 @@ pub struct StreamRelay {
     adapter: StreamPersistenceAdapter,
     complete_turn: bool,
     defer_clean_terminal_errors: bool,
+    trace_writer: Option<Arc<ConversationTraceWriter>>,
+    trace_context: ConversationTraceStartContext,
 }
 
 impl StreamRelay {
@@ -137,6 +145,8 @@ impl StreamRelay {
             adapter,
             complete_turn: true,
             defer_clean_terminal_errors: false,
+            trace_writer: None,
+            trace_context: ConversationTraceStartContext::default(),
         }
     }
 
@@ -168,6 +178,22 @@ impl StreamRelay {
 
     pub fn with_defer_clean_terminal_errors(mut self, enabled: bool) -> Self {
         self.defer_clean_terminal_errors = enabled;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_trace_repository(mut self, repository: Arc<dyn IConversationTraceRepository>) -> Self {
+        self.trace_writer = Some(ConversationTraceWriter::spawn(repository, self.broadcaster.clone()));
+        self
+    }
+
+    pub(crate) fn with_trace_writer(mut self, writer: Arc<ConversationTraceWriter>) -> Self {
+        self.trace_writer = Some(writer);
+        self
+    }
+
+    pub fn with_trace_context(mut self, context: ConversationTraceStartContext) -> Self {
+        self.trace_context = context;
         self
     }
 
@@ -208,6 +234,16 @@ impl StreamRelay {
         mut send_error_rx: Option<oneshot::Receiver<AgentSendError>>,
     ) -> RelayOutcome {
         let started_at = now_ms();
+        let mut trace = self.trace_writer.as_ref().map(|writer| {
+            ConversationTraceSink::spawn(
+                self.user_id.clone(),
+                self.conversation_id.clone(),
+                self.turn_id.clone(),
+                Arc::clone(writer),
+                started_at,
+                self.trace_context.clone(),
+            )
+        });
         info!(
             target: "tjuaeui_feedback_diagnostics",
             diagnostic_event = "feedback.runtime.turn_start",
@@ -279,6 +315,9 @@ impl StreamRelay {
                         );
                         continue;
                     }
+                    if let Some(trace) = trace.as_ref() {
+                        trace.observe_event();
+                    }
 
                     if !first_agent_event_logged {
                         first_agent_event_logged = true;
@@ -300,13 +339,23 @@ impl StreamRelay {
                             // close the current text/thinking segment so the next batch of
                             // text starts a fresh bubble, but do NOT terminate the relay and
                             // do NOT forward this event to the WebSocket.
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking_traced(
+                                &mut active_thinking,
+                                trace.as_ref(),
+                                RecordedSpanStatus::Succeeded,
+                            )
+                            .await;
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                                 .await;
                         }
                         AgentStreamEvent::Thinking(data) => {
                             if data.status.as_deref() == Some("done") {
-                                self.complete_active_thinking(&mut active_thinking).await;
+                                self.complete_active_thinking_traced(
+                                    &mut active_thinking,
+                                    trace.as_ref(),
+                                    RecordedSpanStatus::Succeeded,
+                                )
+                                .await;
                                 continue;
                             }
 
@@ -327,18 +376,42 @@ impl StreamRelay {
                             }
                             if !data.content.is_empty() {
                                 attempt.saw_visible_output = true;
+                                if let Some(trace) = trace.as_ref() {
+                                    trace.observe_output();
+                                }
                             }
 
-                            let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
-                                id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
-                                buffer: String::new(),
-                                started_at: now_ms(),
-                            });
+                            if active_thinking.is_none() {
+                                let segment = ThinkingSegmentState {
+                                    id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
+                                    buffer: String::new(),
+                                    started_at: now_ms(),
+                                };
+                                if let Some(trace) = trace.as_ref() {
+                                    trace.record_span(RecordedSpan {
+                                        kind: RecordedSpanKind::Thinking,
+                                        source_id: Some(&segment.id),
+                                        source_message_id: Some(&segment.id),
+                                        name: "thinking",
+                                        status: RecordedSpanStatus::Running,
+                                        started_at: segment.started_at,
+                                        ended_at: None,
+                                        safe_attributes: json!({}),
+                                    });
+                                }
+                                active_thinking = Some(segment);
+                            }
+                            let segment = active_thinking.as_mut().expect("thinking segment initialized");
                             segment.buffer.push_str(&data.content);
                             self.forward_to_websocket_with_msg_id(&segment.id, &event);
                         }
                         AgentStreamEvent::Text(data) => {
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking_traced(
+                                &mut active_thinking,
+                                trace.as_ref(),
+                                RecordedSpanStatus::Succeeded,
+                            )
+                            .await;
                             if !first_visible_output_logged && !data.content.is_empty() {
                                 first_visible_output_logged = true;
                                 info!(
@@ -354,6 +427,9 @@ impl StreamRelay {
                             }
                             if !data.content.is_empty() {
                                 attempt.saw_visible_output = true;
+                                if let Some(trace) = trace.as_ref() {
+                                    trace.observe_output();
+                                }
                             }
 
                             let segment = active_text.get_or_insert_with(|| TextSegmentState {
@@ -417,6 +493,9 @@ impl StreamRelay {
                                     event_type,
                                     elapsed_ms, "StreamRelay deferred clean terminal error for possible auto replay"
                                 );
+                                if let Some(trace) = trace.take() {
+                                    trace.flush(full_text_buffer.len());
+                                }
                                 break RelayOutcome {
                                     system_responses: Vec::new(),
                                     terminal,
@@ -427,7 +506,19 @@ impl StreamRelay {
                             if deleting {
                                 debug!("Skipping terminal DB finalization because conversation is deleting");
                             } else {
-                                self.complete_active_thinking(&mut active_thinking).await;
+                                let thinking_status = if self.is_cancelling() {
+                                    RecordedSpanStatus::Cancelled
+                                } else if matches!(event, AgentStreamEvent::Error(_)) {
+                                    RecordedSpanStatus::Failed
+                                } else {
+                                    RecordedSpanStatus::Succeeded
+                                };
+                                self.complete_active_thinking_traced(
+                                    &mut active_thinking,
+                                    trace.as_ref(),
+                                    thinking_status,
+                                )
+                                .await;
                                 self.close_active_text_segment(
                                     &mut active_text,
                                     &mut text_segments,
@@ -461,29 +552,108 @@ impl StreamRelay {
                                     .complete_conversation(&self.broadcaster, &self.turn_id, None)
                                     .await;
                             }
+                            if let Some(trace) = trace.take() {
+                                if !self.complete_turn {
+                                    trace.flush(full_text_buffer.len());
+                                    break outcome;
+                                }
+                                let (status, error_code, retryable, incomplete) = if self.is_cancelling() {
+                                    ("cancelled", None, None, true)
+                                } else {
+                                    match &event {
+                                        AgentStreamEvent::Error(data) => {
+                                            ("failed", data.code.and_then(trace_error_code), data.retryable, true)
+                                        }
+                                        _ => ("succeeded", None, None, false),
+                                    }
+                                };
+                                trace.complete(status, full_text_buffer.len(), error_code, retryable, incomplete);
+                            }
                             break outcome;
                         }
                         AgentStreamEvent::ToolCall(data) => {
                             attempt.saw_tool_or_side_effect = true;
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking_traced(
+                                &mut active_thinking,
+                                trace.as_ref(),
+                                RecordedSpanStatus::Succeeded,
+                            )
+                            .await;
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                                 .await;
+                            if let Some(trace) = trace.as_ref() {
+                                trace.record_span(RecordedSpan {
+                                    kind: RecordedSpanKind::Tool,
+                                    source_id: Some(&data.call_id),
+                                    source_message_id: Some(&data.call_id),
+                                    name: &data.name,
+                                    status: tool_span_status(data.status),
+                                    started_at: now_ms(),
+                                    ended_at: tool_span_ended_at(data.status),
+                                    safe_attributes: json!({}),
+                                });
+                            }
                             self.forward_to_websocket(&event);
                             self.adapter.persist_tool_call(data).await;
                         }
                         AgentStreamEvent::AcpToolCall(data) => {
                             attempt.saw_tool_or_side_effect = true;
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking_traced(
+                                &mut active_thinking,
+                                trace.as_ref(),
+                                RecordedSpanStatus::Succeeded,
+                            )
+                            .await;
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                                 .await;
+                            if let Some(trace) = trace.as_ref() {
+                                let now = now_ms();
+                                let tool_call_id = &data.update.tool_call_id;
+                                let (name, tool_kind) = acp_tool_kind(data.update.kind);
+                                let status = acp_tool_span_status(data.update.status);
+                                trace.record_span(RecordedSpan {
+                                    kind: RecordedSpanKind::Tool,
+                                    source_id: Some(tool_call_id),
+                                    source_message_id: Some(tool_call_id),
+                                    name,
+                                    status,
+                                    started_at: now,
+                                    ended_at: if matches!(status, RecordedSpanStatus::Running) {
+                                        None
+                                    } else {
+                                        Some(now)
+                                    },
+                                    safe_attributes: json!({ "tool_kind": tool_kind }),
+                                });
+                            }
                             self.forward_to_websocket(&event);
                             self.adapter.persist_acp_tool_call(data).await;
                         }
                         AgentStreamEvent::ToolGroup(entries) => {
                             attempt.saw_tool_or_side_effect = true;
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking_traced(
+                                &mut active_thinking,
+                                trace.as_ref(),
+                                RecordedSpanStatus::Succeeded,
+                            )
+                            .await;
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                                 .await;
+                            if let Some(trace) = trace.as_ref() {
+                                let source_message_id = entries.first().map(|entry| entry.call_id.as_str());
+                                for entry in entries {
+                                    trace.record_span(RecordedSpan {
+                                        kind: RecordedSpanKind::Tool,
+                                        source_id: Some(&entry.call_id),
+                                        source_message_id,
+                                        name: &entry.name,
+                                        status: tool_span_status(entry.status),
+                                        started_at: now_ms(),
+                                        ended_at: tool_span_ended_at(entry.status),
+                                        safe_attributes: json!({}),
+                                    });
+                                }
+                            }
                             self.forward_to_websocket(&event);
                             self.adapter.persist_tool_group(entries).await;
                         }
@@ -506,9 +676,39 @@ impl StreamRelay {
                                 self.adapter.persist_tip(data).await;
                             }
                         }
-                        AgentStreamEvent::CronTrigger(_)
-                        | AgentStreamEvent::Permission(_)
-                        | AgentStreamEvent::AcpPermission(_) => {
+                        AgentStreamEvent::Permission(_) => {
+                            attempt.saw_tool_or_side_effect = true;
+                            if let Some(trace) = trace.as_ref() {
+                                trace.record_span(RecordedSpan {
+                                    kind: RecordedSpanKind::Permission,
+                                    source_id: Some(&self.msg_id),
+                                    source_message_id: Some(&self.msg_id),
+                                    name: "permission",
+                                    status: RecordedSpanStatus::Running,
+                                    started_at: now_ms(),
+                                    ended_at: None,
+                                    safe_attributes: json!({}),
+                                });
+                            }
+                            self.forward_to_websocket(&event);
+                        }
+                        AgentStreamEvent::AcpPermission(data) => {
+                            attempt.saw_tool_or_side_effect = true;
+                            if let (Some(trace), Some(confirmation)) = (trace.as_ref(), data.as_confirmation()) {
+                                trace.record_span(RecordedSpan {
+                                    kind: RecordedSpanKind::Permission,
+                                    source_id: Some(&confirmation.call_id),
+                                    source_message_id: Some(&confirmation.call_id),
+                                    name: "permission",
+                                    status: RecordedSpanStatus::Running,
+                                    started_at: now_ms(),
+                                    ended_at: None,
+                                    safe_attributes: json!({ "permission_kind": "tool" }),
+                                });
+                            }
+                            self.forward_to_websocket(&event);
+                        }
+                        AgentStreamEvent::CronTrigger(_) => {
                             attempt.saw_tool_or_side_effect = true;
                             self.forward_to_websocket(&event);
                         }
@@ -540,7 +740,16 @@ impl StreamRelay {
                     if deleting {
                         debug!("Skipping channel-closed DB finalization because conversation is deleting");
                     } else {
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking_traced(
+                            &mut active_thinking,
+                            trace.as_ref(),
+                            if self.is_cancelling() {
+                                RecordedSpanStatus::Cancelled
+                            } else {
+                                RecordedSpanStatus::Interrupted
+                            },
+                        )
+                        .await;
                         self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                             .await;
                     }
@@ -569,6 +778,17 @@ impl StreamRelay {
                             .complete_conversation(&self.broadcaster, &self.turn_id, None)
                             .await;
                     }
+                    if let Some(trace) = trace.take() {
+                        if !self.complete_turn {
+                            trace.flush(full_text_buffer.len());
+                            break outcome;
+                        }
+                        if self.is_cancelling() {
+                            trace.complete("cancelled", full_text_buffer.len(), None, None, true);
+                        } else {
+                            trace.complete("interrupted", full_text_buffer.len(), None, None, true);
+                        }
+                    }
                     break outcome;
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -584,10 +804,17 @@ impl StreamRelay {
             .is_some_and(|state| state.is_deleting(&self.conversation_id))
     }
 
+    fn is_cancelling(&self) -> bool {
+        self.runtime_state
+            .as_ref()
+            .is_some_and(|state| state.is_cancelling(&self.conversation_id))
+    }
+
     fn event_kind(event: &AgentStreamEvent) -> &'static str {
         match event {
             AgentStreamEvent::Start(_) => "Start",
             AgentStreamEvent::Text(_) => "Text",
+            AgentStreamEvent::A2aPart(_) => "A2aPart",
             AgentStreamEvent::Tips(_) => "Tips",
             AgentStreamEvent::Thinking(_) => "Thinking",
             AgentStreamEvent::ToolCall(_) => "ToolCall",
@@ -720,6 +947,28 @@ impl StreamRelay {
         self.adapter.persist_thinking_segment(segment, duration_ms as u64).await;
     }
 
+    async fn complete_active_thinking_traced(
+        &self,
+        active_thinking: &mut Option<ThinkingSegmentState>,
+        trace: Option<&ConversationTraceSink>,
+        status: RecordedSpanStatus,
+    ) {
+        if let (Some(trace), Some(segment)) = (trace, active_thinking.as_ref()) {
+            let ended_at = now_ms();
+            trace.record_span(RecordedSpan {
+                kind: RecordedSpanKind::Thinking,
+                source_id: Some(&segment.id),
+                source_message_id: Some(&segment.id),
+                name: "thinking",
+                status,
+                started_at: segment.started_at,
+                ended_at: Some(ended_at),
+                safe_attributes: json!({}),
+            });
+        }
+        self.complete_active_thinking(active_thinking).await;
+    }
+
     #[tracing::instrument(skip_all)]
     async fn close_active_text_segment(
         &self,
@@ -792,6 +1041,56 @@ impl StreamRelay {
     }
 }
 
+fn tool_span_status(status: tjuaeui_ai_agent::protocol::events::tool_call::ToolCallStatus) -> RecordedSpanStatus {
+    use tjuaeui_ai_agent::protocol::events::tool_call::ToolCallStatus;
+    match status {
+        ToolCallStatus::Running => RecordedSpanStatus::Running,
+        ToolCallStatus::Completed => RecordedSpanStatus::Succeeded,
+        ToolCallStatus::Error => RecordedSpanStatus::Failed,
+        ToolCallStatus::Canceled => RecordedSpanStatus::Cancelled,
+    }
+}
+
+fn tool_span_ended_at(status: tjuaeui_ai_agent::protocol::events::tool_call::ToolCallStatus) -> Option<i64> {
+    if matches!(
+        status,
+        tjuaeui_ai_agent::protocol::events::tool_call::ToolCallStatus::Running
+    ) {
+        None
+    } else {
+        Some(now_ms())
+    }
+}
+
+fn acp_tool_span_status(
+    status: Option<tjuaeui_ai_agent::protocol::events::tool_call::AcpToolCallStatus>,
+) -> RecordedSpanStatus {
+    use tjuaeui_ai_agent::protocol::events::tool_call::AcpToolCallStatus;
+    match status {
+        None | Some(AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress) => RecordedSpanStatus::Running,
+        Some(AcpToolCallStatus::Completed) => RecordedSpanStatus::Succeeded,
+        Some(AcpToolCallStatus::Failed) => RecordedSpanStatus::Failed,
+    }
+}
+
+fn acp_tool_kind(
+    kind: Option<tjuaeui_ai_agent::protocol::events::tool_call::AcpToolCallKind>,
+) -> (&'static str, &'static str) {
+    use tjuaeui_ai_agent::protocol::events::tool_call::AcpToolCallKind;
+    match kind {
+        Some(AcpToolCallKind::Read) => ("read", "read"),
+        Some(AcpToolCallKind::Edit) => ("edit", "edit"),
+        Some(AcpToolCallKind::Execute) => ("execute", "execute"),
+        None => ("tool", "other"),
+    }
+}
+
+fn trace_error_code(code: AgentErrorCode) -> Option<String> {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
 struct SharedSkillResolver {
     resolver: Arc<dyn SkillResolver>,
     allowed_skill_names: Vec<String>,
@@ -815,6 +1114,7 @@ impl ISkillLoadService for SharedSkillResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_resolver::ResolvedAgentSkill;
     use crate::stream_persistence::StreamPersistenceAdapter;
     use std::io::Write;
     use std::sync::Mutex;
@@ -865,11 +1165,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SkillResolver for RecordingSkillResolverForRelay {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
-        async fn resolve_skills(&self, _names: &[String]) -> Vec<tjuaeui_extension::ResolvedAgentSkill> {
+        async fn resolve_skills(&self, _names: &[String]) -> Vec<ResolvedAgentSkill> {
             Vec::new()
         }
 
@@ -888,7 +1184,7 @@ mod tests {
             &self,
             _workspace: &std::path::Path,
             _rel_dirs: &[&str],
-            _skills: &[tjuaeui_extension::ResolvedAgentSkill],
+            _skills: &[ResolvedAgentSkill],
         ) -> usize {
             0
         }
@@ -953,6 +1249,41 @@ mod tests {
 
         let content: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
         assert_eq!(content["content"], "Hello World");
+    }
+
+    #[tokio::test]
+    async fn trace_storage_failure_never_changes_turn_outcome() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(tjuaeui_realtime::BroadcastEventBus::new(64));
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        // No matching conversation is inserted, so the trace FK write fails.
+        let trace_repo = Arc::new(tjuaeui_db::SqliteConversationTraceRepository::new(
+            database.pool().clone(),
+        ));
+        let (tx, _) = broadcast::channel(8);
+        let relay = StreamRelay::new(
+            "missing-conversation".into(),
+            "asst-1".into(),
+            "turn-1".into(),
+            "user-1".into(),
+            repo.clone(),
+            bus,
+        )
+        .with_trace_repository(trace_repo);
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Text(TextEventData {
+            content: "still succeeds".into(),
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        let inserts = repo.take_inserts();
+        assert_eq!(inserts.len(), 1);
+        let content: serde_json::Value = serde_json::from_str(&inserts[0].content).unwrap();
+        assert_eq!(content["content"], "still succeeds");
     }
 
     #[tokio::test]

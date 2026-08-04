@@ -42,10 +42,8 @@ async fn send_message_evicts_acp_task_after_terminal_error() {
 #[tokio::test]
 async fn send_message_clears_persisted_acp_model_after_model_not_found() {
     let acp_session_repo = Arc::new(StubAcpSessionRepo::default());
-    let (svc, _broadcaster, repo, _default_task_mgr) = make_service_with_resolver_and_acp_session_repo(
-        Arc::new(FixedSkillResolver { names: vec![] }),
-        acp_session_repo.clone(),
-    );
+    let (svc, _broadcaster, repo, _default_task_mgr) =
+        make_service_with_resolver_and_acp_session_repo(Arc::new(FixedSkillResolver), acp_session_repo.clone());
     let task_mgr = Arc::new(MockTaskManager::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let workspace = ensure_test_workspace_path();
@@ -118,10 +116,8 @@ async fn send_message_clears_persisted_acp_model_after_model_not_found() {
 #[tokio::test]
 async fn send_message_does_not_clear_persisted_acp_model_for_other_terminal_errors() {
     let acp_session_repo = Arc::new(StubAcpSessionRepo::default());
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service_with_resolver_and_acp_session_repo(
-        Arc::new(FixedSkillResolver { names: vec![] }),
-        acp_session_repo.clone(),
-    );
+    let (svc, _broadcaster, _repo, _default_task_mgr) =
+        make_service_with_resolver_and_acp_session_repo(Arc::new(FixedSkillResolver), acp_session_repo.clone());
     let task_mgr = Arc::new(MockTaskManager::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 

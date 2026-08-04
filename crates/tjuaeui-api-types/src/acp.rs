@@ -129,24 +129,7 @@ pub struct ProbeModelRequest {
     pub backend: String,
 }
 
-/// Request body for probing a custom ACP agent.
-///
-/// Two-step check: Step 1 resolves `command` on `$PATH`; Step 2 spawns
-/// the CLI and performs an ACP `initialize` handshake. The same
-/// function is called from the dedicated endpoint (manual test button)
-/// and from the create/update path (test-on-save).
-#[derive(Debug, Clone, Deserialize)]
-pub struct TryConnectCustomAgentRequest {
-    pub command: String,
-    #[serde(default)]
-    pub acp_args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    #[serde(default)]
-    pub runtime_scope_id: Option<String>,
-}
-
-/// Outcome of [`TryConnectCustomAgentRequest`].
+/// Engine Adapter 试跑的结构化结果。
 ///
 /// Tagged enum: `step` distinguishes the states the frontend's Alert component
 /// renders (success → green, fail_cli → red, fail_acp → yellow, fail_auth →
@@ -159,7 +142,7 @@ pub struct TryConnectCustomAgentRequest {
 /// tell these apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
-pub enum TryConnectCustomAgentResponse {
+pub enum EngineAdapterProbeResponse {
     Success,
     FailCli { error: String },
     FailAcp { error: String },
@@ -277,39 +260,15 @@ mod tests {
     }
 
     #[test]
-    fn try_connect_custom_agent_request_serde() {
-        let json = json!({
-            "command": "/path/to/agent",
-            "acp_args": ["--flag"],
-            "env": { "KEY": "value" },
-            "runtime_scope_id": "custom-agent:test"
-        });
-        let req: TryConnectCustomAgentRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.command, "/path/to/agent");
-        assert_eq!(req.acp_args, vec!["--flag"]);
-        assert_eq!(req.env.get("KEY"), Some(&"value".into()));
-        assert_eq!(req.runtime_scope_id.as_deref(), Some("custom-agent:test"));
-    }
-
-    #[test]
-    fn try_connect_custom_agent_request_defaults() {
-        let json = json!({ "command": "/bin/test" });
-        let req: TryConnectCustomAgentRequest = serde_json::from_value(json).unwrap();
-        assert!(req.acp_args.is_empty());
-        assert!(req.env.is_empty());
-        assert!(req.runtime_scope_id.is_none());
-    }
-
-    #[test]
-    fn try_connect_response_tag_serializes() {
-        use super::TryConnectCustomAgentResponse;
-        let ok = TryConnectCustomAgentResponse::Success;
+    fn engine_adapter_probe_response_tag_serializes() {
+        use super::EngineAdapterProbeResponse;
+        let ok = EngineAdapterProbeResponse::Success;
         assert_eq!(
             serde_json::to_value(&ok).unwrap(),
             serde_json::json!({"step":"success"})
         );
 
-        let fail = TryConnectCustomAgentResponse::FailCli {
+        let fail = EngineAdapterProbeResponse::FailCli {
             error: "not found".into(),
         };
         assert_eq!(
@@ -319,7 +278,7 @@ mod tests {
 
         // Reachable-but-unauthorized is its own tag so the UI can show a
         // "needs login" hint instead of a generic ACP failure.
-        let auth = TryConnectCustomAgentResponse::FailAuth {
+        let auth = EngineAdapterProbeResponse::FailAuth {
             error: "requires login".into(),
         };
         assert_eq!(

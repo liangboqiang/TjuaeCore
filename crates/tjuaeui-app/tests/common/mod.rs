@@ -8,25 +8,95 @@ use tower::ServiceExt;
 use wiremock::MockServer;
 
 use tjuaeui_ai_agent::{AgentInstance, IAgentTask, IMockAgent, WorkerTaskManagerImpl};
+use tjuaeui_api_types::{AssetKind, AssetRuntimeCommandRequest, AssetRuntimeState, CreateAssetRequest};
 use tjuaeui_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
-use tjuaeui_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
+use tjuaeui_asset::{AssetError, SkillPaths, SkillRouterState};
 use tjuaeui_file::FileService;
 use tjuaeui_system::VersionCheckService;
 
+fn isolated_app_config() -> AppConfig {
+    let data_dir = tempfile::tempdir().expect("create isolated app test directory").keep();
+    let work_dir = data_dir.join("work");
+    std::fs::create_dir_all(&work_dir).expect("create isolated app test work directory");
+    AppConfig {
+        data_dir,
+        work_dir,
+        ..Default::default()
+    }
+}
+
+pub fn with_asset_protocol(mut request: Request<Body>) -> Request<Body> {
+    request.headers_mut().insert(
+        "x-tjuae-asset-protocol",
+        header::HeaderValue::from_static(tjuaeui_asset::TJUAE_ASSET_PROTOCOL_VERSION),
+    );
+    request
+}
+
 pub async fn build_app() -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let router = create_router(&services).await.expect("build router");
     (router, services)
 }
 
+/// Seed an assistant through the final Core asset lifecycle.
+///
+/// E2E fixtures must not revive the removed `/api/assistants` write API: the
+/// catalog Definition and active user-scoped runtime projection are the only
+/// source of assistants consumed by cron, team and conversation flows.
+pub async fn install_test_assistant(services: &AppServices, asset_id: &str, display_name: &str) {
+    let user_id = "system_default_user";
+    let detail = match services.asset_catalog.get(user_id, asset_id).await {
+        Ok(detail) => detail,
+        Err(AssetError::NotFound(_)) => services
+            .asset_catalog
+            .create(
+                user_id,
+                CreateAssetRequest {
+                    id: asset_id.into(),
+                    kind: AssetKind::Assistant,
+                    display_name: display_name.into(),
+                    description: None,
+                    runtime_id: Some(asset_id.into()),
+                },
+            )
+            .await
+            .expect("create test assistant asset"),
+        Err(error) => panic!("read test assistant asset: {error}"),
+    };
+    if detail.asset.runtime_state == AssetRuntimeState::Active {
+        return;
+    }
+
+    let command = |operation: &str| AssetRuntimeCommandRequest {
+        idempotency_key: format!("{asset_id}-{operation}"),
+        expected_definition_digest: detail.asset.definition_digest.clone(),
+        expected_overlay_version: None,
+    };
+    services
+        .asset_catalog
+        .validate_runtime(user_id, asset_id, command("validate"))
+        .await
+        .expect("validate test assistant asset");
+    services
+        .asset_catalog
+        .try_run(user_id, asset_id, command("try-run"))
+        .await
+        .expect("try-run test assistant asset");
+    services
+        .asset_catalog
+        .activate(user_id, asset_id, command("activate"))
+        .await
+        .expect("activate test assistant asset");
+}
+
 /// Build an app whose skill router uses the given temp directories.
 ///
-/// Use for HTTP integration tests that need deterministic on-disk layouts
-/// (E1 `/api/skills`, E3/E4 built-in reads, E5 `/api/skills/info`).
+/// Use for HTTP integration tests that need deterministic runtime skill paths.
 /// Returns the router, services, and the `SkillPaths` so the test can seed
-/// fixtures at known locations. `/api/skills` reads the database only; tests
-/// that seed skill directories should call `sync_skill_catalog_for_test`.
+/// fixtures at known locations. `/api/skills` reads the per-user asset
+/// catalog; raw runtime directories are deliberately not auto-adopted.
 #[allow(dead_code)]
 pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router, AppServices, SkillPaths) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
@@ -36,41 +106,23 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
         ..Default::default()
     };
     let services = AppServices::from_config(db, &config).await.unwrap();
-    sqlx::query("DELETE FROM skill_import_records")
-        .execute(services.database.pool())
-        .await
-        .unwrap();
     sqlx::query("DELETE FROM skills")
         .execute(services.database.pool())
         .await
         .unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
 
-    let builtin_dir = root.join("builtin-skills");
     let paths = SkillPaths {
-        data_dir: root.to_path_buf(),
         user_skills_dir: root.join("skills"),
         cron_skills_dir: root.join("cron").join("skills"),
-        builtin_skills_dir: builtin_dir.clone(),
-        builtin_rules_dir: root.join("builtin-rules"),
-        assistant_rules_dir: root.join("assistant-rules"),
-        assistant_skills_dir: root.join("assistant-skills"),
     };
-    for dir in [
-        &paths.user_skills_dir,
-        &builtin_dir,
-        &paths.builtin_rules_dir,
-        &paths.assistant_rules_dir,
-        &paths.assistant_skills_dir,
-    ] {
+    for dir in [&paths.user_skills_dir, &paths.cron_skills_dir] {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let ext_paths_mgr = std::sync::Arc::new(ExternalPathsManager::with_file(root.join("paths.json")).await);
     states.skill = SkillRouterState {
         skill_paths: paths.clone(),
-        skill_repo: std::sync::Arc::new(tjuaeui_db::SqliteSkillRepository::new(services.database.pool().clone())),
-        external_paths_manager: ext_paths_mgr,
+        asset_catalog: services.asset_catalog.clone(),
         assistant_dispatcher: states.skill.assistant_dispatcher.clone(),
     };
 
@@ -78,16 +130,9 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
     (router, services, paths)
 }
 
-pub async fn sync_skill_catalog_for_test(services: &AppServices, paths: &SkillPaths) {
-    let repo = tjuaeui_db::SqliteSkillRepository::new(services.database.pool().clone());
-    tjuaeui_extension::sync_skill_catalog_into_repo(paths, &repo)
-        .await
-        .expect("sync skill catalog");
-}
-
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.shell.shell_service = std::sync::Arc::new(tjuaeui_shell::ShellService::new(std::sync::Arc::new(
         tjuaeui_shell::NoopSystemOpener,
@@ -98,7 +143,7 @@ pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
 
 pub async fn build_app_with_file_roots(allowed_roots: Vec<std::path::PathBuf>) -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.file.file_service = std::sync::Arc::new(FileService::new(services.event_bus.clone(), allowed_roots));
     let router = create_router_with_states(&services, states);
@@ -110,10 +155,16 @@ pub async fn build_app_with_mock_version(
     mock_server: &MockServer,
 ) -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
-    states.system.version_check_service =
-        VersionCheckService::with_api_base(reqwest::Client::new(), current_version.to_owned(), mock_server.uri());
+    states.system.version_check_service = VersionCheckService::with_api_base(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build isolated version-check client"),
+        current_version.to_owned(),
+        mock_server.uri(),
+    );
     let router = create_router_with_states(&services, states);
     (router, services)
 }
@@ -140,7 +191,7 @@ pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
     });
     let wtm: std::sync::Arc<dyn tjuaeui_ai_agent::IWorkerTaskManager> =
         std::sync::Arc::new(WorkerTaskManagerImpl::new(factory));
-    let services = AppServices::from_config(db, &AppConfig::default())
+    let services = AppServices::from_config(db, &isolated_app_config())
         .await
         .unwrap()
         .with_worker_task_manager(wtm);

@@ -1,26 +1,21 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
 use tjuaeui_api_types::WebSocketMessage;
-use tjuaeui_common::{TimestampMs, now_ms};
+use tjuaeui_common::now_ms;
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::error::ExtensionError;
-use crate::lifecycle::{HookKind, execute_hook, needs_install_hook, resolve_hook_path};
 use crate::loader::{ScanPath, resolve_scan_paths};
-use crate::registry_helpers::{
-    build_state_map, load_and_validate, merge_persisted_states, run_deactivation_hooks, to_summary,
-};
+use crate::registry_helpers::{build_state_map, load_and_validate, merge_persisted_states, to_summary};
 use crate::resolvers::{resolve_all_contributions, resolve_i18n_for_all};
 use crate::state::ExtensionStateStore;
 use crate::types::{
-    ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAcpAdapter,
-    ResolvedAgent, ResolvedAssistant, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
-    ResolvedSettingsTab, ResolvedSkill, ResolvedTheme, WebuiContribution,
+    ExtensionLifecyclePayload, ExtensionSystemEvent, LoadedExtension, ResolvedChannelPlugin, ResolvedContributions,
+    ResolvedModelProvider, ResolvedSettingsTab, ResolvedTheme, WebuiContribution,
 };
 
 // Re-export ExtensionSummary from registry_helpers so that
@@ -100,9 +95,9 @@ impl ExtensionRegistry {
     /// 2. Filter by engine compatibility
     /// 3. Validate dependencies + topological sort
     /// 4. Merge persisted states (enabled/disabled)
-    /// 5. Run lifecycle hooks (onInstall if needed, then onActivate)
-    /// 6. Resolve all contributions
-    /// 7. Persist updated states
+    /// 5. 更新启用状态时间戳
+    /// 6. 解析应用扩展贡献
+    /// 7. 持久化状态
     pub async fn initialize_with_scan_paths(&self, scan_paths: Vec<ScanPath>) -> Result<(), ExtensionError> {
         info!("initializing extension registry");
         debug!(count = scan_paths.len(), "resolved scan paths");
@@ -114,8 +109,8 @@ impl ExtensionRegistry {
         let persisted = self.state_store.load().await?;
         let extensions = merge_persisted_states(extensions, &persisted);
 
-        // 5. Run lifecycle hooks.
-        let extensions = self.run_activation_hooks(extensions, &persisted).await;
+        // 5. 应用扩展是纯声明式的，不执行安装或激活脚本。
+        let extensions = mark_enabled_extensions_active(extensions);
 
         // 6. Resolve contributions.
         let contributions = resolve_all_contributions(&extensions);
@@ -153,16 +148,13 @@ impl ExtensionRegistry {
     pub async fn hot_reload(&self) {
         info!("hot-reloading extension registry");
 
-        // 1. Snapshot current extensions and scan paths for deactivation.
-        let (current_exts, scan_paths) = {
+        // 1. 读取当前扫描路径。
+        let scan_paths = {
             let guard = self.inner.read().await;
-            (guard.extensions.clone(), guard.scan_paths.clone())
+            guard.scan_paths.clone()
         };
 
-        // 2. Run onDeactivate hooks for each currently active extension.
-        run_deactivation_hooks(&current_exts).await;
-
-        // 3. Reload pipeline (same as initialize but reuses existing scan paths).
+        // 2. 重载声明式应用扩展。
         let (extensions, _dep_result) = load_and_validate(&scan_paths, &self.app_version);
 
         // Use in-memory state (not file) to preserve pending writes that
@@ -170,7 +162,7 @@ impl ExtensionRegistry {
         let persisted = self.state_store.get_all().await;
 
         let extensions = merge_persisted_states(extensions, &persisted);
-        let extensions = self.run_activation_hooks(extensions, &persisted).await;
+        let extensions = mark_enabled_extensions_active(extensions);
         let contributions = resolve_all_contributions(&extensions);
 
         let states = build_state_map(&extensions);
@@ -284,10 +276,6 @@ impl ExtensionRegistry {
         guard.extensions.iter().map(to_summary).collect()
     }
 
-    pub(crate) fn event_broadcaster(&self) -> Arc<dyn EventBroadcaster> {
-        self.broadcaster.clone()
-    }
-
     /// Look up a single loaded extension by name.
     pub async fn get_extension_by_name(&self, name: &str) -> Option<LoadedExtension> {
         let guard = self.inner.read().await;
@@ -303,43 +291,6 @@ impl ExtensionRegistry {
     pub async fn get_themes(&self) -> Vec<ResolvedTheme> {
         let guard = self.inner.read().await;
         guard.contributions.themes.clone()
-    }
-
-    pub async fn get_assistants(&self) -> Vec<ResolvedAssistant> {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.clone()
-    }
-
-    /// Return `true` if any extension contributes an assistant with this id.
-    pub async fn has_assistant(&self, id: &str) -> bool {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().any(|a| a.id == id)
-    }
-
-    /// Lookup a single extension-contributed assistant by id.
-    pub async fn get_assistant_by_id(&self, id: &str) -> Option<ResolvedAssistant> {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().find(|a| a.id == id).cloned()
-    }
-
-    pub async fn get_acp_adapters(&self) -> Vec<ResolvedAcpAdapter> {
-        let guard = self.inner.read().await;
-        guard.contributions.acp_adapters.clone()
-    }
-
-    pub async fn get_agents(&self) -> Vec<ResolvedAgent> {
-        let guard = self.inner.read().await;
-        guard.contributions.agents.clone()
-    }
-
-    pub async fn get_mcp_servers(&self) -> Vec<crate::types::ResolvedMcpServer> {
-        let guard = self.inner.read().await;
-        guard.contributions.mcp_servers.clone()
-    }
-
-    pub async fn get_skills(&self) -> Vec<ResolvedSkill> {
-        let guard = self.inner.read().await;
-        guard.contributions.skills.clone()
     }
 
     pub async fn get_settings_tabs(&self) -> Vec<ResolvedSettingsTab> {
@@ -405,70 +356,16 @@ impl ExtensionRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Activation hooks
-// ---------------------------------------------------------------------------
-
-impl ExtensionRegistry {
-    /// Run lifecycle hooks for each extension in order:
-    /// - `onInstall` if first time or version changed
-    /// - `onActivate` for each enabled extension
-    ///
-    /// Hook failures are logged but do not prevent other extensions from
-    /// activating.
-    async fn run_activation_hooks(
-        &self,
-        mut extensions: Vec<LoadedExtension>,
-        persisted: &HashMap<String, ExtensionState>,
-    ) -> Vec<LoadedExtension> {
-        let now: TimestampMs = now_ms();
-
-        for ext in &mut extensions {
-            if !ext.state.enabled {
-                continue;
-            }
-
-            let ext_name = ext.manifest.name.clone();
-            let ext_dir = Path::new(&ext.directory);
-
-            // Check onInstall + onActivate hooks.
-            if let Some(hooks) = &ext.manifest.lifecycle {
-                let persisted_version = persisted.get(&ext_name).map(|s| s.version.as_str());
-
-                if needs_install_hook(&ext.manifest.version, persisted_version)
-                    && let Some(hook_path) = resolve_hook_path(hooks, HookKind::OnInstall)
-                    && let Err(e) = execute_hook(ext_dir, hook_path, HookKind::OnInstall, &ext_name).await
-                {
-                    warn!(
-                        extension = %ext_name,
-                        error = %e,
-                        "onInstall hook failed, continuing"
-                    );
-                }
-
-                // Run onActivate
-                if let Some(hook_path) = resolve_hook_path(hooks, HookKind::OnActivate)
-                    && let Err(e) = execute_hook(ext_dir, hook_path, HookKind::OnActivate, &ext_name).await
-                {
-                    warn!(
-                        extension = %ext_name,
-                        error = %e,
-                        "onActivate hook failed, continuing"
-                    );
-                }
-            }
-
-            // Update activation timestamp and install time.
-            ext.state.last_activated_at = Some(now);
-            if ext.state.installed_at.is_none() {
-                ext.state.installed_at = Some(now);
-            }
-
-            self.broadcast_lifecycle_event(&ext_name, ExtensionSystemEvent::ExtensionActivated, None);
+fn mark_enabled_extensions_active(mut extensions: Vec<LoadedExtension>) -> Vec<LoadedExtension> {
+    let now = now_ms();
+    for extension in &mut extensions {
+        if !extension.state.enabled {
+            continue;
         }
-
-        extensions
+        extension.state.last_activated_at = Some(now);
+        extension.state.installed_at.get_or_insert(now);
     }
+    extensions
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +395,6 @@ mod tests {
                 entry_point: None,
                 permissions: None,
                 contributes: None,
-                lifecycle: None,
                 i18n: None,
             },
             directory: format!("/tmp/ext/{name}"),

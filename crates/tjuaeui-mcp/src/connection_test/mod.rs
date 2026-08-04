@@ -77,8 +77,8 @@ impl McpConnectionTestService {
         transport: &McpServerTransport,
         runtime_scope_id: Option<&str>,
     ) -> McpConnectionTestResult {
-        debug!(name, ?transport, "starting MCP connection test");
         let transport_type = mcp_transport_type(transport);
+        debug!(name, transport_type, "starting MCP connection test");
         let mcp_server_id = runtime_scope_id.unwrap_or(name);
         log_mcp_transport_start(mcp_server_id, transport_type);
         let result = match transport {

@@ -7,14 +7,17 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+a2a.workspace = true
+a2a-client.workspace = true
+a2a-grpc.workspace = true
 async-trait.workspace = true
 tjuaeui-auth.workspace = true
+tjuaeui-asset.workspace = true
 tjuaeui-common.workspace = true
 tjuaeui-db.workspace = true
 tjuaeui-mcp.workspace = true
 tjuaeui-realtime.workspace = true
 tjuaeui-runtime.workspace = true
-tjuaeui-extension.workspace = true
 tjuaeui-api-types.workspace = true
 tjuaeui-team-prompts.workspace = true
 tjuaeui-session.workspace = true
@@ -22,6 +25,9 @@ tjuaeui-process.workspace = true
 tjuaeui-system.workspace = true
 axum.workspace = true
 http.workspace = true
+tonic.workspace = true
+tower.workspace = true
+hyper-util.workspace = true
 base64.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -31,10 +37,13 @@ hex.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 regex.workspace = true
+reqwest.workspace = true
+mime_guess.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonwebtoken.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 which.workspace = true
@@ -45,10 +54,13 @@ tjuae-protocol.workspace = true
 tjuae-config.workspace = true
 tjuae-mcp.workspace = true
 uuid.workspace = true
+url.workspace = true
 agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage", "unstable_session_fork", "unstable_session_additional_directories", "unstable_session_resume"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 rusqlite.workspace = true
 libc.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 
 [features]
 # Enables the `AgentInstance::Mock` variant used by downstream test harnesses
@@ -59,11 +71,11 @@ libc.workspace = true
 test-support = []
 
 [dev-dependencies]
+rcgen = "0.14.8"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber.workspace = true
 tjuaeui-common.workspace = true
-tjuaeui-extension.workspace = true
 tjuaeui-db.workspace = true
 tjuaeui-process.workspace = true
 uuid.workspace = true

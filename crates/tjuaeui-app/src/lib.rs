@@ -7,6 +7,8 @@
 
 mod config;
 mod router;
+mod runtime_asset_cleanup;
+mod runtime_asset_projection;
 mod services;
 
 pub use config::{AppConfig, derive_encryption_key};

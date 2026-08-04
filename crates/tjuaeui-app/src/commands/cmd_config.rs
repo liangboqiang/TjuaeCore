@@ -8,13 +8,12 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 
 use crate::cli::{
-    ConfigAgentCustomCommand, ConfigAgentOverridesCommand, ConfigAgentsArgs, ConfigAgentsCommand, ConfigArgs,
-    ConfigAssistantTextCommand, ConfigAssistantsArgs, ConfigAssistantsCommand, ConfigCommand, ConfigConversationArgs,
-    ConfigConversationCommand, ConfigCronArgs, ConfigCronCommand, ConfigCronCurrentArgs, ConfigCronCurrentCommand,
-    ConfigCronJobSkillCommand, ConfigCronJobsArgs, ConfigCronJobsCommand, ConfigMcpArgs, ConfigMcpCommand,
-    ConfigMcpOauthCommand, ConfigMcpServersCommand, ConfigProviderModelsCommand, ConfigProvidersArgs,
-    ConfigProvidersCommand, ConfigSettingsArgs, ConfigSettingsClientCommand, ConfigSettingsCommand, ConfigSkillsArgs,
-    ConfigSkillsCommand, ConfigSkillsExternalPathsCommand, ConfigSkillsMarketCommand,
+    ConfigAgentOverridesCommand, ConfigAgentsArgs, ConfigAgentsCommand, ConfigArgs, ConfigAssistantTextCommand,
+    ConfigAssistantsArgs, ConfigAssistantsCommand, ConfigCommand, ConfigConversationArgs, ConfigConversationCommand,
+    ConfigCronArgs, ConfigCronCommand, ConfigCronCurrentArgs, ConfigCronCurrentCommand, ConfigCronJobSkillCommand,
+    ConfigCronJobsArgs, ConfigCronJobsCommand, ConfigMcpArgs, ConfigMcpCommand, ConfigMcpServersCommand,
+    ConfigProviderModelsCommand, ConfigProvidersArgs, ConfigProvidersCommand, ConfigSettingsArgs,
+    ConfigSettingsClientCommand, ConfigSettingsCommand, ConfigSkillsArgs, ConfigSkillsCommand,
 };
 use crate::commands::config_capabilities;
 
@@ -91,36 +90,8 @@ async fn run_assistants(client: &reqwest::Client, args: ConfigAssistantsArgs) ->
             print_envelope(data, meta(None), command)
         }
         ConfigAssistantsCommand::Get => run_assistant_get(client).await,
-        ConfigAssistantsCommand::Create => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config assistants create",
-                Method::POST,
-                "/api/assistants",
-                "/api/assistants",
-                false,
-            )
-            .await
-        }
-        ConfigAssistantsCommand::Update => run_assistant_update(client).await,
-        ConfigAssistantsCommand::Delete => run_assistant_delete(client).await,
-        ConfigAssistantsCommand::Import => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config assistants import",
-                Method::POST,
-                "/api/assistants/import",
-                "/api/assistants",
-                false,
-            )
-            .await
-        }
-        ConfigAssistantsCommand::State => run_assistant_state(client).await,
         ConfigAssistantsCommand::Rule(args) => {
             run_assistant_text(client, "rule", args.command, "/api/skills/assistant-rule").await
-        }
-        ConfigAssistantsCommand::Skill(args) => {
-            run_assistant_text(client, "skill", args.command, "/api/skills/assistant-skill").await
         }
     }
 }
@@ -138,68 +109,6 @@ async fn run_assistant_get(client: &reqwest::Client) -> Result<(), ConfigError> 
     print_envelope(data, meta(Some(selectors)), command)
 }
 
-async fn run_assistant_update(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config assistants update";
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = take_required_string_field(&mut payload, "assistant_id", command)?;
-    let locale = take_optional_string_field(&mut payload, "locale");
-    let detail_path = assistant_detail_path(&id, locale.as_deref());
-    let before = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let update_path = format!("/api/assistants/{}", encode_path_segment(&id));
-    let data = request_json(client, &env, Method::PUT, &update_path, Some(payload), command).await?;
-    let after = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
-}
-
-async fn run_assistant_state(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config assistants state";
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = take_required_string_field(&mut payload, "assistant_id", command)?;
-    let path = format!("/api/assistants/{}/state", encode_path_segment(&id));
-    let detail_path = assistant_detail_path(&id, None);
-    let before = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let data = request_json(client, &env, Method::PATCH, &path, Some(payload), command).await?;
-    let after = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
-}
-
-async fn run_assistant_delete(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config assistants delete";
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = required_string_field(&payload, "assistant_id", command)?;
-    let before = request_json(
-        client,
-        &env,
-        Method::GET,
-        &assistant_detail_path(&id, None),
-        None,
-        command,
-    )
-    .await?;
-    let path = format!("/api/assistants/{}", encode_path_segment(&id));
-    let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, "/api/assistants", None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
-}
-
 async fn run_assistant_text(
     client: &reqwest::Client,
     kind: &'static str,
@@ -208,8 +117,6 @@ async fn run_assistant_text(
 ) -> Result<(), ConfigError> {
     let action_name = match action {
         ConfigAssistantTextCommand::Read => "read",
-        ConfigAssistantTextCommand::Write => "write",
-        ConfigAssistantTextCommand::Delete => "delete",
     };
     let command = format!("config assistants {kind} {action_name}");
     let command = command.as_str();
@@ -218,85 +125,16 @@ async fn run_assistant_text(
     let mut selectors = SelectorMeta::default();
     resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
 
-    match action {
-        ConfigAssistantTextCommand::Read => {
-            let data = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(payload),
-                command,
-            )
-            .await?;
-            print_envelope(data, meta(Some(selectors)), command)
-        }
-        ConfigAssistantTextCommand::Write => {
-            let id = required_string_field(&payload, "assistant_id", command)?;
-            let locale = optional_string_field(&payload, "locale");
-            let read_payload = assistant_text_read_payload(&id, locale.as_deref());
-            let before = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload.clone()),
-                command,
-            )
-            .await?;
-            let data = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/write"),
-                Some(payload),
-                command,
-            )
-            .await?;
-            let after = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload),
-                command,
-            )
-            .await?;
-            let mut extra = selectors.into_map();
-            extra.insert("before".into(), redacted_content_summary(before));
-            extra.insert("after".into(), redacted_content_summary(after));
-            print_envelope(data, meta_from_map(extra), command)
-        }
-        ConfigAssistantTextCommand::Delete => {
-            let id = required_string_field(&payload, "assistant_id", command)?;
-            let locale = optional_string_field(&payload, "locale");
-            let read_payload = assistant_text_read_payload(&id, locale.as_deref());
-            let before = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload.clone()),
-                command,
-            )
-            .await?;
-            let path = format!("{route_prefix}/{}", encode_path_segment(&id));
-            let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-            let after = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload),
-                command,
-            )
-            .await?;
-            let mut extra = selectors.into_map();
-            extra.insert("before".into(), redacted_content_summary(before));
-            extra.insert("after".into(), redacted_content_summary(after));
-            print_envelope(data, meta_from_map(extra), command)
-        }
-    }
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &format!("{route_prefix}/read"),
+        Some(payload),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(Some(selectors)), command)
 }
 
 async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<(), ConfigError> {
@@ -307,120 +145,7 @@ async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<
             let data = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
             print_envelope(data, meta(None), command)
         }
-        ConfigSkillsCommand::Info => {
-            run_payload_passthrough(
-                client,
-                "config skills info",
-                Method::POST,
-                "/api/skills/info",
-                None,
-                ReadBack::None,
-            )
-            .await
-        }
-        ConfigSkillsCommand::Paths => {
-            let command = "config skills paths";
-            let env = ConfigEnv::from_env(command)?;
-            let data = request_json(client, &env, Method::GET, "/api/skills/paths", None, command).await?;
-            print_envelope(data, meta(None), command)
-        }
-        ConfigSkillsCommand::Import => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config skills import",
-                Method::POST,
-                "/api/skills/import",
-                "/api/skills",
-                false,
-            )
-            .await
-        }
-        ConfigSkillsCommand::Delete => run_skill_delete(client).await,
-        ConfigSkillsCommand::Scan => {
-            run_payload_passthrough(
-                client,
-                "config skills scan",
-                Method::POST,
-                "/api/skills/scan",
-                None,
-                ReadBack::None,
-            )
-            .await
-        }
-        ConfigSkillsCommand::ExternalPaths(args) => match args.command {
-            ConfigSkillsExternalPathsCommand::List => {
-                run_no_input_request(
-                    client,
-                    "config skills external-paths list",
-                    Method::GET,
-                    "/api/skills/external-paths",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsExternalPathsCommand::Add => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config skills external-paths add",
-                    Method::POST,
-                    "/api/skills/external-paths",
-                    "/api/skills/external-paths",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsExternalPathsCommand::Remove => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config skills external-paths remove",
-                    Method::DELETE,
-                    "/api/skills/external-paths",
-                    "/api/skills/external-paths",
-                    false,
-                )
-                .await
-            }
-        },
-        ConfigSkillsCommand::Market(args) => match args.command {
-            ConfigSkillsMarketCommand::Enable => {
-                run_no_input_request_with_collection_readback(
-                    client,
-                    "config skills market enable",
-                    Method::POST,
-                    "/api/skills/market/enable",
-                    "/api/skills/paths",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsMarketCommand::Disable => {
-                run_no_input_request_with_collection_readback(
-                    client,
-                    "config skills market disable",
-                    Method::POST,
-                    "/api/skills/market/disable",
-                    "/api/skills/paths",
-                    false,
-                )
-                .await
-            }
-        },
     }
-}
-
-async fn run_skill_delete(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config skills delete";
-    let env = ConfigEnv::from_env(command)?;
-    let payload = read_stdin_payload(command)?;
-    let skill_name = required_string_field(&payload, "skill_name", command)?;
-    let path = format!("/api/skills/{}", encode_path_segment(&skill_name));
-    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-    let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-    let mut extra = Map::new();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
 }
 
 async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), ConfigError> {
@@ -441,62 +166,7 @@ async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), Co
                 )
                 .await
             }
-            ConfigMcpServersCommand::Create => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config mcp servers create",
-                    Method::POST,
-                    "/api/mcp/servers",
-                    "/api/mcp/servers",
-                    true,
-                )
-                .await
-            }
-            ConfigMcpServersCommand::Update => run_mcp_server_update(client).await,
-            ConfigMcpServersCommand::Delete => {
-                run_id_no_body_request_with_collection_readback(
-                    client,
-                    "config mcp servers delete",
-                    Method::DELETE,
-                    IdRoute::new("/api/mcp/servers", "", "server_id"),
-                    "/api/mcp/servers",
-                    true,
-                )
-                .await
-            }
-            ConfigMcpServersCommand::Toggle => {
-                run_id_no_body_request_with_resource_readback(
-                    client,
-                    "config mcp servers toggle",
-                    Method::POST,
-                    IdRoute::new("/api/mcp/servers", "/toggle", "server_id"),
-                    IdRoute::new("/api/mcp/servers", "", "server_id"),
-                    true,
-                )
-                .await
-            }
-            ConfigMcpServersCommand::Import => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config mcp servers import",
-                    Method::POST,
-                    "/api/mcp/servers/import",
-                    "/api/mcp/servers",
-                    true,
-                )
-                .await
-            }
         },
-        ConfigMcpCommand::TestConnection => {
-            run_payload_request(
-                client,
-                "config mcp test-connection",
-                Method::POST,
-                "/api/mcp/test-connection",
-                true,
-            )
-            .await
-        }
         ConfigMcpCommand::AgentConfigs => {
             run_no_input_request(
                 client,
@@ -507,68 +177,7 @@ async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), Co
             )
             .await
         }
-        ConfigMcpCommand::Oauth(args) => match args.command {
-            ConfigMcpOauthCommand::CheckStatus => {
-                run_payload_request(
-                    client,
-                    "config mcp oauth check-status",
-                    Method::POST,
-                    "/api/mcp/oauth/check-status",
-                    true,
-                )
-                .await
-            }
-            ConfigMcpOauthCommand::Login => {
-                run_payload_request_with_body_readback(
-                    client,
-                    "config mcp oauth login",
-                    Method::POST,
-                    "/api/mcp/oauth/login",
-                    "/api/mcp/oauth/check-status",
-                    true,
-                )
-                .await
-            }
-            ConfigMcpOauthCommand::Logout => {
-                run_payload_request_with_body_readback(
-                    client,
-                    "config mcp oauth logout",
-                    Method::POST,
-                    "/api/mcp/oauth/logout",
-                    "/api/mcp/oauth/check-status",
-                    true,
-                )
-                .await
-            }
-            ConfigMcpOauthCommand::Authenticated => {
-                run_no_input_request(
-                    client,
-                    "config mcp oauth authenticated",
-                    Method::GET,
-                    "/api/mcp/oauth/authenticated",
-                    true,
-                )
-                .await
-            }
-        },
     }
-}
-
-async fn run_mcp_server_update(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config mcp servers update";
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = take_required_string_field(&mut payload, "server_id", command)?;
-    let path = format!("/api/mcp/servers/{}", encode_path_segment(&id));
-    let before = request_json(client, &env, Method::GET, &path, None, command).await?;
-    let data = request_json(client, &env, Method::PUT, &path, Some(payload), command).await?;
-    let after = request_json(client, &env, Method::GET, &path, None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(redact_meta_value(data), meta_from_map(extra), command)
 }
 
 async fn run_providers(client: &reqwest::Client, args: ConfigProvidersArgs) -> Result<(), ConfigError> {
@@ -647,7 +256,7 @@ async fn run_providers(client: &reqwest::Client, args: ConfigProvidersArgs) -> R
                 client,
                 "config providers health-check",
                 Method::POST,
-                "/api/agents/provider-health-check",
+                "/api/engines/provider-health-check",
                 true,
             )
             .await
@@ -722,18 +331,7 @@ async fn run_agents(client: &reqwest::Client, args: ConfigAgentsArgs) -> Result<
                 client,
                 "config agents list",
                 Method::GET,
-                "/api/agents/management",
-                true,
-            )
-            .await
-        }
-        ConfigAgentsCommand::Enable => {
-            run_id_payload_request_with_collection_readback(
-                client,
-                "config agents enable",
-                Method::PATCH,
-                IdRoute::new("/api/agents", "/enabled", "agent_id"),
-                "/api/agents/management",
+                "/api/engines/management",
                 true,
             )
             .await
@@ -744,65 +342,9 @@ async fn run_agents(client: &reqwest::Client, args: ConfigAgentsArgs) -> Result<
                     client,
                     "config agents overrides get",
                     Method::GET,
-                    "/api/agents",
+                    "/api/engines",
                     "/overrides",
                     "agent_id",
-                    true,
-                )
-                .await
-            }
-            ConfigAgentOverridesCommand::Set => {
-                run_id_payload_request_with_resource_readback(
-                    client,
-                    "config agents overrides set",
-                    Method::PUT,
-                    IdRoute::new("/api/agents", "/overrides", "agent_id"),
-                    IdRoute::new("/api/agents", "/overrides", "agent_id"),
-                    true,
-                )
-                .await
-            }
-        },
-        ConfigAgentsCommand::Custom(args) => match args.command {
-            ConfigAgentCustomCommand::Create => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config agents custom create",
-                    Method::POST,
-                    "/api/agents/custom",
-                    "/api/agents/management",
-                    true,
-                )
-                .await
-            }
-            ConfigAgentCustomCommand::Update => {
-                run_id_payload_request_with_collection_readback(
-                    client,
-                    "config agents custom update",
-                    Method::PUT,
-                    IdRoute::new("/api/agents/custom", "", "agent_id"),
-                    "/api/agents/management",
-                    true,
-                )
-                .await
-            }
-            ConfigAgentCustomCommand::Delete => {
-                run_id_no_body_request_with_collection_readback(
-                    client,
-                    "config agents custom delete",
-                    Method::DELETE,
-                    IdRoute::new("/api/agents/custom", "", "agent_id"),
-                    "/api/agents/management",
-                    true,
-                )
-                .await
-            }
-            ConfigAgentCustomCommand::TryConnect => {
-                run_payload_request(
-                    client,
-                    "config agents custom try-connect",
-                    Method::POST,
-                    "/api/agents/custom/try-connect",
                     true,
                 )
                 .await
@@ -995,21 +537,6 @@ async fn run_no_input_request(
     print_config_output(data, meta(None), command, redact_output)
 }
 
-async fn run_no_input_request_with_collection_readback(
-    client: &reqwest::Client,
-    command: &'static str,
-    method: Method,
-    path: &'static str,
-    collection_path: &'static str,
-    redact_output: bool,
-) -> Result<(), ConfigError> {
-    let env = ConfigEnv::from_env(command)?;
-    let before = request_json(client, &env, Method::GET, collection_path, None, command).await?;
-    let data = request_json(client, &env, method, path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, collection_path, None, command).await?;
-    print_config_output(data, readback_meta(Map::new(), before, after), command, redact_output)
-}
-
 async fn run_payload_request(
     client: &reqwest::Client,
     command: &'static str,
@@ -1040,29 +567,6 @@ async fn run_payload_request_with_collection_readback(
     let before = request_json(client, &env, Method::GET, collection_path, None, command).await?;
     let data = request_json(client, &env, method, path, Some(payload), command).await?;
     let after = request_json(client, &env, Method::GET, collection_path, None, command).await?;
-    print_config_output(
-        data,
-        readback_meta(selectors.into_map(), before, after),
-        command,
-        redact_output,
-    )
-}
-
-async fn run_payload_request_with_body_readback(
-    client: &reqwest::Client,
-    command: &'static str,
-    method: Method,
-    path: &'static str,
-    read_path: &'static str,
-    redact_output: bool,
-) -> Result<(), ConfigError> {
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let before = request_json(client, &env, Method::POST, read_path, Some(payload.clone()), command).await?;
-    let data = request_json(client, &env, method, path, Some(payload.clone()), command).await?;
-    let after = request_json(client, &env, Method::POST, read_path, Some(payload), command).await?;
     print_config_output(
         data,
         readback_meta(selectors.into_map(), before, after),
@@ -1210,30 +714,6 @@ fn readback_meta(mut extra: Map<String, Value>, before: Value, after: Value) -> 
 fn print_config_output(data: Value, meta: Value, command: &str, redact_output: bool) -> Result<(), ConfigError> {
     let data = if redact_output { redact_meta_value(data) } else { data };
     print_envelope(data, meta, command)
-}
-
-enum ReadBack {
-    None,
-}
-
-async fn run_payload_passthrough(
-    client: &reqwest::Client,
-    command: &'static str,
-    method: Method,
-    path: &'static str,
-    payload_override: Option<Value>,
-    _read_back: ReadBack,
-) -> Result<(), ConfigError> {
-    let env = ConfigEnv::from_env(command)?;
-    let payload = match payload_override {
-        Some(value) => value,
-        None => read_stdin_payload(command)?,
-    };
-    let mut payload = payload;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let data = request_json(client, &env, method, path, Some(payload), command).await?;
-    print_envelope(data, meta(Some(selectors)), command)
 }
 
 #[derive(Debug, Clone)]
@@ -1569,15 +1049,6 @@ fn take_required_string_field(payload: &mut Value, field: &'static str, command:
         })
 }
 
-fn take_optional_string_field(payload: &mut Value, field: &'static str) -> Option<String> {
-    payload
-        .as_object_mut()
-        .and_then(|object| object.remove(field))
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
 fn assistant_detail_path(id: &str, locale: Option<&str>) -> String {
     let mut path = format!("/api/assistants/{}", encode_path_segment(id));
     if let Some(locale) = locale {
@@ -1585,15 +1056,6 @@ fn assistant_detail_path(id: &str, locale: Option<&str>) -> String {
         path.push_str(&encode_query_component(locale));
     }
     path
-}
-
-fn assistant_text_read_payload(id: &str, locale: Option<&str>) -> Value {
-    let mut object = Map::new();
-    object.insert("assistant_id".into(), Value::String(id.to_owned()));
-    if let Some(locale) = locale {
-        object.insert("locale".into(), Value::String(locale.to_owned()));
-    }
-    Value::Object(object)
 }
 
 fn redacted_content_summary(value: Value) -> Value {

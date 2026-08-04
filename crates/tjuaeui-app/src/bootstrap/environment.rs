@@ -9,7 +9,6 @@ use tjuaeui_db::Database;
 
 use crate::cli::Cli;
 
-use super::builtin_skills::materialize_builtin_skills;
 use super::tracing_init::{LogGuards, init_tracing};
 use super::work_dir::resolve_work_dir;
 use super::{BootstrapError, BootstrapErrorCode};
@@ -64,26 +63,12 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
     })
 }
 
-/// Layer 2: Materialize builtin skills + initialize the database.
+/// Layer 2: Initialize the database.
 ///
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database, BootstrapError> {
     let boot = Instant::now();
-
-    materialize_builtin_skills(&config.data_dir).await.map_err(|e| {
-        BootstrapError::new(
-            BootstrapErrorCode::DataInitFailed,
-            "data.builtin_skills",
-            "failed to initialize application data",
-        )
-        .with_source(e)
-        .with_field("dataDir", config.data_dir.display().to_string())
-    })?;
-    info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: builtin skills materialized"
-    );
 
     let db_path = config.database_path();
     info!("Initializing database at {}", db_path.display());

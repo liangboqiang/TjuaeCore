@@ -1,10 +1,8 @@
-//! Process-level bootstrap helpers for the binary.
+//! 二进制程序的进程级启动辅助模块。
 //!
-//! These are *not* subcommands — they are layered initialization steps
-//! (logging, work_dir resolution, builtin-skill materialization, database
-//! init) that subcommands compose to start the application.
+//! 这些模块不是子命令，而是由各子命令组合使用的分层初始化步骤：
+//! 日志初始化、工作目录解析、托管资源准备和数据库初始化。
 
-mod builtin_skills;
 mod environment;
 mod error;
 mod instance_guard;

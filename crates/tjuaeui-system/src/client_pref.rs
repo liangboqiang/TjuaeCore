@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn validate_key_accepts_valid() {
-        assert!(validate_key("theme").is_ok());
+        assert!(validate_key("theme.activeId").is_ok());
         assert!(validate_key("system.closeToTray").is_ok());
         assert!(validate_key("a").is_ok());
     }
@@ -372,22 +372,22 @@ mod tests {
     async fn update_and_get_number() {
         let svc = setup().await;
         let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("pet.size".into(), json!(360));
+        req.insert("ui.zoomFactor".into(), json!(1.25));
         svc.update_preferences(req).await.unwrap();
 
         let prefs = svc.get_preferences(None).await.unwrap();
-        assert_eq!(prefs["pet.size"], json!(360));
+        assert_eq!(prefs["ui.zoomFactor"], json!(1.25));
     }
 
     #[tokio::test]
     async fn update_and_get_string() {
         let svc = setup().await;
         let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("theme".into(), json!("dark"));
+        req.insert("theme.activeId".into(), json!("dark"));
         svc.update_preferences(req).await.unwrap();
 
         let prefs = svc.get_preferences(None).await.unwrap();
-        assert_eq!(prefs["theme"], json!("dark"));
+        assert_eq!(prefs["theme.activeId"], json!("dark"));
     }
 
     #[tokio::test]
@@ -395,15 +395,15 @@ mod tests {
         let svc = setup().await;
 
         let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("theme".into(), json!("dark"));
+        req.insert("theme.activeId".into(), json!("dark"));
         svc.update_preferences(req).await.unwrap();
 
         let mut req2 = UpdateClientPreferencesRequest::new();
-        req2.insert("theme".into(), json!(null));
+        req2.insert("theme.activeId".into(), json!(null));
         svc.update_preferences(req2).await.unwrap();
 
         let prefs = svc.get_preferences(None).await.unwrap();
-        assert!(!prefs.contains_key("theme"));
+        assert!(!prefs.contains_key("theme.activeId"));
     }
 
     #[tokio::test]

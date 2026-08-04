@@ -14,6 +14,8 @@ pub struct AgentSessionContext {
     pub workspace: WorkspaceContext,
     pub model: ProviderWithModel,
     pub skills: Vec<String>,
+    /// 由应用托管、位于工作区之外的技能根目录。仅受支持的直连后端消费。
+    pub skill_roots: Vec<String>,
     pub runtime_env: Vec<(String, String)>,
     pub team: Option<TeamSessionBinding>,
     pub kind: AgentSessionKind,
@@ -41,7 +43,16 @@ pub struct WorkspaceContext {
 #[derive(Debug, Clone)]
 pub enum AgentSessionKind {
     Acp(Box<AcpSessionBuildContext>),
+    A2a(Box<A2aSessionBuildContext>),
     TjuaeCli(Box<TjuaeCliSessionBuildContext>),
+}
+
+#[derive(Debug, Clone)]
+pub struct A2aSessionBuildContext {
+    pub agent_id: String,
+    /// Frozen assistant rules carried with remote requests because an A2A peer
+    /// may be stateless between tasks.
+    pub preset_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]

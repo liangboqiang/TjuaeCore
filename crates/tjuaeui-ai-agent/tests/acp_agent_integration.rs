@@ -78,10 +78,7 @@ async fn make_mock_agent(script: &str, backend: &str) -> (Arc<AcpAgentManager>, 
     };
 
     let tmp_skills = tempfile::TempDir::new().unwrap();
-    let skill_paths = std::sync::Arc::new(tjuaeui_extension::resolve_skill_paths(
-        tmp_skills.path(),
-        tmp_skills.path(),
-    ));
+    let skill_paths = std::sync::Arc::new(tjuaeui_asset::resolve_skill_paths(tmp_skills.path(), tmp_skills.path()));
     let skill_manager = tjuaeui_ai_agent::AcpSkillManager::new(skill_paths);
 
     let db = init_database_memory().await.unwrap();
@@ -187,6 +184,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::AcpSessionInfo(_) => "AcpSessionInfo",
         AgentStreamEvent::AcpContextUsage(_) => "AcpContextUsage",
         AgentStreamEvent::AcpPromptHookWarning(_) => "AcpPromptHookWarning",
+        AgentStreamEvent::A2aPart(_) => "A2aPart",
         AgentStreamEvent::Finish(_) => "Finish",
         AgentStreamEvent::Error(_) => "Error",
         AgentStreamEvent::System(_) => "System",

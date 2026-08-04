@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::Arc;
 use tjuaeui_common::AgentType;
+use tjuaeui_db::IAgentMetadataRepository;
 use tjuaeui_db::models::AgentMetadataRow;
-use tjuaeui_db::{IAgentMetadataRepository, resolve_agent_binding_from_rows};
 
 use crate::ports::TeamAssistantCatalogEntry;
 use crate::prompts::AvailableAssistant;
@@ -49,51 +49,42 @@ pub(crate) fn session_mode_for_backend(
     agent_type.full_auto_mode_id(Some(backend)).to_owned()
 }
 
-pub(crate) async fn resolve_runtime_backend(
-    agent_metadata_repo: &Arc<dyn IAgentMetadataRepository>,
-    agent_id: &str,
-) -> Result<String, TeamError> {
-    let rows = agent_metadata_repo.list_all().await?;
-    Ok(resolve_agent_binding_from_rows(&rows, agent_id)
-        .map(|binding| binding.runtime_backend)
-        .unwrap_or_else(|| agent_id.to_owned()))
-}
-
 impl TeamSessionService {
+    pub(crate) async fn team_owner_user_id(&self, team_id: &str) -> Result<String, TeamError> {
+        self.repo
+            .get_team(team_id)
+            .await?
+            .map(|row| row.user_id)
+            .ok_or_else(|| TeamError::TeamNotFound(team_id.to_owned()))
+    }
+
     pub(crate) async fn resolve_team_selectable_assistant(
         &self,
+        user_id: &str,
         assistant_id: &str,
     ) -> Result<TeamAssistantCatalogEntry, TeamError> {
         self.assistant_catalog
-            .resolve_team_selectable_assistant(assistant_id)
+            .resolve_team_selectable_assistant(user_id, assistant_id)
             .await?
             .ok_or_else(|| TeamError::InvalidRequest(format!("助手不可用于团队模式：{assistant_id}")))
     }
 
     pub(crate) async fn resolve_spawn_backend_and_model(
         &self,
+        user_id: &str,
         assistant_id: Option<&str>,
         requested_model: Option<&str>,
         fallback_backend: &str,
         fallback_model: &str,
     ) -> Result<(String, String), TeamError> {
         if let Some(assistant_id) = assistant_id.map(str::trim).filter(|value| !value.is_empty()) {
-            let selectable = self.resolve_team_selectable_assistant(assistant_id).await?;
-            let definition = self
-                .assistant_definition_repo
-                .get_by_assistant_id(assistant_id)
-                .await?
-                .ok_or_else(|| TeamError::InvalidRequest(format!("找不到预设助手：{assistant_id}")))?;
+            let selectable = self.resolve_team_selectable_assistant(user_id, assistant_id).await?;
             let backend = selectable.backend;
             let requested_model = requested_model
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
-            let fixed_model = (definition.default_model_mode == "fixed")
-                .then(|| definition.default_model_value.clone())
-                .flatten()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty());
+            let fixed_model = selectable.default_model;
             let backend_default_model = self.default_model_for_backend(&backend).await;
             let model = requested_model
                 .or(fixed_model)
@@ -117,8 +108,8 @@ impl TeamSessionService {
     /// Return all enabled assistants that can currently participate in team mode.
     /// This consumes the same assistant projection as the Team creation UI, so
     /// `team_selectable` has a single source of truth.
-    pub(crate) async fn list_team_selectable_assistants(&self) -> Vec<AvailableAssistant> {
-        let Ok(assistants) = self.assistant_catalog.list_team_selectable_assistants().await else {
+    pub(crate) async fn list_team_selectable_assistants(&self, user_id: &str) -> Vec<AvailableAssistant> {
+        let Ok(assistants) = self.assistant_catalog.list_team_selectable_assistants(user_id).await else {
             return Vec::new();
         };
 
@@ -216,11 +207,10 @@ mod tests {
         force_team_workspace, setup_with_factory_metadata_team_repo_and_conversation_repo, single_agent_team_request,
     };
     use std::sync::Arc;
-    use tjuaeui_db::models::{AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, Provider};
+    use tjuaeui_db::models::{AgentMetadataRow, AssistantDefinitionRow, Provider};
     use tjuaeui_db::{
-        DbError, IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-        IProviderRepository, UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
-        UpsertAssistantOverlayParams,
+        DbError, IAgentMetadataRepository, IAssistantDefinitionRepository, IProviderRepository,
+        UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
     };
 
     fn agent_metadata_row(backend: &str, yolo_id: Option<&str>) -> AgentMetadataRow {
@@ -339,58 +329,6 @@ mod tests {
         }
 
         async fn soft_delete(&self, _definition_id: &str, _deleted_at: i64) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Clone)]
-    struct SingleAssistantOverlayRepo {
-        row: AssistantOverlayRow,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantOverlayRepository for SingleAssistantOverlayRepo {
-        async fn get(&self, definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok((self.row.assistant_definition_id == definition_id).then_some(self.row.clone()))
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(vec![self.row.clone()])
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Clone)]
-    struct MultiAssistantOverlayRepo {
-        rows: Vec<AssistantOverlayRow>,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantOverlayRepository for MultiAssistantOverlayRepo {
-        async fn get(&self, definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok(self
-                .rows
-                .iter()
-                .find(|row| row.assistant_definition_id == definition_id)
-                .cloned())
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(self.rows.clone())
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
             Ok(false)
         }
     }
@@ -524,6 +462,7 @@ mod tests {
     impl crate::ports::TeamAssistantCatalogPort for RowsTeamAssistantCatalog {
         async fn list_team_selectable_assistants(
             &self,
+            _user_id: &str,
         ) -> Result<Vec<crate::ports::TeamAssistantCatalogEntry>, TeamError> {
             Ok(self.rows.clone())
         }
@@ -536,6 +475,7 @@ mod tests {
             backend: backend.into(),
             description: String::new(),
             skills: Vec::new(),
+            default_model: None,
         }
     }
 
@@ -566,7 +506,6 @@ mod tests {
             default_skills_mode: "auto".into(),
             default_skill_ids: "[]".into(),
             custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
             default_mcps_mode: "auto".into(),
             default_mcp_ids: "[]".into(),
             created_at: 0,
@@ -585,7 +524,6 @@ mod tests {
             base.agent_metadata_repo.clone(),
             Arc::new(RowsTeamAssistantCatalog { rows: assistants }),
             Arc::new(MultiAssistantDefinitionRepo { rows: definitions }),
-            Arc::new(MultiAssistantOverlayRepo { rows: vec![] }),
             Arc::new(SingleProviderRepo {
                 rows: vec![provider_row("openai", &["gpt-5-mini"])],
             }),
@@ -656,7 +594,6 @@ mod tests {
                 )],
             }),
             Arc::new(MultiAssistantDefinitionRepo { rows: vec![] }),
-            Arc::new(MultiAssistantOverlayRepo { rows: vec![] }),
             Arc::new(SingleProviderRepo { rows: vec![] }),
             base.conversation_port.clone(),
             base.projection_store.clone(),
@@ -667,7 +604,7 @@ mod tests {
             base.backend_binary_path.clone(),
         );
 
-        let assistants = svc.list_team_selectable_assistants().await;
+        let assistants = svc.list_team_selectable_assistants("user1").await;
         let ids: Vec<&str> = assistants
             .iter()
             .map(|assistant| assistant.assistant_id.as_str())
@@ -729,7 +666,7 @@ mod tests {
         let svc = service_with_selectable_catalog(vec![], vec![assistant_definition("word-creator", "tjuaecli")]);
 
         let err = svc
-            .resolve_spawn_backend_and_model(Some("word-creator"), None, "gemini", "gemini-2.5-pro")
+            .resolve_spawn_backend_and_model("user1", Some("word-creator"), None, "gemini", "gemini-2.5-pro")
             .await
             .expect_err("创建 Agent 时必须拒绝不在团队可选目录中的助手");
 
@@ -811,23 +748,11 @@ mod tests {
                     default_skills_mode: "auto".into(),
                     default_skill_ids: "[]".into(),
                     custom_skill_names: "[]".into(),
-                    default_disabled_builtin_skill_ids: "[]".into(),
                     default_mcps_mode: "auto".into(),
                     default_mcp_ids: "[]".into(),
                     created_at: 0,
                     updated_at: 0,
                     deleted_at: None,
-                },
-            }),
-            Arc::new(SingleAssistantOverlayRepo {
-                row: AssistantOverlayRow {
-                    assistant_definition_id: "def-1".into(),
-                    enabled: true,
-                    sort_order: 0,
-                    agent_id_override: None,
-                    last_used_at: None,
-                    created_at: 0,
-                    updated_at: 0,
                 },
             }),
             Arc::new(SingleProviderRepo {
@@ -843,7 +768,7 @@ mod tests {
         );
 
         let (backend, model) = svc
-            .resolve_spawn_backend_and_model(Some("word-creator"), None, "gemini", "gemini-2.5-pro")
+            .resolve_spawn_backend_and_model("user1", Some("word-creator"), None, "gemini", "gemini-2.5-pro")
             .await
             .unwrap();
 

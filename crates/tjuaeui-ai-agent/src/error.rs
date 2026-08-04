@@ -1,4 +1,5 @@
 use crate::protocol::error::AcpError;
+use crate::runtime_assets::RuntimeAssetFailureReason;
 
 /// Crate-owned error model for ai-agent business, runtime, and protocol
 /// orchestration code.
@@ -25,6 +26,11 @@ pub enum AgentError {
     ConversationArchived(String),
     #[error("执行期间工作区路径不可用：{0}")]
     WorkspacePathRuntimeUnavailable(String),
+    #[error("运行资产加载契约失败（reasonCode={reason}）：{diagnostic}")]
+    RuntimeAssetContract {
+        reason: RuntimeAssetFailureReason,
+        diagnostic: String,
+    },
     #[error("内部错误：{0}")]
     Internal(String),
     #[error(transparent)]
@@ -68,6 +74,13 @@ impl AgentError {
         Self::WorkspacePathRuntimeUnavailable(path.into())
     }
 
+    pub fn runtime_asset_contract(reason: RuntimeAssetFailureReason, diagnostic: impl Into<String>) -> Self {
+        Self::RuntimeAssetContract {
+            reason,
+            diagnostic: diagnostic.into(),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -84,6 +97,9 @@ impl AgentError {
             | Self::ConversationArchived(message)
             | Self::WorkspacePathRuntimeUnavailable(message)
             | Self::Internal(message) => message.clone(),
+            Self::RuntimeAssetContract { reason, diagnostic } => {
+                format!("reasonCode={}; {diagnostic}", reason.as_code())
+            }
             Self::RateLimited => "请求频率受限".to_owned(),
             Self::Acp(err) => err.to_string(),
         }

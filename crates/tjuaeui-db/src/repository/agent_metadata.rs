@@ -67,4 +67,12 @@ pub trait IAgentMetadataRepository: Send + Sync {
 
     /// Delete a row. Returns `true` if a row was removed.
     async fn delete(&self, id: &str) -> Result<bool, DbError>;
+
+    /// 精确恢复运行时投影覆盖前的完整行。
+    ///
+    /// 该窄接口只用于跨 catalog/运行表补偿事务。默认实现失败关闭，生产
+    /// SQLite 仓储会覆盖它并连同诊断快照、覆盖项和时间戳一起恢复。
+    async fn restore_projection_row(&self, _row: &AgentMetadataRow) -> Result<(), DbError> {
+        Err(DbError::Init("当前 Agent 仓储不支持精确投影恢复".into()))
+    }
 }

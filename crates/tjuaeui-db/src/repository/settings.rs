@@ -1,6 +1,18 @@
 use crate::error::DbError;
 use crate::models::SystemSettings;
 
+/// 写入单行系统设置所需的全部字段。
+pub struct UpsertSystemSettingsParams<'a> {
+    pub language: &'a str,
+    pub notification_enabled: bool,
+    pub cron_notification_enabled: bool,
+    pub command_queue_enabled: bool,
+    pub save_upload_to_workspace: bool,
+    pub network_proxy_mode: &'a str,
+    pub network_proxy_url: Option<&'a str>,
+    pub network_proxy_no_proxy: &'a str,
+}
+
 /// System settings data access abstraction.
 ///
 /// The `system_settings` table holds a single row (id=1).
@@ -12,12 +24,5 @@ pub trait ISettingsRepository: Send + Sync {
     async fn get_settings(&self) -> Result<Option<SystemSettings>, DbError>;
 
     /// Inserts or replaces the single settings row.
-    async fn upsert_settings(
-        &self,
-        language: &str,
-        notification_enabled: bool,
-        cron_notification_enabled: bool,
-        command_queue_enabled: bool,
-        save_upload_to_workspace: bool,
-    ) -> Result<SystemSettings, DbError>;
+    async fn upsert_settings(&self, params: UpsertSystemSettingsParams<'_>) -> Result<SystemSettings, DbError>;
 }

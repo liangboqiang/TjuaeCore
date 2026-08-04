@@ -38,8 +38,6 @@ pub struct AssistantConversationOverridesRequest {
     #[serde(default)]
     pub skill_ids: Option<Vec<String>>,
     #[serde(default)]
-    pub disabled_builtin_skill_ids: Option<Vec<String>>,
-    #[serde(default)]
     pub mcp_ids: Option<Vec<String>>,
 }
 
@@ -149,6 +147,155 @@ pub struct EnsureConversationRuntimeResponse {
     pub runtime: ConversationRuntimeSummary,
 }
 
+/// Terminal state of one agent turn trace.
+///
+/// A trace intentionally contains operational metadata only. Conversation
+/// text, thinking text, tool input/output and environment data are never part
+/// of this API contract.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTraceStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTraceSpanKind {
+    Thinking,
+    Tool,
+    Permission,
+    Runtime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTraceSpanStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTraceUpdateKind {
+    TraceStarted,
+    TraceUpdated,
+    RuntimeAssetsLoaded,
+    SpanUpdated,
+    TraceCompleted,
+}
+
+/// Compact trace shape returned by the list endpoint and embedded in live
+/// updates. `trace_id` is the conversation turn id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationTraceSummary {
+    pub trace_id: String,
+    pub conversation_id: String,
+    pub status: ConversationTraceStatus,
+    pub backend: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub started_at: TimestampMs,
+    pub first_event_at: Option<TimestampMs>,
+    pub first_output_at: Option<TimestampMs>,
+    pub ended_at: Option<TimestampMs>,
+    pub duration_ms: Option<i64>,
+    pub input_size: i64,
+    pub output_size: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub error_code: Option<String>,
+    pub retryable: Option<bool>,
+    pub incomplete: bool,
+    pub truncated: bool,
+    pub span_count: i64,
+    pub dropped_span_count: i64,
+    /// Deterministic identity of the immutable runtime asset receipt attached
+    /// to this trace. The complete safe receipt is returned by the detail API.
+    pub runtime_snapshot_id: Option<String>,
+    pub updated_at: TimestampMs,
+}
+
+/// Safe runtime asset identity returned by Trace APIs.
+///
+/// There is deliberately no field for a local root, absolute path, definition
+/// content, environment value or credential.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationTraceRuntimeAssetRef {
+    pub local_asset_id: String,
+    pub kind: String,
+    pub local_definition_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_package: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_revision: Option<String>,
+}
+
+/// Runtime-confirmed asset receipt. Assets are sorted by `(kind,
+/// localAssetId)` so replay and UI comparison are stable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationTraceRuntimeAssetSnapshot {
+    pub runtime_snapshot_id: String,
+    pub assets: Vec<ConversationTraceRuntimeAssetRef>,
+}
+
+/// One sanitized operational span. `safe_attributes` is always a JSON object,
+/// allow-listed by the producer and limited to 4 KiB when persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationTraceSpan {
+    pub span_id: String,
+    pub trace_id: String,
+    pub kind: ConversationTraceSpanKind,
+    pub source_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub name: String,
+    pub status: ConversationTraceSpanStatus,
+    pub started_at: TimestampMs,
+    pub ended_at: Option<TimestampMs>,
+    pub duration_ms: Option<i64>,
+    pub safe_attributes: serde_json::Value,
+    pub updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationTraceListResponse {
+    pub items: Vec<ConversationTraceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationTraceDetailResponse {
+    pub trace: ConversationTraceSummary,
+    pub spans: Vec<ConversationTraceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_asset_snapshot: Option<ConversationTraceRuntimeAssetSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationTraceUpdatedPayload {
+    pub conversation_id: String,
+    pub trace_id: String,
+    pub turn_id: String,
+    pub update_kind: ConversationTraceUpdateKind,
+    pub trace: ConversationTraceSummary,
+    pub span: Option<ConversationTraceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_asset_snapshot: Option<ConversationTraceRuntimeAssetSnapshot>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationAssistantIdentityResponse {
     pub id: String,
@@ -178,6 +325,12 @@ pub struct ListMessagesQuery {
     pub after: Option<String>,
     pub anchor_message_id: Option<String>,
     pub content_mode: Option<String>,
+}
+
+/// Query parameters for `GET /api/conversations/:id/traces`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListConversationTracesQuery {
+    pub limit: Option<u32>,
 }
 
 /// Body for `PATCH /api/conversations/:id/artifacts/:artifact_id`.
@@ -333,7 +486,6 @@ mod tests {
                     "permission": "yolo",
                     "thought_level": "high",
                     "skill_ids": ["skill-a"],
-                    "disabled_builtin_skill_ids": ["builtin-a"],
                     "mcp_ids": ["mcp-a"]
                 }
             },
@@ -355,7 +507,6 @@ mod tests {
                     permission: Some("yolo".into()),
                     thought_level: Some("high".into()),
                     skill_ids: Some(vec!["skill-a".into()]),
-                    disabled_builtin_skill_ids: Some(vec!["builtin-a".into()]),
                     mcp_ids: Some(vec!["mcp-a".into()]),
                 }),
             })
@@ -936,5 +1087,98 @@ mod tests {
         assert_eq!(raw["kind"], "skill_suggest");
         assert_eq!(raw["status"], "active");
         assert_eq!(raw["payload"]["name"], "daily-report");
+    }
+
+    #[test]
+    fn trace_contract_uses_snake_case_and_stable_shapes() {
+        let trace = ConversationTraceSummary {
+            trace_id: "turn-1".into(),
+            conversation_id: "conv-1".into(),
+            status: ConversationTraceStatus::Running,
+            backend: Some("codex".into()),
+            model: None,
+            mode: None,
+            started_at: 1,
+            first_event_at: None,
+            first_output_at: None,
+            ended_at: None,
+            duration_ms: None,
+            input_size: 0,
+            output_size: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost_usd: None,
+            error_code: None,
+            retryable: None,
+            incomplete: false,
+            truncated: false,
+            span_count: 0,
+            dropped_span_count: 0,
+            runtime_snapshot_id: None,
+            updated_at: 1,
+        };
+        let list = serde_json::to_value(ConversationTraceListResponse {
+            items: vec![trace.clone()],
+        })
+        .unwrap();
+        assert_eq!(list["items"][0]["trace_id"], "turn-1");
+        assert_eq!(list["items"][0]["status"], "running");
+        assert!(list["items"][0].get("traceId").is_none());
+
+        let update = serde_json::to_value(ConversationTraceUpdatedPayload {
+            conversation_id: "conv-1".into(),
+            trace_id: "turn-1".into(),
+            turn_id: "turn-1".into(),
+            update_kind: ConversationTraceUpdateKind::TraceStarted,
+            trace,
+            span: None,
+            runtime_asset_snapshot: None,
+        })
+        .unwrap();
+        assert_eq!(update["update_kind"], "trace_started");
+        assert!(update["span"].is_null());
+        assert!(update.get("updateKind").is_none());
+    }
+
+    #[test]
+    fn trace_runtime_asset_receipt_serializes_only_safe_fields() {
+        let value = serde_json::to_value(ConversationTraceRuntimeAssetSnapshot {
+            runtime_snapshot_id: format!("sha256-{}", "a".repeat(64)),
+            assets: vec![ConversationTraceRuntimeAssetRef {
+                local_asset_id: "frontend-design".into(),
+                kind: "skill".into(),
+                local_definition_digest: format!("sha256-{}", "b".repeat(64)),
+                upstream_package: Some("tjuae-official/assets".into()),
+                upstream_asset_id: Some("frontend-design".into()),
+                upstream_version: Some("1.0.0".into()),
+                upstream_revision: Some("abc123".into()),
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            value["assets"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "kind",
+                "localAssetId",
+                "localDefinitionDigest",
+                "upstreamAssetId",
+                "upstreamPackage",
+                "upstreamRevision",
+                "upstreamVersion",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        let serialized = value.to_string().to_ascii_lowercase();
+        for forbidden in ["root", "absolutepath", "content", "runtimeenv", "secret", "token"] {
+            assert!(!serialized.contains(forbidden), "{forbidden} leaked: {serialized}");
+        }
     }
 }

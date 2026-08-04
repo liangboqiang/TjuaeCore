@@ -5,6 +5,7 @@ use tjuaeui_api_types::{
 
 use super::error::AcpError;
 use crate::error::AgentError;
+use crate::runtime_assets::RuntimeAssetFailureReason;
 
 const MAX_DETAIL_CHARS: usize = 1000;
 const OPENCLAW_BACKEND: &str = "openclaw";
@@ -88,6 +89,18 @@ impl AgentSendError {
                     )),
                 },
             },
+            AgentError::RuntimeAssetContract { reason, .. } => Self::new(
+                "无法确认运行资产已按请求实际加载",
+                runtime_asset_agent_error_code(*reason),
+                AgentErrorOwnership::TjuaeUI,
+                Some(detail),
+                false,
+                true,
+                resolution(
+                    AgentErrorResolutionKind::SendFeedback,
+                    Some(AgentErrorResolutionTarget::Feedback),
+                ),
+            ),
             AgentError::Internal(_) => Self::new(
                 "TjuaeUI 发送消息时失败",
                 AgentErrorCode::TjuaeUIInternalError,
@@ -379,6 +392,16 @@ impl AgentSendError {
             ),
             AcpError::AgentInternal { .. } => unknown_upstream_error(detail),
         }
+    }
+}
+
+const fn runtime_asset_agent_error_code(reason: RuntimeAssetFailureReason) -> AgentErrorCode {
+    match reason {
+        RuntimeAssetFailureReason::ReceiptUnsupported => AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnsupported,
+        RuntimeAssetFailureReason::ReceiptMissing => AgentErrorCode::TjuaeUIRuntimeAssetReceiptMissing,
+        RuntimeAssetFailureReason::ReceiptUnexpected => AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnexpected,
+        RuntimeAssetFailureReason::ReceiptMismatch => AgentErrorCode::TjuaeUIRuntimeAssetReceiptMismatch,
+        RuntimeAssetFailureReason::ReceiptPersistFailed => AgentErrorCode::TjuaeUIRuntimeAssetReceiptPersistFailed,
     }
 }
 
@@ -1137,6 +1160,7 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_assets::RuntimeAssetFailureReason;
     use serde_json::json;
     use tjuaeui_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
 
@@ -1179,6 +1203,48 @@ mod tests {
             err.stream_error().resolution.and_then(|value| value.target),
             Some(target)
         );
+    }
+
+    #[test]
+    fn runtime_asset_contract_errors_keep_reason_code_and_diagnostic() {
+        let cases = [
+            (
+                RuntimeAssetFailureReason::ReceiptUnsupported,
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnsupported,
+            ),
+            (
+                RuntimeAssetFailureReason::ReceiptMissing,
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptMissing,
+            ),
+            (
+                RuntimeAssetFailureReason::ReceiptUnexpected,
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnexpected,
+            ),
+            (
+                RuntimeAssetFailureReason::ReceiptMismatch,
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptMismatch,
+            ),
+            (
+                RuntimeAssetFailureReason::ReceiptPersistFailed,
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptPersistFailed,
+            ),
+        ];
+
+        for (reason, expected_code) in cases {
+            let error = AgentError::runtime_asset_contract(reason, "安全诊断");
+            let send_error = AgentSendError::from_agent_error(error);
+
+            assert_eq!(send_error.code(), Some(expected_code));
+            assert_eq!(send_error.ownership(), Some(AgentErrorOwnership::TjuaeUI));
+            assert_eq!(send_error.stream_error().retryable, Some(false));
+            assert!(
+                send_error
+                    .stream_error()
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(reason.as_code()) && detail.contains("安全诊断"))
+            );
+        }
     }
 
     #[test]

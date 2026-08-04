@@ -45,62 +45,32 @@ pub enum ExtensionError {
     #[error("解析扩展“{extension_name}”的贡献点失败：{reason}")]
     ResolutionFailed { extension_name: String, reason: String },
 
-    #[error("扩展“{extension_name}”的生命周期钩子“{hook}”在 {timeout_secs} 秒后超时")]
-    HookTimeout {
-        extension_name: String,
-        hook: String,
-        timeout_secs: u64,
-    },
-
-    #[error("扩展“{extension_name}”的生命周期钩子“{hook}”失败：{reason}")]
-    HookFailed {
-        extension_name: String,
-        hook: String,
-        reason: String,
-    },
-
-    #[error("找不到生命周期钩子脚本：{0}")]
-    HookNotFound(String),
-
     #[error("找不到扩展：{0}")]
     NotFound(String),
 
+    #[error("访问 TjuaeHub 失败：{0}")]
+    HubNetwork(String),
+
+    #[error("Hub 资产包完整性校验失败：{0}")]
+    HubIntegrity(String),
+
+    #[error("Hub 数据体积为 {actual} 字节，超过上限 {limit} 字节")]
+    HubPackageTooLarge { actual: u64, limit: u64 },
+
+    #[error("远程发布前置条件未满足：{0}")]
+    HubPublishPrerequisite(String),
+
+    #[error("远程发布失败：{0}")]
+    HubPublishFailed(String),
+
+    #[error("远程发布幂等冲突：{0}")]
+    HubPublishConflict(String),
+
+    #[error("资产导出被安全策略拒绝：{0}")]
+    AssetSanitization(String),
+
     #[error("状态持久化失败：{0}")]
     StatePersistence(String),
-
-    #[error("不能删除内置技能：{0}")]
-    BuiltinSkillDeletion(String),
-
-    #[error("找不到技能：{0}")]
-    SkillNotFound(String),
-
-    #[error("技能路径无效：{0}")]
-    InvalidSkillPath(String),
-
-    #[error("技能 frontmatter 无效：{0}")]
-    SkillInvalidFrontmatter(String),
-
-    #[error("找不到技能目录：{0}")]
-    SkillImportNoSkillFound(String),
-
-    #[error("技能导入来源无效：{0}")]
-    SkillImportInvalidSource(String),
-
-    #[error("技能导入不允许符号链接条目：{0}")]
-    SkillImportSymlinkEntry(String),
-
-    #[error("技能导入文件过大：{file_bytes} 字节，上限 {limit_bytes} 字节")]
-    SkillImportFileTooLarge {
-        file_path: Option<String>,
-        file_bytes: u64,
-        limit_bytes: u64,
-    },
-
-    #[error("技能导入内容过大：{total_bytes} 字节，上限 {limit_bytes} 字节")]
-    SkillImportTotalTooLarge { total_bytes: u64, limit_bytes: u64 },
-
-    #[error("技能 ZIP 压缩包无效：{0}")]
-    SkillImportInvalidZip(String),
 
     #[error("{0}")]
     Db(#[from] tjuaeui_db::DbError),

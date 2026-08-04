@@ -260,6 +260,47 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
 
         Ok(())
     }
+
+    async fn restore_projection_row(&self, row: &McpServerRow) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO mcp_servers (\
+                id, name, description, enabled, transport_type, transport_config, tools, \
+                last_test_status, last_connected, original_json, builtin, deleted_at, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+                name=excluded.name, description=excluded.description, enabled=excluded.enabled, \
+                transport_type=excluded.transport_type, transport_config=excluded.transport_config, \
+                tools=excluded.tools, last_test_status=excluded.last_test_status, \
+                last_connected=excluded.last_connected, original_json=excluded.original_json, \
+                builtin=excluded.builtin, deleted_at=excluded.deleted_at, \
+                created_at=excluded.created_at, updated_at=excluded.updated_at",
+        )
+        .bind(&row.id)
+        .bind(&row.name)
+        .bind(&row.description)
+        .bind(row.enabled)
+        .bind(&row.transport_type)
+        .bind(&row.transport_config)
+        .bind(&row.tools)
+        .bind(&row.last_test_status)
+        .bind(row.last_connected)
+        .bind(&row.original_json)
+        .bind(row.builtin)
+        .bind(row.deleted_at)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn purge_projection_row(&self, id: &str) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 /// Merge partial update params into an existing row, returning a new instance.
@@ -354,6 +395,37 @@ mod tests {
         assert!(!server.builtin);
         assert!(server.created_at > 0);
         assert_eq!(server.created_at, server.updated_at);
+    }
+
+    #[tokio::test]
+    async fn projection_restore_and_purge_are_exact_compensation_operations() {
+        let (repo, _db) = setup().await;
+        let original = repo.create(stdio_params()).await.unwrap();
+        repo.update_status(&original.id, "connected", Some(123)).await.unwrap();
+        repo.update_tools(&original.id, Some(r#"[{"name":"read"}]"#))
+            .await
+            .unwrap();
+        let previous = repo.find_by_id_any(&original.id).await.unwrap().unwrap();
+        repo.update(
+            &original.id,
+            UpdateMcpServerParams {
+                name: Some("temporary-name"),
+                transport_config: Some(r#"{"command":"other"}"#),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo.restore_projection_row(&previous).await.unwrap();
+        let restored = repo.find_by_id_any(&original.id).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(previous).unwrap()
+        );
+
+        let uncommitted = repo.create(http_params()).await.unwrap();
+        repo.purge_projection_row(&uncommitted.id).await.unwrap();
+        assert!(repo.find_by_id_any(&uncommitted.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

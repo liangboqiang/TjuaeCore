@@ -15,7 +15,7 @@ async fn provider_health_check_unauthenticated_is_rejected() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/agents/provider-health-check")
+        .uri("/api/engines/provider-health-check")
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&json!({"provider_id": "p1", "model": "gpt-4o"})).unwrap(),
@@ -37,7 +37,7 @@ async fn provider_health_check_requires_csrf_for_post() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/api/agents/provider-health-check")
+        .uri("/api/engines/provider-health-check")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(
@@ -56,7 +56,7 @@ async fn provider_health_check_validates_required_fields() {
 
     let req = json_with_token(
         "POST",
-        "/api/agents/provider-health-check",
+        "/api/engines/provider-health-check",
         json!({"provider_id": "", "model": "gpt-4o"}),
         &token,
         &csrf,

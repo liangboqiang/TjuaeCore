@@ -5,32 +5,26 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use tjuaeui_app::{AppConfig, AppServices, build_module_states, create_router_with_states, derive_encryption_key};
-use tjuaeui_common::{decrypt_string, now_ms};
+use tjuaeui_app::{AppConfig, AppServices, build_module_states, create_router_with_states};
+use tjuaeui_common::now_ms;
 use tjuaeui_db::{IChannelRepository, SqliteChannelRepository};
 use tjuaeui_extension::{ExtensionSource, ScanPath};
 
-use common::{
-    body_json, build_app, build_app_with_skill_paths, get_with_token, json_with_token, setup_and_login,
-    sync_skill_catalog_for_test,
-};
+use common::{body_json, build_app, build_app_with_skill_paths, get_with_token, json_with_token, setup_and_login};
 
 fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     let ext_root = tmp.path().join("extensions");
     let ext_dir = ext_root.join("legacy-suite");
     std::fs::create_dir_all(ext_dir.join("assets")).unwrap();
     std::fs::create_dir_all(ext_dir.join("assistants")).unwrap();
-    std::fs::create_dir_all(ext_dir.join("agents")).unwrap();
     std::fs::create_dir_all(ext_dir.join("skills")).unwrap();
     std::fs::create_dir_all(ext_dir.join("themes")).unwrap();
 
     std::fs::write(ext_dir.join("assets/adapter.png"), "adapter").unwrap();
     std::fs::write(ext_dir.join("assets/assistant.png"), "assistant").unwrap();
-    std::fs::write(ext_dir.join("assets/agent.png"), "agent").unwrap();
     std::fs::write(ext_dir.join("assets/theme-cover.png"), "cover").unwrap();
     std::fs::write(ext_dir.join("assets/channel.png"), "channel").unwrap();
     std::fs::write(ext_dir.join("assistants/context.md"), "Assistant context from file.").unwrap();
-    std::fs::write(ext_dir.join("agents/context.md"), "Agent context from file.").unwrap();
     std::fs::write(ext_dir.join("skills/review.md"), "# review skill").unwrap();
     std::fs::write(ext_dir.join("themes/dark.css"), ":root { --legacy-bg: #111; }").unwrap();
 
@@ -110,18 +104,6 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                         "prompts": ["Review the diff"]
                     }
                 ],
-                "agents": [
-                    {
-                        "id": "legacy-agent",
-                        "name": "Legacy Agent",
-                        "avatar": "assets/agent.png",
-                        "agentType": "codex",
-                        "contextFile": "agents/context.md",
-                        "models": ["codex-mini"],
-                        "enabledSkills": ["review-skill"],
-                        "prompts": ["Ship it"]
-                    }
-                ],
                 "mcpServers": [
                     {
                         "name": "legacy-mcp",
@@ -174,7 +156,6 @@ async fn build_app_with_extension_root(ext_root: &std::path::Path) -> (axum::Rou
     let router = create_router_with_states(&services, states);
     (router, services)
 }
-
 // ---------------------------------------------------------------------------
 // EQ — Extension query (unauthenticated → rejected)
 // ---------------------------------------------------------------------------
@@ -229,10 +210,7 @@ async fn eq4_get_assistants_empty() {
         .oneshot(get_with_token("/api/extensions/assistants", &token))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -244,19 +222,7 @@ async fn eq5_get_acp_adapters_empty() {
         .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn eq6_get_agents_empty() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/extensions/agents", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -268,7 +234,7 @@ async fn eq7_get_mcp_servers_empty() {
         .oneshot(get_with_token("/api/extensions/mcp-servers", &token))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -280,7 +246,7 @@ async fn eq8_get_skills_empty() {
         .oneshot(get_with_token("/api/extensions/skills", &token))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -408,7 +374,7 @@ async fn eq14_risk_level_not_found() {
 }
 
 #[tokio::test]
-async fn eq15_legacy_acp_skill_and_mcp_endpoints_preserve_contract() {
+async fn eq15_legacy_asset_contribution_endpoints_are_removed() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -419,52 +385,24 @@ async fn eq15_legacy_acp_skill_and_mcp_endpoints_preserve_contract() {
         .oneshot(get_with_token("/api/extensions/skills", &token))
         .await
         .unwrap();
-    assert_eq!(skills_resp.status(), StatusCode::OK);
-    let skills_json = body_json(skills_resp).await;
-    let skills = skills_json["data"].as_array().unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0]["name"], "review-skill");
-    assert_eq!(skills[0]["description"], "Review code");
-    assert!(skills[0]["location"].as_str().unwrap().ends_with("skills/review.md"));
-    assert!(skills[0].get("path").is_none());
+    assert_eq!(skills_resp.status(), StatusCode::NOT_FOUND);
 
     let acp_resp = app
         .clone()
         .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
         .await
         .unwrap();
-    assert_eq!(acp_resp.status(), StatusCode::OK);
-    let acp_json = body_json(acp_resp).await;
-    let adapters = acp_json["data"].as_array().unwrap();
-    assert_eq!(adapters.len(), 1);
-    assert_eq!(adapters[0]["id"], "legacy-acp");
-    assert_eq!(adapters[0]["cliCommand"], "legacy-cli");
-    assert_eq!(adapters[0]["defaultCliPath"], "legacy-cli");
-    assert_eq!(adapters[0]["connectionType"], "cli");
-    assert_eq!(adapters[0]["supportsStreaming"], false);
-    assert_eq!(adapters[0]["yoloMode"]["type"], "session");
-    assert_eq!(
-        adapters[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/adapter.png"
-    );
-    assert_eq!(adapters[0]["_extensionName"], "legacy-suite");
+    assert_eq!(acp_resp.status(), StatusCode::NOT_FOUND);
 
     let mcp_resp = app
         .oneshot(get_with_token("/api/extensions/mcp-servers", &token))
         .await
         .unwrap();
-    assert_eq!(mcp_resp.status(), StatusCode::OK);
-    let mcp_json = body_json(mcp_resp).await;
-    let servers = mcp_json["data"].as_array().unwrap();
-    assert_eq!(servers.len(), 1);
-    assert_eq!(servers[0]["name"], "legacy-mcp");
-    assert_eq!(servers[0]["enabled"], false);
-    assert_eq!(servers[0]["transport"]["type"], "stdio");
-    assert!(servers[0]["original_json"].as_str().unwrap().contains("legacy-mcp"));
+    assert_eq!(mcp_resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
+async fn eq16_legacy_assistant_and_theme_contributions_are_ignored() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -475,42 +413,7 @@ async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
         .oneshot(get_with_token("/api/extensions/assistants", &token))
         .await
         .unwrap();
-    assert_eq!(assistant_resp.status(), StatusCode::OK);
-    let assistant_json = body_json(assistant_resp).await;
-    let assistants = assistant_json["data"].as_array().unwrap();
-    assert_eq!(assistants.len(), 1);
-    assert_eq!(assistants[0]["id"], "ext-legacy-assistant");
-    assert_eq!(assistants[0]["agentId"], "cc126dd5");
-    assert_eq!(assistants[0]["enabledSkills"][0], "review-skill");
-    assert_eq!(assistants[0]["prompts"][0], "Review the diff");
-    assert_eq!(assistants[0]["models"][0], "gemini-2.0-flash");
-    assert_eq!(assistants[0]["_kind"], "assistant");
-    assert_eq!(assistants[0]["context"], "Assistant context from file.");
-    assert_eq!(
-        assistants[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/assistant.png"
-    );
-
-    let agent_resp = app
-        .clone()
-        .oneshot(get_with_token("/api/extensions/agents", &token))
-        .await
-        .unwrap();
-    assert_eq!(agent_resp.status(), StatusCode::OK);
-    let agent_json = body_json(agent_resp).await;
-    let agents = agent_json["data"].as_array().unwrap();
-    assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["id"], "ext-legacy-agent");
-    assert_eq!(agents[0]["agentType"], "codex");
-    assert_eq!(agents[0]["enabledSkills"][0], "review-skill");
-    assert_eq!(agents[0]["prompts"][0], "Ship it");
-    assert_eq!(agents[0]["models"][0], "codex-mini");
-    assert_eq!(agents[0]["_kind"], "agent");
-    assert_eq!(agents[0]["context"], "Agent context from file.");
-    assert_eq!(
-        agents[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/agent.png"
-    );
+    assert_eq!(assistant_resp.status(), StatusCode::NOT_FOUND);
 
     let theme_resp = app
         .oneshot(get_with_token("/api/extensions/themes", &token))
@@ -519,18 +422,11 @@ async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
     assert_eq!(theme_resp.status(), StatusCode::OK);
     let theme_json = body_json(theme_resp).await;
     let themes = theme_json["data"].as_array().unwrap();
-    assert_eq!(themes.len(), 1);
-    assert_eq!(themes[0]["id"], "ext-legacy-suite-legacy-dark");
-    assert_eq!(themes[0]["is_preset"], true);
-    assert!(themes[0]["css"].as_str().unwrap().contains("--legacy-bg"));
-    assert_eq!(
-        themes[0]["cover"],
-        "/api/extensions/legacy-suite/assets/assets/theme-cover.png"
-    );
+    assert!(themes.is_empty());
 }
 
 #[tokio::test]
-async fn eq17_legacy_channel_plugin_endpoint_preserves_contract() {
+async fn eq17_legacy_channel_plugin_contribution_is_ignored() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -543,42 +439,11 @@ async fn eq17_legacy_channel_plugin_endpoint_preserves_contract() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let json = body_json(resp).await;
-    let plugins = json["data"].as_array().unwrap();
-    assert_eq!(plugins.len(), 1);
-    assert_eq!(plugins[0]["id"], "legacy-channel");
-    assert_eq!(plugins[0]["type"], "legacy-channel");
-    assert_eq!(plugins[0]["name"], "Legacy Channel");
-    assert_eq!(plugins[0]["platform"], "legacy-chat");
-    assert!(
-        plugins[0]["entryPoint"]
-            .as_str()
-            .unwrap()
-            .ends_with("plugins/legacy-channel.js")
-    );
-    assert_eq!(plugins[0]["enabled"], true);
-    assert_eq!(plugins[0]["connected"], false);
-    assert_eq!(plugins[0]["is_extension"], true);
-    assert_eq!(plugins[0]["has_token"], false);
-    assert_eq!(plugins[0]["active_users"], 0);
-    assert_eq!(plugins[0]["extension_meta"]["description"], "Legacy channel plugin");
-    assert_eq!(plugins[0]["extension_meta"]["extensionName"], "legacy-suite");
-    assert_eq!(
-        plugins[0]["extension_meta"]["icon"],
-        "/api/extensions/legacy-suite/assets/assets/channel.png"
-    );
-    assert_eq!(
-        plugins[0]["extension_meta"]["credentialFields"][0]["key"],
-        "legacyToken"
-    );
-    assert_eq!(
-        plugins[0]["extension_meta"]["configFields"][0]["key"],
-        "pollingInterval"
-    );
-    assert_eq!(plugins[0]["extension_meta"]["configFields"][0]["default"], 30);
+    assert_eq!(json["data"], json!([]));
 }
 
 #[tokio::test]
-async fn eq18_channel_status_lists_builtin_and_extension_placeholders() {
+async fn eq18_channel_status_lists_only_builtin_plugins() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -598,21 +463,11 @@ async fn eq18_channel_status_lists_builtin_and_extension_placeholders() {
     assert_eq!(telegram["connected"], false);
     assert_eq!(telegram["is_extension"], false);
 
-    let legacy = plugins
-        .iter()
-        .find(|plugin| plugin["type"] == "legacy-channel")
-        .unwrap();
-    assert_eq!(legacy["enabled"], false);
-    assert_eq!(legacy["connected"], false);
-    assert_eq!(legacy["status"], "stopped");
-    assert_eq!(legacy["is_extension"], true);
-    assert_eq!(legacy["extension_meta"]["extensionName"], "legacy-suite");
-    assert_eq!(legacy["extension_meta"]["credentialFields"][0]["key"], "legacyToken");
-    assert_eq!(legacy["extension_meta"]["configFields"][0]["key"], "pollingInterval");
+    assert!(plugins.iter().all(|plugin| plugin["type"] != "legacy-channel"));
 }
 
 #[tokio::test]
-async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
+async fn eq19_channel_status_ignores_unknown_legacy_persisted_row() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -641,24 +496,11 @@ async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
 
     let json = body_json(resp).await;
     let plugins = json["data"].as_array().unwrap();
-    let legacy = plugins
-        .iter()
-        .find(|plugin| plugin["type"] == "legacy-channel")
-        .unwrap();
-    assert_eq!(legacy["name"], "Legacy Channel Persisted");
-    assert_eq!(legacy["enabled"], true);
-    assert_eq!(legacy["status"], "running");
-    assert_eq!(legacy["has_token"], true);
-    assert_eq!(legacy["is_extension"], true);
-    assert_eq!(legacy["extension_meta"]["description"], "Legacy channel plugin");
-    assert_eq!(
-        legacy["extension_meta"]["icon"],
-        "/api/extensions/legacy-suite/assets/assets/channel.png"
-    );
+    assert!(plugins.iter().all(|plugin| plugin["type"] != "legacy-channel"));
 }
 
 #[tokio::test]
-async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
+async fn eq20_enable_legacy_extension_channel_fails_closed() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -684,18 +526,8 @@ async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
         .unwrap();
     assert_eq!(enable_resp.status(), StatusCode::OK);
     let enable_json = body_json(enable_resp).await;
-    assert_eq!(enable_json["data"]["success"], true);
-
-    let row = repo.get_plugin("legacy-channel").await.unwrap().unwrap();
-    assert!(row.enabled);
-    assert_eq!(row.r#type, "legacy-channel");
-    assert_eq!(row.status.as_deref(), Some("stopped"));
-
-    let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
-    let decrypted = decrypt_string(&row.config, &encryption_key).unwrap();
-    let config_json: serde_json::Value = serde_json::from_str(&decrypted).unwrap();
-    assert_eq!(config_json["credentials"]["legacyToken"], "secret-token");
-    assert_eq!(config_json["config"]["pollingInterval"], 42);
+    assert_eq!(enable_json["data"]["success"], false);
+    assert!(repo.get_plugin("legacy-channel").await.unwrap().is_none());
 
     let status_resp = app
         .oneshot(get_with_token("/api/channel/plugins", &token))
@@ -704,18 +536,11 @@ async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
     assert_eq!(status_resp.status(), StatusCode::OK);
     let status_json = body_json(status_resp).await;
     let plugins = status_json["data"].as_array().unwrap();
-    let legacy = plugins
-        .iter()
-        .find(|plugin| plugin["type"] == "legacy-channel")
-        .unwrap();
-    assert_eq!(legacy["enabled"], true);
-    assert_eq!(legacy["status"], "stopped");
-    assert_eq!(legacy["has_token"], true);
-    assert_eq!(legacy["is_extension"], true);
+    assert!(plugins.iter().all(|plugin| plugin["type"] != "legacy-channel"));
 }
 
 #[tokio::test]
-async fn eq21_disable_extension_channel_updates_status() {
+async fn eq21_disable_unknown_legacy_extension_channel_fails_closed() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -753,7 +578,7 @@ async fn eq21_disable_extension_channel_updates_status() {
         .unwrap();
     assert_eq!(disable_resp.status(), StatusCode::OK);
     let disable_json = body_json(disable_resp).await;
-    assert_eq!(disable_json["data"]["success"], true);
+    assert_eq!(disable_json["data"]["success"], false);
 
     let status_resp = app
         .oneshot(get_with_token("/api/channel/plugins", &token))
@@ -762,13 +587,7 @@ async fn eq21_disable_extension_channel_updates_status() {
     assert_eq!(status_resp.status(), StatusCode::OK);
     let status_json = body_json(status_resp).await;
     let plugins = status_json["data"].as_array().unwrap();
-    let legacy = plugins
-        .iter()
-        .find(|plugin| plugin["type"] == "legacy-channel")
-        .unwrap();
-    assert_eq!(legacy["enabled"], false);
-    assert_eq!(legacy["status"], "stopped");
-    assert_eq!(legacy["is_extension"], true);
+    assert!(plugins.iter().all(|plugin| plugin["type"] != "legacy-channel"));
 }
 
 // ---------------------------------------------------------------------------
@@ -812,140 +631,8 @@ async fn em4_disable_nonexistent_returns_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// HM — Hub marketplace
+// AUTH — Auth protection on skill routes
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn hm1_get_hub_extensions() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/hub/extensions", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    // Empty index → empty array
-    assert!(json["data"].is_array());
-}
-
-#[tokio::test]
-async fn hm3_install_nonexistent_returns_error() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/hub/install",
-            json!({"name": "nonexistent-ext"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    let inner = &json["data"];
-    assert_eq!(inner["success"], false);
-    assert!(inner["msg"].as_str().is_some());
-}
-
-#[tokio::test]
-async fn hm5_check_updates_empty() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/hub/check-updates",
-            json!({}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].is_array());
-}
-
-// ---------------------------------------------------------------------------
-// SM — Skill management
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn sm11_get_skill_paths() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app.oneshot(get_with_token("/api/skills/paths", &token)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    let data = &json["data"];
-    assert!(data["user_skills_dir"].is_string());
-    assert!(data["builtin_skills_dir"].is_string());
-}
-
-#[tokio::test]
-async fn sm9_detect_paths() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/skills/detect-paths", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].is_array());
-}
-
-// ---------------------------------------------------------------------------
-// CP — Custom external paths
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn cp1_get_external_paths_empty() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/skills/external-paths", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].is_array());
-    assert_eq!(json["data"].as_array().unwrap().len(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// AUTH — Auth protection on hub and skill routes too
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn auth_hub_unauthenticated() {
-    let (app, _) = build_app().await;
-    let resp = app.oneshot(common::get_request("/api/hub/extensions")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "UNAUTHORIZED");
-}
 
 #[tokio::test]
 async fn auth_skills_unauthenticated() {
@@ -954,376 +641,6 @@ async fn auth_skills_unauthenticated() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let json = body_json(resp).await;
     assert_eq!(json["code"], "UNAUTHORIZED");
-}
-
-// ---------------------------------------------------------------------------
-// RM — Built-in rule reading
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn rm1_read_builtin_rule_not_found() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/builtin-rule",
-            json!({"file_name": "nonexistent-rule.md"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    // File not found → returns empty string (graceful degradation)
-    assert_eq!(json["data"], "");
-}
-
-#[tokio::test]
-async fn rm2_read_builtin_rule_happy_path_returns_file_content() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    std::fs::write(
-        paths.builtin_rules_dir.join("code-review.md"),
-        "# Code Review Rules\n\nBe kind.\n",
-    )
-    .unwrap();
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/builtin-rule",
-            json!({"file_name": "code-review.md"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"], "# Code Review Rules\n\nBe kind.\n");
-}
-
-#[tokio::test]
-async fn rm3_read_builtin_rule_rejects_path_traversal() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/builtin-rule",
-            json!({"file_name": "../etc/passwd"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], false);
-}
-
-// ---------------------------------------------------------------------------
-// SK — Built-in skill file reading (E4 / `POST /api/skills/builtin-skill`)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn sk1_read_builtin_skill_not_found() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/builtin-skill",
-            json!({"file_name": "nonexistent.md"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"], "");
-}
-
-#[tokio::test]
-async fn sk2_read_builtin_skill_happy_path_returns_file_content() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    std::fs::write(
-        paths.builtin_skills_dir.join("cowork-skills.md"),
-        "## Cowork skills\n\n- git\n- bash\n",
-    )
-    .unwrap();
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/builtin-skill",
-            json!({"file_name": "cowork-skills.md"}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"], "## Cowork skills\n\n- git\n- bash\n");
-}
-
-#[tokio::test]
-async fn sk3_read_builtin_skill_rejects_path_traversal() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    // Path traversal / absolute-path attempts must be rejected. Relative
-    // paths with `/` are now legitimate (e.g. `auto-inject/cron/SKILL.md`)
-    // and handled by the valid-path code path further below.
-    for bad in ["../escape.md", "/etc/passwd", "foo/../etc/passwd", ""] {
-        let resp = app
-            .clone()
-            .oneshot(json_with_token(
-                "POST",
-                "/api/skills/builtin-skill",
-                json!({"file_name": bad}),
-                &token,
-                &csrf,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "file_name={bad:?} should be rejected",
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SI — Skill info (E5 / `POST /api/skills/info`)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn si1_read_skill_info_from_directory_path() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let skill_dir = tmp.path().join("my-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: my-skill\ndescription: Handy little thing\n---\nBody",
-    )
-    .unwrap();
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/info",
-            json!({ "skill_path": skill_dir.to_str().unwrap() }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["name"], "my-skill");
-    assert_eq!(json["data"]["description"], "Handy little thing");
-}
-
-#[tokio::test]
-async fn si2_read_skill_info_falls_back_to_directory_name_when_name_empty() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let skill_dir = tmp.path().join("fallback-dir");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: \ndescription: Empty-name skill\n---\nBody",
-    )
-    .unwrap();
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/info",
-            json!({ "skill_path": skill_dir.to_str().unwrap() }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["name"], "fallback-dir");
-    assert_eq!(json["data"]["description"], "Empty-name skill");
-}
-
-#[tokio::test]
-async fn si3_read_skill_info_returns_not_found_for_missing_path() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let missing = tmp.path().join("no-such-skill");
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/info",
-            json!({ "skill_path": missing.to_str().unwrap() }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], false);
-}
-
-#[tokio::test]
-async fn skill_import_returns_specific_code_for_oversized_file() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let skill_dir = tmp.path().join("huge-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: huge-skill\ndescription: Huge skill\n---\nBody",
-    )
-    .unwrap();
-    let oversized_file_bytes = 50 * 1024 * 1024 + 1;
-    let oversized_file = std::fs::File::create(skill_dir.join("movie.bin")).unwrap();
-    oversized_file.set_len(oversized_file_bytes).unwrap();
-
-    let resp = app
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/import",
-            json!({ "skill_path": skill_dir.to_str().unwrap() }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].get("skill_names").is_none());
-    assert_eq!(
-        json["data"]["failed"],
-        json!([{
-            "source_name": "huge-skill",
-            "code": "SKILL_IMPORT_FILE_TOO_LARGE",
-            "error_path": "movie.bin",
-            "actual_bytes": oversized_file_bytes,
-            "limit_bytes": 50 * 1024 * 1024
-        }])
-    );
-}
-
-#[tokio::test]
-async fn skill_batch_import_reports_partial_failures_without_rolling_back_successes() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let parent_dir = tmp.path().join("parent-pack");
-    let alpha_dir = parent_dir.join("alpha-skill");
-    let beta_dir = parent_dir.join("beta-skill");
-    std::fs::create_dir_all(&alpha_dir).unwrap();
-    std::fs::create_dir_all(&beta_dir).unwrap();
-    std::fs::write(
-        alpha_dir.join("SKILL.md"),
-        "---\nname: sample-alpha\ndescription: Alpha skill\n---\nBody",
-    )
-    .unwrap();
-    std::fs::write(
-        beta_dir.join("SKILL.md"),
-        "---\nname: sample-beta\ndescription: Beta skill\n---\nBody",
-    )
-    .unwrap();
-    let oversized_file_bytes = 50 * 1024 * 1024 + 1;
-    let oversized_file = std::fs::File::create(beta_dir.join("movie.bin")).unwrap();
-    oversized_file.set_len(oversized_file_bytes).unwrap();
-
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/import",
-            json!({ "skill_path": parent_dir.to_str().unwrap() }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["skill_names"], json!(["sample-alpha"]));
-    assert_eq!(
-        json["data"]["failed"],
-        json!([{
-            "source_name": "beta-skill",
-            "code": "SKILL_IMPORT_FILE_TOO_LARGE",
-            "error_path": "movie.bin",
-            "actual_bytes": oversized_file_bytes,
-            "limit_bytes": 50 * 1024 * 1024
-        }])
-    );
-    assert!(paths.user_skills_dir.join("sample-alpha").join("SKILL.md").exists());
-    assert!(!paths.user_skills_dir.join("sample-beta").exists());
-
-    let resp = app
-        .oneshot(get_with_token("/api/skills/import-history", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    let records = json["data"].as_array().unwrap();
-    assert!(
-        records.iter().any(|record| {
-            record["source_name"] == "beta-skill"
-                && record["status"] == "failed"
-                && record["error_code"] == "SKILL_IMPORT_FILE_TOO_LARGE"
-                && record["error_path"] == "movie.bin"
-                && record["actual_bytes"] == oversized_file_bytes
-                && record["limit_bytes"] == 50 * 1024 * 1024
-        }),
-        "history records = {records:?}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,15 +655,12 @@ fn write_skill(dir: &std::path::Path, name: &str, description: &str) {
 }
 
 #[tokio::test]
-async fn sl1_list_skills_tags_builtin_and_custom_with_source_field() {
+async fn sl1_raw_runtime_directories_are_not_auto_adopted() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
 
-    let builtin_dir = paths.builtin_skills_dir.clone();
-    write_skill(&builtin_dir, "review", "Built-in review skill");
-    write_skill(&paths.user_skills_dir, "my-skill", "A user-imported skill");
-    sync_skill_catalog_for_test(&services, &paths).await;
+    write_skill(&paths.user_skills_dir, "review", "Local review skill");
 
     let resp = app.oneshot(get_with_token("/api/skills", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1354,47 +668,7 @@ async fn sl1_list_skills_tags_builtin_and_custom_with_source_field() {
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
     let arr = json["data"].as_array().unwrap();
-    assert_eq!(arr.len(), 2);
-
-    let by_name: std::collections::HashMap<_, _> = arr
-        .iter()
-        .map(|v| (v["name"].as_str().unwrap().to_owned(), v.clone()))
-        .collect();
-
-    let review = &by_name["review"];
-    assert_eq!(review["source"], "builtin");
-    assert_eq!(review["is_custom"], false);
-    assert_eq!(review["is_auto_inject"], false);
-    assert!(
-        review["location"].as_str().unwrap().contains("review"),
-        "location should point at the skill dir",
-    );
-
-    let my_skill = &by_name["my-skill"];
-    assert_eq!(my_skill["source"], "custom");
-    assert_eq!(my_skill["is_custom"], true);
-    assert_eq!(my_skill["is_auto_inject"], false);
-}
-
-#[tokio::test]
-async fn sl2_list_skills_user_custom_overrides_builtin() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let builtin_dir = paths.builtin_skills_dir.clone();
-    write_skill(&builtin_dir, "review", "Built-in review");
-    write_skill(&paths.user_skills_dir, "review", "Custom review override");
-    sync_skill_catalog_for_test(&services, &paths).await;
-
-    let resp = app.oneshot(get_with_token("/api/skills", &token)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    let arr = json["data"].as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["description"], "Custom review override");
-    assert_eq!(arr[0]["source"], "custom");
+    assert!(arr.is_empty());
 }
 
 #[tokio::test]
@@ -1409,187 +683,4 @@ async fn sl3_list_skills_returns_empty_array_when_no_skills() {
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
     assert_eq!(json["data"].as_array().unwrap().len(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// BA — Auto-inject builtins through unified `GET /api/skills`
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn ba1_unified_skill_list_includes_auto_inject_builtin_entries() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let builtin_dir = paths.builtin_skills_dir.clone();
-    let auto_dir = builtin_dir.join("auto-inject");
-    write_skill(&auto_dir, "cron", "Schedule recurring tasks");
-    write_skill(&auto_dir, "skill-creator", "Scaffold a new skill");
-    // A top-level builtin that must NOT appear in the auto list.
-    write_skill(&builtin_dir, "review", "Top-level");
-    sync_skill_catalog_for_test(&services, &paths).await;
-
-    let resp = app.oneshot(get_with_token("/api/skills", &token)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    let arr = json["data"].as_array().unwrap();
-    let by_name: std::collections::HashMap<_, _> = arr
-        .iter()
-        .map(|v| (v["name"].as_str().unwrap().to_owned(), v.clone()))
-        .collect();
-
-    let cron = &by_name["cron"];
-    assert_eq!(cron["source"], "builtin");
-    assert_eq!(cron["is_auto_inject"], true);
-    assert_eq!(cron["relative_location"], "auto-inject/cron/SKILL.md");
-    assert_eq!(cron["description"], "Schedule recurring tasks");
-
-    let skill_creator = &by_name["skill-creator"];
-    assert_eq!(skill_creator["source"], "builtin");
-    assert_eq!(skill_creator["is_auto_inject"], true);
-    assert_eq!(skill_creator["relative_location"], "auto-inject/skill-creator/SKILL.md");
-
-    let review = &by_name["review"];
-    assert_eq!(review["source"], "builtin");
-    assert_eq!(review["is_auto_inject"], false);
-    assert_eq!(review["relative_location"], "review/SKILL.md");
-}
-
-#[tokio::test]
-async fn ba2_unified_skill_list_excludes_missing_auto_inject_dir() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app.oneshot(get_with_token("/api/skills", &token)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"].as_array().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn ba3_builtin_auto_skill_list_get_is_not_registered() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-    let resp = app
-        .oneshot(get_with_token("/api/skills/builtin-auto", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
-}
-
-// ---------------------------------------------------------------------------
-// DE — `GET /api/skills/detect-external` (source slug contract)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn de1_detect_external_populates_custom_source_slug() {
-    // The renderer uses `source` as a React key / `data-testid` suffix
-    // (`external-source-tab-${source}` in `SkillsHubSettings.tsx`). Custom
-    // paths MUST produce slugs prefixed with `custom-` per the e2e contract
-    // in `tests/e2e/features/settings/skills/edge-cases.e2e.ts`.
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let ext_dir = tmp.path().join("external-skills");
-    let skill_dir = ext_dir.join("my-ext-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: my-ext-skill\ndescription: External skill\n---\nBody",
-    )
-    .unwrap();
-    let ext_path_str = ext_dir.to_string_lossy().into_owned();
-
-    // Register the custom path through the HTTP surface so the state the
-    // handler reads is the same as production.
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/skills/external-paths",
-            json!({"name": "E2E Custom", "path": ext_path_str}),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = app
-        .oneshot(get_with_token("/api/skills/detect-external", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    let arr = json["data"].as_array().expect("data should be an array");
-    let custom = arr
-        .iter()
-        .find(|s| s["name"] == "E2E Custom")
-        .expect("custom source should be returned");
-    assert_eq!(custom["source"], format!("custom-{ext_path_str}"));
-    assert!(
-        custom["source"].as_str().unwrap().starts_with("custom-"),
-        "custom source must start with `custom-` for e2e testid contract",
-    );
-    assert_eq!(custom["skill_count"], 1);
-}
-
-#[tokio::test]
-async fn de2_detect_external_source_slugs_are_unique() {
-    let tmp = TempDir::new().unwrap();
-    let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let mk = |p: &std::path::Path, skill: &str| {
-        let dir = p.join(skill);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("SKILL.md"),
-            format!("---\nname: {skill}\ndescription: d\n---\nBody"),
-        )
-        .unwrap();
-    };
-    let dir_a = tmp.path().join("src-a");
-    let dir_b = tmp.path().join("src-b");
-    mk(&dir_a, "skill-a");
-    mk(&dir_b, "skill-b");
-    let path_a = dir_a.to_string_lossy().into_owned();
-    let path_b = dir_b.to_string_lossy().into_owned();
-
-    for (name, p) in [("Alpha", &path_a), ("Beta", &path_b)] {
-        let resp = app
-            .clone()
-            .oneshot(json_with_token(
-                "POST",
-                "/api/skills/external-paths",
-                json!({"name": name, "path": p}),
-                &token,
-                &csrf,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    let resp = app
-        .oneshot(get_with_token("/api/skills/detect-external", &token))
-        .await
-        .unwrap();
-    let json = body_json(resp).await;
-    let arr = json["data"].as_array().unwrap();
-    let slugs: Vec<&str> = arr
-        .iter()
-        .filter(|s| s["name"] == "Alpha" || s["name"] == "Beta")
-        .map(|s| s["source"].as_str().unwrap())
-        .collect();
-    assert_eq!(slugs.len(), 2);
-    assert_ne!(slugs[0], slugs[1], "distinct custom paths → distinct slugs");
 }

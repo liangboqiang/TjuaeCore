@@ -166,14 +166,13 @@ pub struct SessionInit {
     /// Skill ids/names to surface to the agent on the first turn (acp/tjuae_cli
     /// deliver these via the first prompt, not a `session/new` param).
     ///
-    /// NB: claude/codex direct-CLI backends intentionally do NOT consume this —
-    /// skills reach them as workspace symlinks (conversation service links the
-    /// resolved skills into the agent's `native_skills_dirs`, e.g.
-    /// `.claude/skills` / `.codex/skills`) and both CLIs discover them natively
-    /// (codex LIVE-verified 0.144.1: `skills/list` returns a `<cwd>/.codex/skills`
-    /// entry as scope=repo; see samples/codex-cli/0.144.1/_probe_workspace_skills.py).
-    /// The field is carried for the tjuae_cli/acp first-prompt delivery path only.
+    /// ACP/TjuaeCLI 可在首轮提示中消费该列表。Claude 等原生 CLI 仍通过
+    /// 工作区技能目录发现；自动 Codex 工作区改由下方 `skill_roots`
+    /// 通过进程级协议注入，避免触发项目本地配置的信任检查。
     pub skills: Vec<String>,
+    /// 会话级受管技能根目录。Codex 通过 `skills/extraRoots/set` 加载，
+    /// 无需在可写工作区内创建 `.codex`，从而保留项目信任边界。
+    pub skill_roots: Vec<String>,
     /// Composed system prompt / preset context (the `compose_preset_context`
     /// output + tjuae_cli `preset_rules`-merged prompt). Delivered first-message.
     pub preset_context: Option<String>,
@@ -243,11 +242,10 @@ pub struct SessionConfig {
     /// `CodexWakeRecipe.config`) so a resume re-applies the same policy (R16
     /// continuity). Backends other than codex ignore it.
     pub approval_policy: Option<String>,
-    /// The orchestration layer's resolved bundled-CLI absolute path. `None` ⇒ the
-    /// backend uses its historical bare command name ("claude"/"codex", resolved
-    /// via PATH), byte-identical to pre-bundling. Filled by the app registry
-    /// (session_agent) via `managed_cli::resolve_bundled_cli`; the session/backend
-    /// layer stays bundling-agnostic and only forwards it into the spawn. Carried
+    /// The orchestration layer's PATH-resolved external CLI absolute path. Tjuae
+    /// never downloads or bundles third-party CLIs. `None` means the backend uses
+    /// its historical bare command name so a missing user installation remains
+    /// diagnosable. Carried
     /// into the F-4 wake recipe (rides the cloned `config`) so a resume re-spawn
     /// uses the same binary (R16 continuity).
     pub cli_program: Option<std::path::PathBuf>,

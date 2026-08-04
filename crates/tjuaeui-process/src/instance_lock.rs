@@ -2,7 +2,7 @@
 //!
 //! The lock file is a dedicated sidecar `{data_dir}/runtime/tjuaeui-process/
 //! instance.lock` — provably disjoint from bun's `runtime.lock`, the node
-//! install lock, the db migrate lock, and the builtin-skills lock (IC-3). It
+//! install lock, the db migrate lock, and the managed-skills lock (IC-3). It
 //! is acquired NON-BLOCKING (try-lock) and fails fast on contention, so a
 //! second overlapping instance (auto-update) never silently hangs and — more
 //! importantly — never reaps the live sibling's processes (the reap pass is

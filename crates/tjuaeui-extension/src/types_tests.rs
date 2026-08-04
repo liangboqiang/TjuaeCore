@@ -93,48 +93,6 @@ fn test_ext_contributes_empty() {
 }
 
 #[test]
-fn test_ext_contributes_with_skills() {
-    let c = ExtContributes {
-        skills: vec![ExtSkill {
-            name: "my-skill".into(),
-            description: Some("A test skill".into()),
-            path: Some("skills/my-skill".into()),
-        }],
-        ..Default::default()
-    };
-    let json = serde_json::to_value(&c).unwrap();
-    assert_eq!(json["skills"][0]["name"], "my-skill");
-}
-
-#[test]
-fn test_ext_acp_adapter_minimal() {
-    let adapter = ExtAcpAdapter {
-        id: "claude-adapter".into(),
-        name: "Claude".into(),
-        description: None,
-        cli_command: Some("claude".into()),
-        default_cli_path: None,
-        acp_args: vec![],
-        env: HashMap::new(),
-        avatar: None,
-        auth_required: None,
-        supports_streaming: Some(true),
-        connection_type: None,
-        endpoint: None,
-        models: vec![],
-        yolo_mode: None,
-        health_check: None,
-        api_key_fields: vec![],
-    };
-    let json = serde_json::to_value(&adapter).unwrap();
-    assert_eq!(json["id"], "claude-adapter");
-    assert_eq!(json["cli_command"], "claude");
-    assert_eq!(json["supports_streaming"], true);
-    // Empty vecs should be omitted
-    assert!(json.get("acp_args").is_none());
-}
-
-#[test]
 fn test_ext_theme_serde() {
     let theme = ExtTheme {
         id: "dark".into(),
@@ -183,60 +141,6 @@ fn test_ext_settings_tab_with_position() {
     assert_eq!(json["order"], 80);
 }
 
-#[test]
-fn test_ext_settings_tab_accepts_legacy_field_aliases() {
-    let raw = json!({
-        "id": "legacy-settings",
-        "name": "Legacy Settings",
-        "entryPoint": "settings/legacy.html",
-        "position": {
-            "anchor": "general",
-            "placement": "after"
-        }
-    });
-
-    let tab: ExtSettingsTab = serde_json::from_value(raw).unwrap();
-    assert_eq!(tab.label, "Legacy Settings");
-    assert_eq!(tab.url, "settings/legacy.html");
-    assert_eq!(tab.position.unwrap().relative_to, "general");
-    assert_eq!(tab.order, 100);
-}
-
-// -- ExtMcpServer flatten roundtrip (M-50) --
-
-#[test]
-fn test_ext_mcp_server_roundtrip_with_extra_config() {
-    let raw = json!({
-        "id": "my-mcp",
-        "name": "My MCP Server",
-        "description": "A test MCP server",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-        "transport": "stdio"
-    });
-    let server: ExtMcpServer = serde_json::from_value(raw.clone()).unwrap();
-    assert_eq!(server.id, "my-mcp");
-    assert_eq!(server.name, "My MCP Server");
-    assert_eq!(server.description.as_deref(), Some("A test MCP server"));
-
-    // Flattened config should contain the extra fields
-    let re_serialized = serde_json::to_value(&server).unwrap();
-    assert_eq!(re_serialized["command"], "npx");
-    assert_eq!(re_serialized["transport"], "stdio");
-    assert_eq!(re_serialized["id"], "my-mcp");
-    assert_eq!(re_serialized["name"], "My MCP Server");
-}
-
-#[test]
-fn test_ext_mcp_server_minimal() {
-    let raw = json!({"id": "s1", "name": "S1"});
-    let server: ExtMcpServer = serde_json::from_value(raw).unwrap();
-    assert_eq!(server.id, "s1");
-    let re_serialized = serde_json::to_value(&server).unwrap();
-    assert_eq!(re_serialized["id"], "s1");
-    assert_eq!(re_serialized["name"], "S1");
-}
-
 // -- Manifest --
 
 #[test]
@@ -276,12 +180,6 @@ fn test_manifest_full_roundtrip() {
             ..Default::default()
         }),
         contributes: Some(ExtContributes::default()),
-        lifecycle: Some(LifecycleHooks {
-            on_install: Some("scripts/install.sh".into()),
-            on_activate: Some("scripts/activate.sh".into()),
-            on_deactivate: None,
-            on_uninstall: None,
-        }),
         i18n: Some(I18nConfig {
             locales: vec!["en".into(), "zh-CN".into()],
             directory: "i18n".into(),
@@ -309,7 +207,6 @@ fn test_manifest_snake_case_keys() {
         dependencies: HashMap::new(),
         permissions: None,
         contributes: None,
-        lifecycle: None,
         i18n: None,
     };
     let json = serde_json::to_value(&manifest).unwrap();
@@ -431,61 +328,6 @@ fn test_resolved_settings_tab_serializes_backend_contract_keys() {
     assert_eq!(json["order"], 80);
 }
 
-// -- Hub --
-
-#[test]
-fn test_hub_extension_status_serde() {
-    let cases = [
-        (HubExtensionStatus::NotInstalled, r#""not_installed""#),
-        (HubExtensionStatus::Installed, r#""installed""#),
-        (HubExtensionStatus::UpdateAvailable, r#""update_available""#),
-        (HubExtensionStatus::Installing, r#""installing""#),
-        (HubExtensionStatus::InstallFailed, r#""install_failed""#),
-    ];
-    for (variant, expected) in cases {
-        let json = serde_json::to_string(&variant).unwrap();
-        assert_eq!(json, expected);
-        let parsed: HubExtensionStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, variant);
-    }
-}
-
-#[test]
-fn test_hub_extension_with_status_roundtrip() {
-    let ext = HubExtensionWithStatus {
-        name: "cool-ext".into(),
-        version: "1.2.3".into(),
-        display_name: Some("Cool Extension".into()),
-        description: Some("Does cool things".into()),
-        author: Some("Author".into()),
-        icon: None,
-        tags: vec!["productivity".into()],
-        bundled: false,
-        status: HubExtensionStatus::Installed,
-    };
-    let json_str = serde_json::to_string(&ext).unwrap();
-    let parsed: HubExtensionWithStatus = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(parsed, ext);
-}
-
-#[test]
-fn test_hub_extension_bundled_status() {
-    let ext = HubExtensionWithStatus {
-        name: "builtin-ext".into(),
-        version: "1.0.0".into(),
-        display_name: None,
-        description: None,
-        author: None,
-        icon: None,
-        tags: vec![],
-        bundled: true,
-        status: HubExtensionStatus::Installed,
-    };
-    let json = serde_json::to_value(&ext).unwrap();
-    assert_eq!(json["bundled"], true);
-    assert_eq!(json["status"], "installed");
-}
-
 // -- Loaded extension --
 
 #[test]
@@ -506,7 +348,6 @@ fn test_loaded_extension_roundtrip() {
             entry_point: None,
             permissions: None,
             contributes: None,
-            lifecycle: None,
             i18n: None,
         },
         directory: "/path/to/ext".into(),
@@ -538,21 +379,4 @@ fn test_i18n_config_custom_directory() {
     let raw = json!({"locales": ["en", "zh-CN"], "directory": "lang"});
     let config: I18nConfig = serde_json::from_value(raw).unwrap();
     assert_eq!(config.directory, "lang");
-}
-
-// -- Lifecycle hooks --
-
-#[test]
-fn test_lifecycle_hooks_empty() {
-    let hooks = LifecycleHooks::default();
-    let json = serde_json::to_value(&hooks).unwrap();
-    assert_eq!(json, json!({}));
-}
-
-#[test]
-fn test_lifecycle_hooks_partial() {
-    let raw = json!({"on_install": "scripts/install.sh"});
-    let hooks: LifecycleHooks = serde_json::from_value(raw).unwrap();
-    assert_eq!(hooks.on_install.as_deref(), Some("scripts/install.sh"));
-    assert!(hooks.on_activate.is_none());
 }

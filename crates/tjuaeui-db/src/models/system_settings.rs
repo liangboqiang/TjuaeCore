@@ -13,5 +13,8 @@ pub struct SystemSettings {
     pub cron_notification_enabled: bool,
     pub command_queue_enabled: bool,
     pub save_upload_to_workspace: bool,
+    pub network_proxy_mode: String,
+    pub network_proxy_url: Option<String>,
+    pub network_proxy_no_proxy: String,
     pub updated_at: TimestampMs,
 }

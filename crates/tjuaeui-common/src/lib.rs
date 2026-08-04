@@ -11,6 +11,7 @@ pub mod error_extract;
 mod hooks;
 mod id;
 mod pagination;
+mod runtime_asset_digest;
 mod timestamp;
 mod types;
 
@@ -18,8 +19,7 @@ pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
 pub use crypto::{CryptoError, decrypt_string, encrypt_string};
 pub use enums::{
     AgentKillReason, AgentType, ConversationSource, ConversationStatus, FileChangeOperation, McpServerStatus,
-    McpSource, MessagePosition, MessageStatus, MessageType, PreviewContentType, ProtocolType, RemoteAgentAuthType,
-    RemoteAgentProtocol, RemoteAgentStatus,
+    McpSource, MessagePosition, MessageStatus, MessageType, PreviewContentType, ProtocolType,
 };
 #[allow(clippy::disallowed_types)]
 pub use error::{
@@ -28,5 +28,6 @@ pub use error::{
 pub use hooks::OnConversationDelete;
 pub use id::{fnv1a_hex8, generate_id, generate_id_with_length, generate_prefixed_id, generate_short_id};
 pub use pagination::PaginatedResult;
+pub use runtime_asset_digest::{RuntimeAssetDigestInput, compute_runtime_asset_snapshot_id};
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel, UpdateType, VersionInfo};
