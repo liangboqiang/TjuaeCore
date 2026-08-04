@@ -7404,14 +7404,17 @@ async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversat
     let workspace = PathBuf::from(resp.extra["workspace"].as_str().unwrap());
     let managed_root = crate::managed_skill_roots::managed_codex_skill_root(&workspace_root, &resp.id);
 
-    assert!(managed_root.join("cron").is_dir());
-    assert!(!workspace.join(".codex").exists());
     {
         let calls = links.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].workspace, managed_root);
         assert_eq!(calls[0].rel_dirs, vec!["."]);
+        assert_eq!(calls[0].skill_names, vec!["cron"]);
     }
+    assert!(!managed_root.starts_with(&workspace));
+    assert!(!workspace.join(".codex").exists());
+
+    std::fs::create_dir_all(managed_root.join("cleanup-probe")).unwrap();
 
     svc.delete("user-1", &resp.id).await.unwrap();
     assert!(!managed_root.exists());
