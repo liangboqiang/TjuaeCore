@@ -196,7 +196,7 @@ struct ActiveTrace {
 }
 
 /// A single bounded writer serializes all Trace persistence for a conversation
-/// service. Ordinary telemetry remains non-blocking. The runtime asset receipt
+/// service. Ordinary trace writes remain non-blocking. The runtime asset receipt
 /// boundary awaits one bounded acknowledgement because execution must not begin
 /// unless its audited, actual-load receipt was durably accepted.
 pub(crate) struct ConversationTraceWriter {
