@@ -12,6 +12,201 @@ use super::*;
 use crate::agent_task::IAgentTask;
 use crate::protocol::events::FinishEventData;
 
+fn runtime_asset(id: &str, kind: &str, digest: char) -> crate::runtime_assets::RuntimeAssetRef {
+    crate::runtime_assets::RuntimeAssetRef {
+        local_asset_id: id.into(),
+        kind: kind.into(),
+        local_definition_digest: format!("sha256-{}", digest.to_string().repeat(64)),
+        runtime_content_digest: format!("sha256-{}", digest.to_string().repeat(64)),
+        upstream_package: None,
+        upstream_asset_id: None,
+        upstream_version: None,
+        upstream_revision: None,
+    }
+}
+
+#[test]
+fn managed_skill_receipt_combines_cli_attestation_with_core_assistant() {
+    let assistant = runtime_asset("assistant-a", "assistant", 'a');
+    let skill = runtime_asset("skill-a", "skill", 'b');
+    let request = RuntimeAssetLoadRequest::new(
+        vec![assistant.clone()],
+        vec![crate::runtime_assets::RuntimeManagedSkillRef {
+            asset: skill.clone(),
+            root: PathBuf::from("redacted"),
+        }],
+    )
+    .unwrap()
+    .unwrap();
+    let receipt = CliRuntimeAssetSnapshot {
+        runtime_snapshot_id: request.runtime_snapshot_id.clone(),
+        assets: vec![cli_runtime_asset_ref(&skill)],
+    };
+
+    let receipt = verified_runtime_asset_receipt(Some(&request), Some(receipt))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.runtime_snapshot_id, request.runtime_snapshot_id);
+    assert_eq!(receipt.assets, vec![assistant, skill]);
+}
+
+#[test]
+fn four_kind_receipt_combines_core_and_cli_attestations() {
+    let assistant = runtime_asset("assistant-a", "assistant", 'a');
+    let engine = runtime_asset("engine-a", "engineAdapter", 'b');
+    let skill = runtime_asset("skill-a", "skill", 'c');
+    let mcp = runtime_asset("mcp-a", "mcp", 'd');
+    let request = RuntimeAssetLoadRequest::new_with_runtime_assets(
+        vec![assistant.clone()],
+        vec![engine.clone()],
+        vec![crate::runtime_assets::RuntimeManagedSkillRef {
+            asset: skill.clone(),
+            root: PathBuf::from("redacted"),
+        }],
+        vec![crate::runtime_assets::RuntimeManagedMcpRef {
+            asset: mcp.clone(),
+            server_name: "docs".into(),
+        }],
+    )
+    .unwrap()
+    .unwrap();
+    let receipt = CliRuntimeAssetSnapshot {
+        runtime_snapshot_id: request.runtime_snapshot_id.clone(),
+        assets: vec![
+            cli_runtime_asset_ref(&engine),
+            cli_runtime_asset_ref(&skill),
+            cli_runtime_asset_ref(&mcp),
+        ],
+    };
+
+    let receipt = verified_runtime_asset_receipt(Some(&request), Some(receipt))
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(receipt.assets, vec![assistant, engine, mcp, skill]);
+}
+
+#[test]
+fn managed_skill_receipt_fails_closed_when_cli_attests_different_content() {
+    let skill = runtime_asset("skill-a", "skill", 'b');
+    let request = RuntimeAssetLoadRequest::new(
+        Vec::new(),
+        vec![crate::runtime_assets::RuntimeManagedSkillRef {
+            asset: skill.clone(),
+            root: PathBuf::from("redacted"),
+        }],
+    )
+    .unwrap()
+    .unwrap();
+    let receipt = CliRuntimeAssetSnapshot {
+        runtime_snapshot_id: request.runtime_snapshot_id.clone(),
+        assets: vec![cli_runtime_asset_ref(&runtime_asset("skill-a", "skill", 'c'))],
+    };
+
+    assert!(matches!(
+        verified_runtime_asset_receipt(Some(&request), Some(receipt)),
+        Err(AgentError::RuntimeAssetContract {
+            reason: RuntimeAssetFailureReason::ReceiptMismatch,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn managed_skill_receipt_fails_closed_when_cli_snapshot_is_missing() {
+    let request = RuntimeAssetLoadRequest::new(
+        Vec::new(),
+        vec![crate::runtime_assets::RuntimeManagedSkillRef {
+            asset: runtime_asset("skill-a", "skill", 'b'),
+            root: PathBuf::from("redacted"),
+        }],
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(matches!(
+        verified_runtime_asset_receipt(Some(&request), None),
+        Err(AgentError::RuntimeAssetContract {
+            reason: RuntimeAssetFailureReason::ReceiptMissing,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cli_snapshot_fails_closed_when_no_runtime_assets_were_requested() {
+    let snapshot = CliRuntimeAssetSnapshot {
+        runtime_snapshot_id: "sha256-unrequested".into(),
+        assets: Vec::new(),
+    };
+
+    assert!(matches!(
+        verified_runtime_asset_receipt(None, Some(snapshot)),
+        Err(AgentError::RuntimeAssetContract {
+            reason: RuntimeAssetFailureReason::ReceiptUnexpected,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn shared_v2_fixture_is_accepted_by_core_and_cli_contracts() {
+    let fixture = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/runtime-asset-snapshot.v2.json"
+    ));
+    let snapshot: CliRuntimeAssetSnapshot = serde_json::from_str(fixture).expect("v2 fixture should deserialize");
+    let requested_assets = snapshot
+        .assets
+        .iter()
+        .cloned()
+        .map(runtime_asset_ref_from_cli)
+        .collect::<Vec<_>>();
+    let assistant = requested_assets
+        .iter()
+        .find(|asset| asset.kind == "assistant")
+        .unwrap()
+        .clone();
+    let engine = requested_assets
+        .iter()
+        .find(|asset| asset.kind == "engineAdapter")
+        .unwrap()
+        .clone();
+    let skill = requested_assets
+        .iter()
+        .find(|asset| asset.kind == "skill")
+        .unwrap()
+        .clone();
+    let mcp = requested_assets
+        .iter()
+        .find(|asset| asset.kind == "mcp")
+        .unwrap()
+        .clone();
+    let request = RuntimeAssetLoadRequest::new_with_runtime_assets(
+        vec![assistant],
+        vec![engine],
+        vec![crate::runtime_assets::RuntimeManagedSkillRef {
+            asset: skill,
+            root: PathBuf::from("redacted"),
+        }],
+        vec![crate::runtime_assets::RuntimeManagedMcpRef {
+            asset: mcp,
+            server_name: "docs".into(),
+        }],
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(request.runtime_snapshot_id, snapshot.runtime_snapshot_id);
+    let mut cli_snapshot = snapshot;
+    cli_snapshot.assets.retain(|asset| asset.kind != "assistant");
+    let receipt = verified_runtime_asset_receipt(Some(&request), Some(cli_snapshot))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.runtime_snapshot_id, request.runtime_snapshot_id);
+    assert_eq!(receipt.assets, requested_assets);
+}
+
 async fn assert_no_stop_signal(agent: &TjuaeCliAgentManager) {
     let notified = agent.cancel_notify.notified();
     tokio::pin!(notified);

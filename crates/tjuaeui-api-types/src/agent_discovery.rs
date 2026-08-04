@@ -38,6 +38,17 @@ pub struct AgentEnvEntry {
     pub description: Option<String>,
 }
 
+/// `GET /api/engines/{id}/overrides` 的只读结果。
+///
+/// 覆盖值只能由类型化 Engine Adapter 资产生命周期生成；旧引擎目录不再
+/// 暴露写入契约。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentOverridesResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_override: Option<String>,
+    pub env_override: Vec<AgentEnvEntry>,
+}
+
 /// Source-specific bookkeeping (how to probe, how to upgrade, which Hub
 /// package it came from).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -51,6 +62,10 @@ pub struct AgentSourceInfo {
     /// Hub package identifier when `agent_source = "extension"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_package_id: Option<String>,
+    /// Core 本地资产库中的原始资产 ID。仅用于在真实用户会话启动时解析
+    /// 对应 Overlay/凭据，不是 Hub 身份，也不得被改写成运行时 ID。
+    #[serde(default, rename = "tjuaeLocalAssetId", skip_serializing_if = "Option::is_none")]
+    pub tjuae_local_asset_id: Option<String>,
     /// Version string for Hub or custom rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -131,18 +146,61 @@ pub enum AgentSnapshotCheckStatus {
     Offline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSnapshotCheckKind {
     Startup,
     Scheduled,
+    #[default]
     Manual,
     Session,
 }
 
+/// 批量 Agent 诊断任务的生命周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDiagnosticRunState {
+    Running,
+    Completed,
+}
+
+/// 启动一次批量 Agent 诊断。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StartAgentDiagnosticsRequest {
+    /// 为空时诊断目录中的全部可运行 Agent。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub trigger: AgentSnapshotCheckKind,
+}
+
+/// 批量诊断的可恢复进度快照。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDiagnosticRun {
+    pub run_id: String,
+    pub trigger: AgentSnapshotCheckKind,
+    pub state: AgentDiagnosticRunState,
+    pub total: usize,
+    pub completed: usize,
+    pub online: usize,
+    pub needs_attention: usize,
+    pub missing: usize,
+    pub started_at: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<TimestampMs>,
+}
+
+/// `engine.diagnosticsChanged` WebSocket 事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDiagnosticsChangedPayload {
+    pub run: AgentDiagnosticRun,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentManagementRow>,
+}
+
 /// A single `backend → logo URL` pair in the agent logo catalog.
 ///
-/// Returned by `GET /api/agents/logos` so business surfaces can resolve
+/// Returned by `GET /api/engines/logos` so business surfaces can resolve
 /// an agent logo from a backend identifier without owning a path map.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentLogoEntry {
@@ -154,7 +212,7 @@ pub struct AgentLogoEntry {
 ///
 /// This remains the refresh/logos/custom-agent CRUD read model for the
 /// legacy agent catalog, even though business surfaces now consume
-/// assistants instead of `GET /api/agents`.
+/// assistants instead of `GET /api/engines`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMetadata {
     pub id: String,

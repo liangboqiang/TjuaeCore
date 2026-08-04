@@ -7,6 +7,7 @@ use crate::id::fnv1a_hex8;
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
     Acp,
+    A2a,
     #[serde(rename = "openclaw-gateway")]
     OpenclawGateway,
     Nanobot,
@@ -31,6 +32,7 @@ impl AgentType {
     pub fn display_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "ACP",
+            AgentType::A2a => "A2A",
             AgentType::OpenclawGateway => "OpenClaw Gateway",
             AgentType::Nanobot => "Nanobot",
             AgentType::Remote => "Remote",
@@ -43,6 +45,7 @@ impl AgentType {
     pub fn serde_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "acp",
+            AgentType::A2a => "a2a",
             AgentType::OpenclawGateway => "openclaw-gateway",
             AgentType::Nanobot => "nanobot",
             AgentType::Remote => "remote",
@@ -53,7 +56,7 @@ impl AgentType {
     }
 
     pub fn supports_new_conversation(&self) -> bool {
-        matches!(self, AgentType::Acp | AgentType::TjuaeCli)
+        matches!(self, AgentType::Acp | AgentType::A2a | AgentType::TjuaeCli)
     }
 
     pub fn is_deprecated_runtime(&self) -> bool {
@@ -86,6 +89,7 @@ impl AgentType {
         match self {
             AgentType::TjuaeCli => Some(&[".tjuae/skills"]),
             AgentType::Acp
+            | AgentType::A2a
             | AgentType::OpenclawGateway
             | AgentType::Nanobot
             | AgentType::Remote
@@ -117,6 +121,7 @@ impl AgentType {
                 _ => "yolo",
             },
             AgentType::TjuaeCli
+            | AgentType::A2a
             | AgentType::Gemini
             | AgentType::Codex
             | AgentType::OpenclawGateway
@@ -194,34 +199,6 @@ pub enum ProtocolType {
     Anthropic,
     Gemini,
     Unknown,
-}
-
-/// Remote Agent protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentProtocol {
-    OpenClaw,
-    ZeroClaw,
-    Acp,
-}
-
-/// Remote Agent authentication method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentAuthType {
-    Bearer,
-    Password,
-    None,
-}
-
-/// Remote Agent connection status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteAgentStatus {
-    Unknown,
-    Connected,
-    Pending,
-    Error,
 }
 
 /// Reason for terminating an Agent.
@@ -318,6 +295,7 @@ mod tests {
         assert_eq!(AgentType::Nanobot.display_name(), "Nanobot");
         assert_eq!(AgentType::Remote.display_name(), "Remote");
         assert_eq!(AgentType::Acp.display_name(), "ACP");
+        assert_eq!(AgentType::A2a.display_name(), "A2A");
         assert_eq!(AgentType::Codex.display_name(), "Codex (legacy)");
     }
 
@@ -333,6 +311,7 @@ mod tests {
     fn test_agent_type_id_unique_per_variant() {
         let ids: Vec<String> = [
             AgentType::Acp,
+            AgentType::A2a,
             AgentType::OpenclawGateway,
             AgentType::Nanobot,
             AgentType::Remote,
@@ -359,6 +338,7 @@ mod tests {
     fn test_agent_type_all_variants() {
         let cases = [
             (AgentType::Acp, "acp"),
+            (AgentType::A2a, "a2a"),
             (AgentType::OpenclawGateway, "openclaw-gateway"),
             (AgentType::Nanobot, "nanobot"),
             (AgentType::Remote, "remote"),
@@ -376,6 +356,7 @@ mod tests {
     #[test]
     fn agent_type_new_conversation_support_policy_is_explicit() {
         assert!(AgentType::Acp.supports_new_conversation());
+        assert!(AgentType::A2a.supports_new_conversation());
         assert!(AgentType::TjuaeCli.supports_new_conversation());
 
         assert!(!AgentType::Gemini.supports_new_conversation());
@@ -388,6 +369,7 @@ mod tests {
     #[test]
     fn agent_type_deprecated_runtime_policy_matches_new_conversation_support() {
         assert!(!AgentType::Acp.is_deprecated_runtime());
+        assert!(!AgentType::A2a.is_deprecated_runtime());
         assert!(!AgentType::TjuaeCli.is_deprecated_runtime());
 
         assert!(AgentType::Gemini.is_deprecated_runtime());
@@ -485,6 +467,7 @@ mod tests {
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("gemini")), "yolo");
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("hermes")), "default");
         assert_eq!(AgentType::Acp.full_auto_mode_id(None), "yolo");
+        assert_eq!(AgentType::A2a.full_auto_mode_id(None), "yolo");
         assert_eq!(AgentType::TjuaeCli.full_auto_mode_id(None), "yolo");
         assert_eq!(AgentType::Remote.full_auto_mode_id(None), "yolo");
     }

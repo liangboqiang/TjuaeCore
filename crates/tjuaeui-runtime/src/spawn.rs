@@ -211,11 +211,13 @@ impl Builder {
 
     /// Spawn the process and return the standard `tokio::process::Child`.
     pub fn spawn(mut self) -> io::Result<Child> {
+        crate::network_proxy::apply_network_proxy_to_command(&mut self.inner);
         self.inner.spawn()
     }
 
     /// Run to completion and collect stdout/stderr.
     pub async fn output(mut self) -> io::Result<std::process::Output> {
+        crate::network_proxy::apply_network_proxy_to_command(&mut self.inner);
         self.inner.output().await
     }
 }

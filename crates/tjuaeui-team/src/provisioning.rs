@@ -178,7 +178,7 @@ impl TeamAgentProvisioner {
         let leader_role = TeammateRole::Lead;
         let leader_assistant_id = Self::effective_assistant_id(leader_input.assistant_id.as_deref());
         let leader_backend = self
-            .resolve_requested_backend(leader_input.backend.as_deref(), leader_assistant_id.as_deref())
+            .resolve_requested_backend(user_id, leader_input.backend.as_deref(), leader_assistant_id.as_deref())
             .await?;
         let leader_conversation = self
             .create_team_conversation_for_agent(
@@ -229,7 +229,7 @@ impl TeamAgentProvisioner {
             let slot_id = generate_id();
             let assistant_id = Self::effective_assistant_id(input.assistant_id.as_deref());
             let backend = self
-                .resolve_requested_backend(input.backend.as_deref(), assistant_id.as_deref())
+                .resolve_requested_backend(user_id, input.backend.as_deref(), assistant_id.as_deref())
                 .await?;
             let conversation = self
                 .create_team_conversation_for_agent(
@@ -294,7 +294,7 @@ impl TeamAgentProvisioner {
         let workspace = self.workspace_resolver().resolve_for_new_agent(row, team).await?;
         let assistant_id = Self::effective_assistant_id(req.assistant_id.as_deref());
         let backend = self
-            .resolve_requested_backend(req.backend.as_deref(), assistant_id.as_deref())
+            .resolve_requested_backend(user_id, req.backend.as_deref(), assistant_id.as_deref())
             .await?;
         let agent = self
             .provision_new_agent(NewAgentProvisioning {
@@ -317,6 +317,7 @@ impl TeamAgentProvisioner {
 
     async fn resolve_requested_backend(
         &self,
+        user_id: &str,
         requested_backend: Option<&str>,
         assistant_id: Option<&str>,
     ) -> Result<String, TeamError> {
@@ -324,7 +325,7 @@ impl TeamAgentProvisioner {
         if let Some(assistant_id) = assistant_id {
             return self
                 .assistant_catalog
-                .resolve_team_selectable_assistant(assistant_id)
+                .resolve_team_selectable_assistant(user_id, assistant_id)
                 .await?
                 .map(|assistant| assistant.backend)
                 .ok_or_else(|| TeamError::InvalidRequest(format!("助手不可用于团队模式：{assistant_id}")));
@@ -843,6 +844,7 @@ mod tests {
     impl TeamAssistantCatalogPort for EmptyTeamAssistantCatalog {
         async fn list_team_selectable_assistants(
             &self,
+            _user_id: &str,
         ) -> Result<Vec<crate::ports::TeamAssistantCatalogEntry>, TeamError> {
             Ok(Vec::new())
         }

@@ -208,14 +208,13 @@ pub(crate) mod workspace_harness {
     };
     use tjuaeui_common::{AgentKillReason, AgentType, PaginatedResult, now_ms};
     use tjuaeui_db::models::{
-        AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, ConversationRow, MessageRow, TeamRow,
-        TeamTaskRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
-        UpsertAssistantOverlayParams,
+        AgentMetadataRow, AssistantDefinitionRow, ConversationRow, MessageRow, TeamRow, TeamTaskRow,
+        UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
     };
     use tjuaeui_db::{
         ConversationFilters, ConversationRowUpdate, DbError, IAgentMetadataRepository, IAssistantDefinitionRepository,
-        IAssistantOverlayRepository, IConversationRepository, IProviderRepository, ITeamRepository, MessagePageParams,
-        MessagePageResult, MessageRowUpdate, MessageSearchRow, UpdateTeamParams,
+        IConversationRepository, IProviderRepository, ITeamRepository, MessagePageParams, MessagePageResult,
+        MessageRowUpdate, MessageSearchRow, UpdateTeamParams,
     };
     use tjuaeui_realtime::EventBroadcaster;
 
@@ -813,7 +812,10 @@ pub(crate) mod workspace_harness {
 
     #[async_trait]
     impl TeamAssistantCatalogPort for EmptyTeamAssistantCatalog {
-        async fn list_team_selectable_assistants(&self) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
+        async fn list_team_selectable_assistants(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError> {
             Ok(Vec::new())
         }
     }
@@ -910,27 +912,6 @@ pub(crate) mod workspace_harness {
         }
 
         async fn soft_delete(&self, _definition_id: &str, _deleted_at: i64) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    struct EmptyAssistantOverlayRepo;
-
-    #[async_trait]
-    impl IAssistantOverlayRepository for EmptyAssistantOverlayRepo {
-        async fn get(&self, _definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(vec![])
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
             Ok(false)
         }
     }
@@ -1045,7 +1026,6 @@ pub(crate) mod workspace_harness {
             Arc::new(EmptyAgentMetadataRepo),
             Arc::new(EmptyTeamAssistantCatalog),
             Arc::new(EmptyAssistantDefinitionRepo),
-            Arc::new(EmptyAssistantOverlayRepo),
             Arc::new(EmptyProviderRepo),
             conversation_port,
             projection_store,

@@ -80,10 +80,10 @@ async fn seed_legacy_assistant_identity(pool: &sqlx::SqlitePool) {
                 name, name_i18n, description_i18n, avatar_type, agent_backend,
                 rule_resource_type, recommended_prompts, recommended_prompts_i18n,
                 default_model_mode, default_permission_mode, default_skills_mode, default_skill_ids,
-                custom_skill_names, default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids,
+                custom_skill_names, default_mcps_mode, default_mcp_ids,
                 created_at, updated_at
             ) VALUES (?, ?, 'generated', 'system', ?, ?, '{}', '{}', 'none', ?,
-                'none', '[]', '{}', 'auto', 'auto', 'auto', '[]', '[]', '[]', 'auto', '[]', 1, 1)",
+                'none', '[]', '{}', 'auto', 'auto', 'auto', '[]', '[]', 'auto', '[]', 1, 1)",
         )
         .bind(definition_id)
         .bind(assistant_key)

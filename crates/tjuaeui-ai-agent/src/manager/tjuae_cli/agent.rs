@@ -15,6 +15,11 @@ use tjuae_config::config::{CliArgs, Config, McpServerConfig, ProviderType};
 use tjuae_mcp::manager::McpManager;
 use tjuae_protocol::commands::{ApprovalScope, SessionMode};
 use tjuae_protocol::{ToolApprovalManager, ToolApprovalResult};
+use tjuae_providers::create_provider_with_client;
+use tjuae_types::runtime_asset::{
+    RuntimeAssetRef as CliRuntimeAssetRef, RuntimeAssetSnapshot as CliRuntimeAssetSnapshot,
+    RuntimeMcpRef as CliRuntimeMcpRef, RuntimeSkillRef as CliRuntimeSkillRef,
+};
 use tjuaeui_api_types::{
     AcpConfigOptionDto, AcpConfigSelectOptionDto, AgentModeResponse, ConfigOptionConfirmation,
     GetConfigOptionsResponse, SetConfigOptionResponse, SlashCommandItem,
@@ -33,6 +38,11 @@ use crate::dev_prompt_dump::{AgentFinalInputDump, dump_agent_final_input};
 use crate::error::AgentError;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
+use crate::runtime_assets::{
+    RuntimeAssetFailureReason, RuntimeAssetLoadReceipt, RuntimeAssetLoadRequest, RuntimeAssetReceiptPort,
+    RuntimeAssetRef, RuntimeBoundaryReporter, core_only_runtime_asset_receipt, runtime_boundary_event_from_tjuae_cli,
+    verify_runtime_asset_receipt,
+};
 use crate::types::{SendMessageData, TjuaeCliResolvedConfig};
 
 use super::content::build_content_blocks;
@@ -115,6 +125,7 @@ pub struct TjuaeCliAgentManager {
     mcp_managers: Vec<Arc<McpManager>>,
     approval_manager: Arc<ToolApprovalManager>,
     confirmations: Arc<RwLock<Vec<Confirmation>>>,
+    runtime_asset_receipt: Option<RuntimeAssetLoadReceipt>,
     final_input_dump: Option<TjuaeCliFinalInputDumpContext>,
     /// Signalled by `cancel()` to abort an in-flight `engine.run()` via
     /// `tokio::select!` in `send_message()`.
@@ -139,6 +150,17 @@ impl TjuaeCliAgentManager {
         workspace: String,
         config_extra: TjuaeCliResolvedConfig,
         resume_session: Option<Session>,
+    ) -> Result<Self, AgentError> {
+        Self::new_with_runtime_assets(conversation_id, workspace, config_extra, resume_session, None, None).await
+    }
+
+    pub async fn new_with_runtime_assets(
+        conversation_id: String,
+        workspace: String,
+        config_extra: TjuaeCliResolvedConfig,
+        resume_session: Option<Session>,
+        runtime_asset_request: Option<RuntimeAssetLoadRequest>,
+        runtime_boundary_reporter: Option<RuntimeBoundaryReporter>,
     ) -> Result<Self, AgentError> {
         let runtime = AgentRuntime::new(conversation_id.clone(), workspace.clone(), 128);
         let sink: Arc<dyn OutputSink> = Arc::new(BackendOutputSink::new(runtime.event_sender()));
@@ -215,8 +237,34 @@ impl TjuaeCliAgentManager {
 
         let is_resume = resume_session.is_some();
         let provider_label = config.provider_label.clone();
+        let provider_http_client = tjuaeui_runtime::build_streaming_http_client(Duration::from_secs(10))
+            .map_err(|error| AgentError::internal(format!("创建统一代理 HTTP 客户端失败：{error}")))?;
+        let provider = create_provider_with_client(&config, provider_http_client);
 
-        let mut bootstrap = AgentBootstrap::new(config, &workspace, sink).runtime_env(runtime_env);
+        let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
+            .provider(provider)
+            .runtime_env(runtime_env);
+        if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+            let reporter = reporter.clone();
+            bootstrap =
+                bootstrap.runtime_boundary_reporter(Arc::new(
+                    move |record| match runtime_boundary_event_from_tjuae_cli(record) {
+                        Ok(event) => reporter.report(event),
+                        Err(error_code) => {
+                            warn!(error_code, "TjuaeCLI 返回了无效的运行边界记录，已拒绝转发");
+                        }
+                    },
+                ));
+        }
+        if let Some(request) = runtime_asset_request.as_ref() {
+            bootstrap = bootstrap.managed_runtime_assets(
+                request.runtime_snapshot_id.clone(),
+                request.core_assets.iter().map(cli_runtime_asset_ref).collect(),
+                request.runtime_assets.iter().map(cli_runtime_asset_ref).collect(),
+                request.managed_skills.iter().map(cli_runtime_skill_ref).collect(),
+                request.managed_mcps.iter().map(cli_runtime_mcp_ref).collect(),
+            );
+        }
         if let Some(session) = resume_session {
             info!(
                 conversation_id = %conversation_id,
@@ -227,10 +275,32 @@ impl TjuaeCliAgentManager {
             bootstrap = bootstrap.resume(session);
         }
 
-        let result = bootstrap
-            .build()
-            .await
-            .map_err(|e| AgentError::internal(format!("Agent 启动引导失败：{e}")))?;
+        let result = bootstrap.build().await.map_err(|error| {
+            if runtime_asset_request.as_ref().is_some_and(|request| {
+                !request.runtime_assets.is_empty()
+                    || !request.managed_skills.is_empty()
+                    || !request.managed_mcps.is_empty()
+            }) {
+                AgentError::runtime_asset_contract(
+                    RuntimeAssetFailureReason::ReceiptMismatch,
+                    format!("TjuaeCLI 未能确认请求的运行资产：{error}"),
+                )
+            } else {
+                AgentError::internal(format!("Agent 启动引导失败：{error}"))
+            }
+        })?;
+        if runtime_asset_request
+            .as_ref()
+            .is_some_and(|request| !request.managed_skills.is_empty())
+            && !result.engine.tool_names().iter().any(|name| name == "Skill")
+        {
+            return Err(AgentError::runtime_asset_contract(
+                RuntimeAssetFailureReason::ReceiptMissing,
+                "TjuaeCLI 引导完成但未注册 Skill 工具",
+            ));
+        }
+        let runtime_asset_receipt =
+            verified_runtime_asset_receipt(runtime_asset_request.as_ref(), result.runtime_asset_snapshot)?;
 
         let mut engine = result.engine;
         if !is_resume && let Err(e) = engine.init_session(&provider_label, &workspace, Some(&conversation_id)) {
@@ -278,6 +348,7 @@ impl TjuaeCliAgentManager {
             mcp_managers: result.mcp_managers,
             approval_manager,
             confirmations,
+            runtime_asset_receipt,
             final_input_dump,
             cancel_notify: Arc::new(Notify::new()),
             turn_finished_notify: Arc::new(Notify::new()),
@@ -350,6 +421,103 @@ impl TjuaeCliAgentManager {
                 );
             }
         }
+    }
+}
+
+fn verified_runtime_asset_receipt(
+    request: Option<&RuntimeAssetLoadRequest>,
+    cli_snapshot: Option<CliRuntimeAssetSnapshot>,
+) -> Result<Option<RuntimeAssetLoadReceipt>, AgentError> {
+    let Some(request) = request else {
+        if cli_snapshot.is_some() {
+            return Err(AgentError::runtime_asset_contract(
+                RuntimeAssetFailureReason::ReceiptUnexpected,
+                "TjuaeCLI 返回了未请求的运行资产回执",
+            ));
+        }
+        return Ok(None);
+    };
+    let runtime_confirmation_required =
+        !request.runtime_assets.is_empty() || !request.managed_skills.is_empty() || !request.managed_mcps.is_empty();
+    if !runtime_confirmation_required {
+        if cli_snapshot.is_some() {
+            return Err(AgentError::runtime_asset_contract(
+                RuntimeAssetFailureReason::ReceiptUnexpected,
+                "TjuaeCLI 为仅由 Core 应用的资产返回了运行资产回执",
+            ));
+        }
+        return core_only_runtime_asset_receipt(request).map(Some).map_err(|error| {
+            AgentError::runtime_asset_contract(
+                RuntimeAssetFailureReason::ReceiptMismatch,
+                format!("Core 助手 Definition 回执无效：{error}"),
+            )
+        });
+    }
+    let cli_snapshot = cli_snapshot.ok_or_else(|| {
+        AgentError::runtime_asset_contract(
+            RuntimeAssetFailureReason::ReceiptMissing,
+            "TjuaeCLI 没有返回引擎、技能与 MCP 的实际加载回执",
+        )
+    })?;
+    let mut assets = request.core_assets.clone();
+    assets.extend(cli_snapshot.assets.into_iter().map(runtime_asset_ref_from_cli));
+    let receipt = RuntimeAssetLoadReceipt {
+        runtime_snapshot_id: cli_snapshot.runtime_snapshot_id,
+        assets,
+    };
+    verify_runtime_asset_receipt(request, receipt)
+        .map(Some)
+        .map_err(|error| {
+            AgentError::runtime_asset_contract(
+                RuntimeAssetFailureReason::ReceiptMismatch,
+                format!("TjuaeCLI 实际运行资产回执与请求不一致：{error}"),
+            )
+        })
+}
+
+fn cli_runtime_skill_ref(skill: &crate::runtime_assets::RuntimeManagedSkillRef) -> CliRuntimeSkillRef {
+    CliRuntimeSkillRef {
+        asset: cli_runtime_asset_ref(&skill.asset),
+        root: skill.root.clone(),
+    }
+}
+
+fn cli_runtime_mcp_ref(mcp: &crate::runtime_assets::RuntimeManagedMcpRef) -> CliRuntimeMcpRef {
+    CliRuntimeMcpRef {
+        asset: cli_runtime_asset_ref(&mcp.asset),
+        server_name: mcp.server_name.clone(),
+    }
+}
+
+fn cli_runtime_asset_ref(asset: &RuntimeAssetRef) -> CliRuntimeAssetRef {
+    CliRuntimeAssetRef {
+        local_asset_id: asset.local_asset_id.clone(),
+        kind: asset.kind.clone(),
+        local_definition_digest: asset.local_definition_digest.clone(),
+        runtime_content_digest: asset.runtime_content_digest.clone(),
+        upstream_package: asset.upstream_package.clone(),
+        upstream_asset_id: asset.upstream_asset_id.clone(),
+        upstream_version: asset.upstream_version.clone(),
+        upstream_revision: asset.upstream_revision.clone(),
+    }
+}
+
+fn runtime_asset_ref_from_cli(asset: CliRuntimeAssetRef) -> RuntimeAssetRef {
+    RuntimeAssetRef {
+        local_asset_id: asset.local_asset_id,
+        kind: asset.kind,
+        local_definition_digest: asset.local_definition_digest,
+        runtime_content_digest: asset.runtime_content_digest,
+        upstream_package: asset.upstream_package,
+        upstream_asset_id: asset.upstream_asset_id,
+        upstream_version: asset.upstream_version,
+        upstream_revision: asset.upstream_revision,
+    }
+}
+
+impl RuntimeAssetReceiptPort for TjuaeCliAgentManager {
+    fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.clone()
     }
 }
 

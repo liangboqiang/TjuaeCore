@@ -1,13 +1,14 @@
-//! Abstraction over "what are the auto-inject skill names right now?" so
-//! `ConversationService` can compute the initial snapshot without forcing
-//! every test setup to stand up a real `SkillPaths` and skill repository.
+//! Resolve explicitly selected local skills into runtime-ready assets.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tjuaeui_api_types::AssetKind;
+pub use tjuaeui_asset::ResolvedAgentSkill;
+use tjuaeui_asset::{AssetCatalogService, AssetError, RuntimeAssetProvenance};
 use tjuaeui_db::ISkillRepository;
-pub use tjuaeui_extension::ResolvedAgentSkill;
 use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,15 +17,52 @@ pub struct LoadedAgentSkill {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeSkill {
+    pub name: String,
+    pub source_path: PathBuf,
+    pub provenance: RuntimeAssetProvenance,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeSkillResolutionError {
+    #[error("运行时技能来源目录未配置")]
+    ProvenanceUnavailable,
+    #[error(transparent)]
+    Catalog(#[from] AssetError),
+    #[error("运行时技能引用重复映射到同一本地资产：{0}")]
+    DuplicateAsset(String),
+    #[error("技能资产 {0} 没有唯一的运行时投影")]
+    ProjectionMissing(String),
+}
+
 #[async_trait]
 pub trait SkillResolver: Send + Sync {
-    /// Returns the sorted list of auto-inject builtin skill names currently
-    /// available on this installation.
-    async fn auto_inject_names(&self) -> Vec<String>;
-
     /// Resolve each skill name to its on-disk source directory, using the
     /// same search order as `materialize_skills_for_agent`.
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill>;
+
+    /// Resolve workspace-link sources for an authenticated user. Production
+    /// implementations use active catalog bindings; the default preserves
+    /// lightweight test resolvers without inventing a global user.
+    async fn resolve_skills_for_user(&self, _user_id: &str, names: &[String]) -> Vec<ResolvedAgentSkill> {
+        self.resolve_skills(names).await
+    }
+
+    /// Resolve selected skills through AssetCatalog before accepting their
+    /// runtime projections. Implementations must not infer identity from a
+    /// directory name, display name or remote slug.
+    async fn resolve_runtime_skills(
+        &self,
+        _user_id: &str,
+        references: &[String],
+    ) -> Result<Vec<ResolvedRuntimeSkill>, RuntimeSkillResolutionError> {
+        if references.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(RuntimeSkillResolutionError::ProvenanceUnavailable)
+        }
+    }
 
     /// Load full skill bodies for prompt-protocol agents that request
     /// `[LOAD_SKILL: name]` in their response.
@@ -40,15 +78,24 @@ pub trait SkillResolver: Send + Sync {
     async fn link_workspace_skills(&self, workspace: &Path, rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> usize;
 }
 
-/// Production adapter backed by `tjuaeui_extension::skill_service`.
+/// Production adapter backed by `tjuaeui_asset::skill_runtime`.
 pub struct ExtensionSkillResolver {
-    paths: Arc<tjuaeui_extension::SkillPaths>,
+    paths: Arc<tjuaeui_asset::SkillPaths>,
     skill_repo: Arc<dyn ISkillRepository>,
+    asset_catalog: Arc<AssetCatalogService>,
 }
 
 impl ExtensionSkillResolver {
-    pub fn new(paths: Arc<tjuaeui_extension::SkillPaths>, skill_repo: Arc<dyn ISkillRepository>) -> Self {
-        Self { paths, skill_repo }
+    pub fn new(
+        paths: Arc<tjuaeui_asset::SkillPaths>,
+        skill_repo: Arc<dyn ISkillRepository>,
+        asset_catalog: Arc<AssetCatalogService>,
+    ) -> Self {
+        Self {
+            paths,
+            skill_repo,
+            asset_catalog,
+        }
     }
 }
 
@@ -91,40 +138,13 @@ fn extract_skill_body(content: &str) -> String {
 
 #[async_trait]
 impl SkillResolver for ExtensionSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        match tjuaeui_extension::list_available_skills_with_repo(&self.paths, self.skill_repo.as_ref()).await {
-            Ok(items) => {
-                let mut names: Vec<String> = items
-                    .into_iter()
-                    .filter(|item| {
-                        item.source == tjuaeui_extension::SkillSource::Builtin
-                            && item
-                                .relative_location
-                                .as_deref()
-                                .is_some_and(|location| location.starts_with("auto-inject/"))
-                    })
-                    .map(|item| item.name)
-                    .collect();
-                names.sort();
-                names
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "auto_inject_names: skill catalog lookup failed, falling back to empty"
-                );
-                Vec::new()
-            }
-        }
-    }
-
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill> {
         if names.is_empty() {
             return Vec::new();
         }
         // Conversation_id is validated upstream; we don't use a real one here
         // because this resolver is purely a path-resolution helper.
-        match tjuaeui_extension::materialize_skills_for_agent_with_repo(
+        match tjuaeui_asset::materialize_skills_for_agent_with_repo(
             &self.paths,
             self.skill_repo.as_ref(),
             "workspace-link",
@@ -143,11 +163,67 @@ impl SkillResolver for ExtensionSkillResolver {
         }
     }
 
+    async fn resolve_skills_for_user(&self, user_id: &str, names: &[String]) -> Vec<ResolvedAgentSkill> {
+        let mut resolved = Vec::with_capacity(names.len());
+        let mut seen = BTreeSet::new();
+        for reference in names {
+            match self
+                .asset_catalog
+                .resolve_bound_runtime_asset(user_id, AssetKind::Skill, reference)
+                .await
+            {
+                Ok(bound) if seen.insert(bound.provenance.local_asset_id.clone()) => {
+                    resolved.push(ResolvedAgentSkill {
+                        name: bound.provenance.runtime_id,
+                        source_path: bound.workspace_path,
+                    });
+                }
+                Ok(_) => warn!(skill_reference = %reference, "duplicate active skill binding ignored"),
+                Err(error) => warn!(
+                    skill_reference = %reference,
+                    error = %error,
+                    "active skill binding resolution failed"
+                ),
+            }
+        }
+        resolved
+    }
+
+    async fn resolve_runtime_skills(
+        &self,
+        user_id: &str,
+        references: &[String],
+    ) -> Result<Vec<ResolvedRuntimeSkill>, RuntimeSkillResolutionError> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut resolved = Vec::with_capacity(references.len());
+        let mut local_asset_ids = BTreeSet::new();
+        for reference in references {
+            let bound = self
+                .asset_catalog
+                .resolve_bound_runtime_asset(user_id, AssetKind::Skill, reference)
+                .await?;
+            if !local_asset_ids.insert(bound.provenance.local_asset_id.clone()) {
+                return Err(RuntimeSkillResolutionError::DuplicateAsset(
+                    bound.provenance.local_asset_id,
+                ));
+            }
+            resolved.push(ResolvedRuntimeSkill {
+                name: bound.provenance.runtime_id.clone(),
+                source_path: bound.workspace_path,
+                provenance: bound.provenance,
+            });
+        }
+        Ok(resolved)
+    }
+
     async fn link_workspace_skills(&self, workspace: &Path, rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> usize {
         if rel_dirs.is_empty() || skills.is_empty() {
             return 0;
         }
-        match tjuaeui_extension::link_workspace_skills(workspace, rel_dirs, skills).await {
+        match tjuaeui_asset::link_workspace_skills(workspace, rel_dirs, skills).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(
@@ -162,17 +238,11 @@ impl SkillResolver for ExtensionSkillResolver {
 }
 
 #[cfg(test)]
-pub struct FixedSkillResolver {
-    pub names: Vec<String>,
-}
+pub struct FixedSkillResolver;
 
 #[cfg(test)]
 #[async_trait]
 impl SkillResolver for FixedSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        self.names.clone()
-    }
-
     async fn resolve_skills(&self, _names: &[String]) -> Vec<ResolvedAgentSkill> {
         Vec::new()
     }
@@ -190,52 +260,10 @@ impl SkillResolver for FixedSkillResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tjuaeui_db::SqliteSkillRepository;
-
-    fn write_skill(dir: &Path, name: &str, description: &str) {
-        let skill_dir = dir.join(name);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\nBody"),
-        )
-        .unwrap();
-    }
 
     #[test]
     fn extract_skill_body_removes_frontmatter() {
         let content = "---\nname: cron\ndescription: Cron\n---\nCron body";
         assert_eq!(extract_skill_body(content), "Cron body");
-    }
-
-    #[tokio::test]
-    async fn extension_resolver_reads_auto_inject_names_from_skill_catalog() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = Arc::new(tjuaeui_extension::SkillPaths {
-            data_dir: tmp.path().to_path_buf(),
-            user_skills_dir: tmp.path().join("skills"),
-            cron_skills_dir: tmp.path().join("cron").join("skills"),
-            builtin_skills_dir: tmp.path().join("builtin-skills"),
-            builtin_rules_dir: tmp.path().join("builtin-rules"),
-            assistant_rules_dir: tmp.path().join("assistant-rules"),
-            assistant_skills_dir: tmp.path().join("assistant-skills"),
-        });
-        write_skill(&paths.builtin_skills_dir, "review", "Top-level builtin");
-        write_skill(
-            &paths.builtin_skills_dir.join("auto-inject"),
-            "auto-cron",
-            "Auto-injected builtin",
-        );
-        write_skill(&paths.cron_skills_dir, "scheduled-task", "Cron source skill");
-
-        let db = tjuaeui_db::init_database_memory().await.unwrap();
-        let repo: Arc<dyn ISkillRepository> = Arc::new(SqliteSkillRepository::new(db.pool().clone()));
-        tjuaeui_extension::sync_skill_catalog_into_repo(paths.as_ref(), repo.as_ref())
-            .await
-            .unwrap();
-
-        let resolver = ExtensionSkillResolver::new(paths, repo);
-
-        assert_eq!(resolver.auto_inject_names().await, vec!["auto-cron".to_string()]);
     }
 }

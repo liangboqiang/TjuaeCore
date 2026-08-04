@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/tjuaeui-assets",
+    "crates/tjuaeui-logo-catalog",
     "crates/tjuaeui-common",
     "crates/tjuaeui-db",
     "crates/tjuaeui-api-types",
@@ -10,6 +10,7 @@ members = [
     "crates/tjuaeui-process",
     "crates/tjuaeui-session",
     "crates/tjuaeui-auth",
+    "crates/tjuaeui-asset",
     "crates/tjuaeui-system",
     "crates/tjuaeui-file",
     "crates/tjuaeui-office",
@@ -28,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Tjuae"]
@@ -37,7 +38,7 @@ repository = "https://github.com/liangboqiang/TjuaeCore"
 [workspace.dependencies]
 # Internal crates
 tjuaeui-common = { path = "crates/tjuaeui-common" }
-tjuaeui-assets = { path = "crates/tjuaeui-assets" }
+tjuaeui-logo-catalog = { path = "crates/tjuaeui-logo-catalog" }
 tjuaeui-db = { path = "crates/tjuaeui-db" }
 tjuaeui-api-types = { path = "crates/tjuaeui-api-types" }
 tjuaeui-realtime = { path = "crates/tjuaeui-realtime" }
@@ -45,6 +46,7 @@ tjuaeui-runtime = { path = "crates/tjuaeui-runtime" }
 tjuaeui-process = { path = "crates/tjuaeui-process" }
 tjuaeui-session = { path = "crates/tjuaeui-session" }
 tjuaeui-auth = { path = "crates/tjuaeui-auth" }
+tjuaeui-asset = { path = "crates/tjuaeui-asset" }
 tjuaeui-system = { path = "crates/tjuaeui-system" }
 tjuaeui-file = { path = "crates/tjuaeui-file" }
 tjuaeui-office = { path = "crates/tjuaeui-office" }
@@ -61,12 +63,12 @@ tjuaeui-cron = { path = "crates/tjuaeui-cron" }
 tjuaeui-assistant = { path = "crates/tjuaeui-assistant" }
 tjuaeui-app = { path = "crates/tjuaeui-app" }
 
-tjuae-agent = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
-tjuae-providers = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
-tjuae-types = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
-tjuae-protocol = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
-tjuae-config = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
-tjuae-mcp = { git = "https://github.com/liangboqiang/TjuaeCLI.git", tag = "v0.3.0" }
+tjuae-agent = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-providers = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-types = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-protocol = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-config = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-mcp = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
 
 # Core framework
 tokio = { version = "1", features = ["full"] }
@@ -74,6 +76,8 @@ axum = { version = "0.8", features = ["multipart", "ws"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 http = "1"
+tonic = { version = "0.14.6", features = ["transport", "tls-native-roots", "tls-ring"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -85,6 +89,11 @@ futures-util = "0.3"
 
 # Async trait (dyn-compatible async traits)
 async-trait = "0.1"
+
+# Agent2Agent protocol
+a2a = { package = "a2a-lf", version = "0.3.0" }
+a2a-client = { package = "a2a-client-lf", version = "0.2.1", default-features = false }
+a2a-grpc = { version = "0.3.2", default-features = false, features = ["rustls-tls"] }
 
 # Error handling
 thiserror = "2"

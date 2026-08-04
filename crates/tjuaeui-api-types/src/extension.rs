@@ -17,32 +17,6 @@ pub struct ExtensionSummaryResponse {
     pub source: String,
 }
 
-/// Response for `GET /api/hub/extensions`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubExtensionListResponse {
-    pub extensions: Vec<HubExtensionListItem>,
-}
-
-/// Single item in the Hub extension list.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubExtensionListItem {
-    pub name: String,
-    pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub bundled: bool,
-    pub status: String,
-}
-
 // ---------------------------------------------------------------------------
 // B. Permission responses
 // ---------------------------------------------------------------------------
@@ -66,12 +40,6 @@ pub struct PermissionDetailResponse {
 // ---------------------------------------------------------------------------
 // C. Extension management requests
 // ---------------------------------------------------------------------------
-
-/// Request body for `POST /api/hub/install` and `POST /api/hub/update`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct InstallExtensionRequest {
-    pub name: String,
-}
 
 /// Request body for `POST /api/extensions/enable`.
 #[derive(Debug, Clone, Deserialize)]
@@ -105,22 +73,6 @@ pub struct GetI18nRequest {
     pub locale: String,
 }
 
-/// Response for Hub install/update/uninstall operations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubOperationResponse {
-    pub success: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msg: Option<String>,
-}
-
-/// Hub update info returned by `POST /api/hub/check-updates`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HubUpdateInfo {
-    pub name: String,
-    pub current_version: String,
-    pub latest_version: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,32 +93,6 @@ mod tests {
         assert_eq!(json["display_name"], "My Extension");
         assert_eq!(json["enabled"], true);
         assert!(json.get("description").is_none());
-    }
-
-    #[test]
-    fn test_hub_extension_list_item_serde() {
-        let item = HubExtensionListItem {
-            name: "cool-ext".into(),
-            version: "2.0.0".into(),
-            display_name: None,
-            description: Some("Cool extension".into()),
-            author: Some("Author".into()),
-            icon: None,
-            tags: vec!["tools".into()],
-            bundled: false,
-            status: "installed".into(),
-        };
-        let json = serde_json::to_value(&item).unwrap();
-        assert_eq!(json["status"], "installed");
-        assert_eq!(json["tags"], json!(["tools"]));
-        assert!(json.get("display_name").is_none());
-    }
-
-    #[test]
-    fn test_install_extension_request_deserialize() {
-        let raw = json!({"name": "test-ext"});
-        let req: InstallExtensionRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.name, "test-ext");
     }
 
     #[test]
@@ -221,39 +147,5 @@ mod tests {
         assert_eq!(json["risk_level"], "moderate");
         assert_eq!(json["details"][0]["permission"], "network");
         assert_eq!(json["details"][0]["level"], "limited");
-    }
-
-    #[test]
-    fn test_hub_operation_response_success() {
-        let resp = HubOperationResponse {
-            success: true,
-            msg: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["success"], true);
-        assert!(json.get("msg").is_none());
-    }
-
-    #[test]
-    fn test_hub_operation_response_failure() {
-        let resp = HubOperationResponse {
-            success: false,
-            msg: Some("Extension not found".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["success"], false);
-        assert_eq!(json["msg"], "Extension not found");
-    }
-
-    #[test]
-    fn test_hub_update_info_serde() {
-        let info = HubUpdateInfo {
-            name: "ext".into(),
-            current_version: "1.0.0".into(),
-            latest_version: "2.0.0".into(),
-        };
-        let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["current_version"], "1.0.0");
-        assert_eq!(json["latest_version"], "2.0.0");
     }
 }

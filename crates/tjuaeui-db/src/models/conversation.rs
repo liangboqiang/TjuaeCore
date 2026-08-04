@@ -55,7 +55,6 @@ pub struct ConversationAssistantSnapshotRow {
     pub resolved_thought_level_value: Option<String>,
     pub default_skills_mode: String,
     pub resolved_skill_ids: String,
-    pub resolved_disabled_builtin_skill_ids: String,
     pub default_mcps_mode: String,
     pub resolved_mcp_ids: String,
     pub created_at: TimestampMs,
@@ -79,7 +78,6 @@ pub struct UpsertConversationAssistantSnapshotParams<'a> {
     pub resolved_thought_level_value: Option<&'a str>,
     pub default_skills_mode: &'a str,
     pub resolved_skill_ids: &'a str,
-    pub resolved_disabled_builtin_skill_ids: &'a str,
     pub default_mcps_mode: &'a str,
     pub resolved_mcp_ids: &'a str,
 }

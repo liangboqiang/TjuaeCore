@@ -10,19 +10,24 @@ use crate::manager::acp::{AcpAgentManager, CatalogForwarder};
 use crate::session_context::AcpSessionBuildContext;
 use agent_client_protocol::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio};
 use tjuaeui_api_types::{SessionMcpServer, SessionMcpTransport};
-use tjuaeui_common::CommandSpec;
+use tjuaeui_common::{CommandSpec, now_ms};
 use tjuaeui_db::IMcpServerRepository;
 use tjuaeui_db::models::McpServerRow;
 use tjuaeui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
 use tjuaeui_runtime::{ensure_runtime_command, ensure_runtime_command_with_reporter};
 use tracing::{info, warn};
 
+use crate::runtime_assets::{
+    RuntimeAssetLoadRequest, RuntimeBoundaryPhase, RuntimeBoundaryReporter, handshake_runtime_asset_receipt,
+};
 use crate::runtime_status::conversation_runtime_reporter;
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
     build_context: AcpSessionBuildContext,
     ctx: FactoryContext,
+    runtime_asset_request: Option<RuntimeAssetLoadRequest>,
+    runtime_boundary_reporter: Option<RuntimeBoundaryReporter>,
 ) -> Result<AgentInstance, AgentError> {
     let mut config = build_context.config;
 
@@ -60,19 +65,23 @@ pub(super) async fn build(
             backend_label,
             crate::session_agent::SessionBuildInputs {
                 conversation_id: ctx.conversation_id.clone(),
+                user_id: ctx.user_id.clone(),
                 workspace: ctx.workspace.clone(),
+                is_custom_workspace: ctx.is_custom_workspace,
+                skill_roots: ctx.skill_roots.clone(),
                 config: &config,
                 metadata: &meta,
                 session_snapshot: build_context.session_snapshot.as_ref(),
                 backend_session_id: build_context.session_id.clone(),
                 mcp_server_repo: deps.mcp_server_repo.as_ref(),
+                runtime_asset_configuration_resolver: deps.runtime_asset_configuration_resolver.as_ref(),
                 // The TJUAE_* conversation runtime context the legacy path
                 // injects via apply_acp_launch_policy — forwarded into
                 // SessionConfig.spawn_env so direct-CLI spawns get it too.
                 runtime_env: &ctx.runtime_env,
                 broadcaster: deps.broadcaster.clone(),
                 // G5: keyed by the resolved catalog row so the discovered
-                // modes/models/commands refresh the `/api/agents` picker (the
+                // modes/models/commands refresh the `/api/engines` picker (the
                 // AcpAgentManager path does this via CatalogForwarder; the session
                 // path polls capabilities() directly since its stream carries no
                 // catalog events).
@@ -84,6 +93,8 @@ pub(super) async fn build(
                 // DEV (`--dump-prompts`): resolve the dump dir once (mirrors the
                 // tjuae_cli factory's `prompt_dump_dir`). `None` when off.
                 prompt_dump_dir: crate::dev_prompt_dump::dump_dir_for_data_dir(&deps.data_dir, deps.dump_prompts),
+                runtime_asset_request,
+                runtime_boundary_reporter,
             },
             deps.session_spawner.clone(),
         )
@@ -101,8 +112,15 @@ pub(super) async fn build(
         return Ok(instance);
     }
 
-    let mut command_spec =
-        resolve_agent_command_spec(&meta, &ctx.workspace, &ctx.conversation_id, deps.broadcaster.clone()).await?;
+    let mut command_spec = resolve_agent_command_spec(
+        &meta,
+        &ctx.workspace,
+        &ctx.user_id,
+        deps.runtime_asset_configuration_resolver.as_deref(),
+        &ctx.conversation_id,
+        deps.broadcaster.clone(),
+    )
+    .await?;
     apply_acp_launch_policy(
         &mut command_spec,
         AcpLaunchPolicyInput {
@@ -132,8 +150,10 @@ pub(super) async fn build(
                 config.mcp_server_ids.as_deref(),
                 &ctx.conversation_id,
                 &mcp_capabilities,
+                &ctx.user_id,
+                deps.runtime_asset_configuration_resolver.as_deref(),
             )
-            .await
+            .await?
         }
         None => Vec::new(),
     };
@@ -162,6 +182,7 @@ pub(super) async fn build(
         }
     }
 
+    let inject_started_at = now_ms();
     let params = Arc::new(
         assemble_acp_params(
             ctx.conversation_id.clone(),
@@ -179,11 +200,39 @@ pub(super) async fn build(
         )
         .await,
     );
+    if let Some(reporter) = runtime_boundary_reporter.as_ref()
+        && let Some(request) = runtime_asset_request.as_ref()
+    {
+        let ended_at = now_ms();
+        for asset in &request.core_assets {
+            reporter.succeeded(RuntimeBoundaryPhase::Inject, inject_started_at, ended_at, Some(asset));
+        }
+    }
 
     let skill_mgr = deps.skill_manager.clone();
     let catalog_tx = deps.agent_registry.catalog_sender();
 
-    let (agent, domain_rx, notification_rx) = AcpAgentManager::build(params, skill_mgr, &catalog_tx).await?;
+    let spawn_started_at = now_ms();
+    let (agent, domain_rx, notification_rx) = match AcpAgentManager::build(params, skill_mgr, &catalog_tx).await {
+        Ok(value) => {
+            if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+                reporter.succeeded(RuntimeBoundaryPhase::Spawn, spawn_started_at, now_ms(), None);
+            }
+            value
+        }
+        Err(error) => {
+            if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+                reporter.failed(
+                    RuntimeBoundaryPhase::Spawn,
+                    spawn_started_at,
+                    now_ms(),
+                    None,
+                    "TJUAE_RUNTIME_SPAWN_FAILED",
+                );
+            }
+            return Err(error);
+        }
+    };
 
     let arc = Arc::new(agent);
     arc.start_permission_handler();
@@ -206,7 +255,60 @@ pub(super) async fn build(
     // session/new (or claude-meta-resume / session/load) and the first
     // reconcile pass have completed. Matches tjuae_cli factory behaviour:
     // the caller sees "warmed up" == "ready for PUT /mode | /model".
-    arc.warmup_session().await?;
+    let handshake_started_at = now_ms();
+    if let Err(error) = arc.warmup_session().await {
+        if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+            let ended_at = now_ms();
+            let runtime_assets = runtime_asset_request
+                .as_ref()
+                .map(|request| request.runtime_assets.as_slice())
+                .unwrap_or_default();
+            if runtime_assets.is_empty() {
+                reporter.failed(
+                    RuntimeBoundaryPhase::Handshake,
+                    handshake_started_at,
+                    ended_at,
+                    None,
+                    "TJUAE_RUNTIME_HANDSHAKE_FAILED",
+                );
+            } else {
+                for asset in runtime_assets {
+                    reporter.failed(
+                        RuntimeBoundaryPhase::Handshake,
+                        handshake_started_at,
+                        ended_at,
+                        Some(asset),
+                        "TJUAE_RUNTIME_HANDSHAKE_FAILED",
+                    );
+                }
+            }
+        }
+        return Err(error);
+    }
+    if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+        let ended_at = now_ms();
+        let runtime_assets = runtime_asset_request
+            .as_ref()
+            .map(|request| request.runtime_assets.as_slice())
+            .unwrap_or_default();
+        if runtime_assets.is_empty() {
+            reporter.succeeded(RuntimeBoundaryPhase::Handshake, handshake_started_at, ended_at, None);
+        } else {
+            for asset in runtime_assets {
+                reporter.succeeded(
+                    RuntimeBoundaryPhase::Handshake,
+                    handshake_started_at,
+                    ended_at,
+                    Some(asset),
+                );
+            }
+        }
+    }
+    if let Some(request) = runtime_asset_request.as_ref() {
+        let receipt = handshake_runtime_asset_receipt(request)
+            .map_err(|error| AgentError::conflict(format!("ACP 运行资产回执无法确认：{error}")))?;
+        arc.set_runtime_asset_receipt(receipt)?;
+    }
 
     let instance = AgentInstance::Acp(Arc::clone(&arc));
 
@@ -221,6 +323,8 @@ pub(super) async fn build(
 async fn resolve_agent_command_spec(
     meta: &tjuaeui_api_types::AgentMetadata,
     workspace: &str,
+    user_id: &str,
+    runtime_configuration_resolver: Option<&dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>,
     conversation_id: &str,
     broadcaster: Arc<dyn tjuaeui_realtime::EventBroadcaster>,
 ) -> Result<CommandSpec, AgentError> {
@@ -250,6 +354,12 @@ async fn resolve_agent_command_spec(
     };
     args.extend(launch_args);
 
+    let managed_local_asset_id = meta.agent_source_info.tjuae_local_asset_id.as_deref();
+    if managed_local_asset_id.is_some() && !meta.env.is_empty() {
+        return Err(AgentError::bad_request(
+            "RUNTIME_ASSET_JIT_ENGINE_PERSISTED_ENVIRONMENT_REJECTED：托管引擎不能从旧表读取环境变量",
+        ));
+    }
     let mut env: Vec<tjuaeui_common::EnvVar> = meta
         .env
         .iter()
@@ -263,11 +373,35 @@ async fn resolve_agent_command_spec(
         value: value.to_string_lossy().into_owned(),
     }));
 
+    let mut cwd = Some(workspace.to_owned());
+    if let Some(local_asset_id) = managed_local_asset_id {
+        let jit = crate::runtime_asset_jit::resolve_engine_configuration(
+            runtime_configuration_resolver,
+            user_id,
+            local_asset_id,
+        )
+        .await?;
+        for entry in jit.environment {
+            if env
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&entry.name))
+            {
+                return Err(AgentError::bad_request(
+                    "RUNTIME_ASSET_JIT_ENGINE_ENVIRONMENT_COLLISION：托管引擎环境变量与运行命令环境冲突",
+                ));
+            }
+            env.push(entry);
+        }
+        if let Some(working_directory) = jit.working_directory {
+            cwd = Some(working_directory);
+        }
+    }
+
     Ok(CommandSpec {
         command: resolved.program,
         args,
         env,
-        cwd: Some(workspace.to_owned()),
+        cwd,
     })
 }
 
@@ -285,7 +419,9 @@ async fn load_user_mcp_servers(
     selected_ids: Option<&[String]>,
     conversation_id: &str,
     capabilities: &AcpMcpCapabilities,
-) -> Vec<McpServer> {
+    user_id: &str,
+    runtime_configuration_resolver: Option<&dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>,
+) -> Result<Vec<McpServer>, AgentError> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
@@ -298,7 +434,7 @@ async fn load_user_mcp_servers(
                 error = %err,
                 "user_mcp: list() failed; skipping injection"
             );
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
 
@@ -320,8 +456,27 @@ async fn load_user_mcp_servers(
             );
             continue;
         }
-        match row_to_sdk_mcp_server(&row).await {
+        let managed_local_asset_id = crate::runtime_asset_jit::managed_mcp_local_asset_id(&row)?;
+        let jit = match managed_local_asset_id.as_deref() {
+            Some(local_asset_id) => {
+                let configuration = crate::runtime_asset_jit::resolve_mcp_configuration(
+                    runtime_configuration_resolver,
+                    user_id,
+                    local_asset_id,
+                )
+                .await?;
+                crate::runtime_asset_jit::verify_managed_mcp_projection(&row, &configuration)?;
+                Some(configuration)
+            }
+            None => None,
+        };
+        match row_to_sdk_mcp_server(&row, jit.as_ref()).await {
             Ok(server) => servers.push(server),
+            Err(_) if managed_local_asset_id.is_some() => {
+                return Err(AgentError::bad_request(
+                    "RUNTIME_ASSET_JIT_MCP_PROJECTION_INVALID：托管 MCP 的公开运行投影无效",
+                ));
+            }
             Err(err) => {
                 warn!(
                     conversation_id,
@@ -341,13 +496,16 @@ async fn load_user_mcp_servers(
             "user_mcp: injected into session/new"
         );
     }
-    servers
+    Ok(servers)
 }
 
 /// Convert an `McpServerRow` into the SDK `McpServer` shape used by
 /// `NewSessionRequest::mcp_servers`. Returns an error string when
 /// `transport_config` is malformed or required fields are missing.
-async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> {
+async fn row_to_sdk_mcp_server(
+    row: &McpServerRow,
+    jit: Option<&crate::runtime_asset_jit::McpJitConfiguration>,
+) -> Result<McpServer, String> {
     let value: serde_json::Value =
         serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
 
@@ -371,6 +529,13 @@ async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> 
                         .collect()
                 })
                 .unwrap_or_default();
+            if let Some(jit) = jit {
+                env_entries.extend(
+                    jit.environment
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+            }
             env_entries.sort_by(|a, b| a.0.cmp(&b.0));
             let (resolved_command, args, env) = ensure_stdio_launch(command, &args, &env_entries).await?;
 
@@ -384,7 +549,14 @@ async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> 
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "http: missing url".to_owned())?;
-            let headers = parse_headers(value.get("headers"));
+            let mut headers = parse_headers(value.get("headers"));
+            if let Some(jit) = jit {
+                headers.extend(
+                    jit.headers
+                        .iter()
+                        .map(|(name, value)| HttpHeader::new(name.clone(), value.clone())),
+                );
+            }
             Ok(McpServer::Http(
                 McpServerHttp::new(row.name.clone(), url).headers(headers),
             ))
@@ -394,7 +566,14 @@ async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> 
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "sse: missing url".to_owned())?;
-            let headers = parse_headers(value.get("headers"));
+            let mut headers = parse_headers(value.get("headers"));
+            if let Some(jit) = jit {
+                headers.extend(
+                    jit.headers
+                        .iter()
+                        .map(|(name, value)| HttpHeader::new(name.clone(), value.clone())),
+                );
+            }
             Ok(McpServer::Sse(
                 McpServerSse::new(row.name.clone(), url).headers(headers),
             ))
@@ -665,7 +844,7 @@ mod tests {
             false,
         );
 
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, None).await.expect("convert");
         match server {
             McpServer::Stdio(s) => {
                 let command = s.command.to_string_lossy();
@@ -729,6 +908,8 @@ mod tests {
         let spec = resolve_agent_command_spec(
             &meta,
             "/tmp/workspace",
+            "user-1",
+            None,
             "conv-acp",
             Arc::new(BroadcastEventBus::new(16)),
         )
@@ -750,6 +931,8 @@ mod tests {
         let spec = resolve_agent_command_spec(
             &meta,
             "/tmp/workspace",
+            "user-1",
+            None,
             "conv-acp",
             Arc::new(BroadcastEventBus::new(16)),
         )
@@ -773,7 +956,7 @@ mod tests {
             true,
             false,
         );
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, None).await.expect("convert");
         match server {
             McpServer::Stdio(s) => {
                 assert_eq!(s.name, "ctx7");
@@ -801,7 +984,7 @@ mod tests {
             true,
             false,
         );
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, None).await.expect("convert");
         match server {
             McpServer::Http(h) => {
                 assert_eq!(h.name, "remote");
@@ -817,19 +1000,19 @@ mod tests {
     #[tokio::test]
     async fn row_to_sdk_unknown_transport_type_errors() {
         let row = make_row("bad", "websocket", "{}", true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(row_to_sdk_mcp_server(&row, None).await.is_err());
     }
 
     #[tokio::test]
     async fn row_to_sdk_invalid_json_errors() {
         let row = make_row("bad", "stdio", "not-json", true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(row_to_sdk_mcp_server(&row, None).await.is_err());
     }
 
     #[tokio::test]
     async fn row_to_sdk_stdio_missing_command_errors() {
         let row = make_row("bad", "stdio", r#"{"args":[]}"#, true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(row_to_sdk_mcp_server(&row, None).await.is_err());
     }
 
     // -- load_user_mcp_servers integration -----------------------------------
@@ -840,6 +1023,30 @@ mod tests {
     struct MockRepo {
         rows: Vec<McpServerRow>,
         fail: bool,
+    }
+
+    struct MockRuntimeConfigurationResolver {
+        expected_user_id: String,
+        configuration: tjuaeui_api_types::AssetPublicConfiguration,
+        secrets: std::collections::BTreeMap<String, String>,
+    }
+
+    #[async_trait]
+    impl tjuaeui_asset::RuntimeAssetConfigurationResolver for MockRuntimeConfigurationResolver {
+        async fn resolve(
+            &self,
+            user_id: &str,
+            _local_asset_id: &str,
+        ) -> Result<Option<tjuaeui_asset::RuntimeResolvedConfiguration>, tjuaeui_asset::AssetError> {
+            if user_id != self.expected_user_id {
+                return Ok(None);
+            }
+            Ok(Some(tjuaeui_asset::RuntimeResolvedConfiguration {
+                configuration: self.configuration.clone(),
+                configuration_schema: Default::default(),
+                secrets: self.secrets.clone(),
+            }))
+        }
     }
 
     #[async_trait]
@@ -923,7 +1130,9 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps, "user-1", None)
+            .await
+            .unwrap();
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -942,7 +1151,9 @@ mod tests {
             rows: vec![],
             fail: true,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps, "user-1", None)
+            .await
+            .unwrap();
         assert!(servers.is_empty());
     }
 
@@ -961,7 +1172,9 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps, "user-1", None)
+            .await
+            .unwrap();
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
@@ -986,7 +1199,9 @@ mod tests {
         });
 
         let selected = vec!["mcp_disabled-picked".to_owned()];
-        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", &caps, "user-1", None)
+            .await
+            .unwrap();
 
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -1013,7 +1228,160 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps, "user-1", None)
+            .await
+            .unwrap();
         assert!(servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_mcp_credentials_are_jit_injected_without_mutating_projection() {
+        let mut row = make_row(
+            "managed-http",
+            "http",
+            r#"{"url":"https://example.invalid/mcp","headers":{}}"#,
+            true,
+            false,
+        );
+        row.original_json = Some(
+            serde_json::json!({
+                "$tjuaeAsset": {
+                    "id": "stable-id",
+                    "kind": "mcp",
+                    "tjuaeLocalAssetId": "mcp:managed-http"
+                }
+            })
+            .to_string(),
+        );
+        let persisted_projection = row.transport_config.clone();
+        let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
+            rows: vec![row],
+            fail: false,
+        });
+        let resolver: Arc<dyn tjuaeui_asset::RuntimeAssetConfigurationResolver> =
+            Arc::new(MockRuntimeConfigurationResolver {
+                expected_user_id: "user-1".into(),
+                configuration: tjuaeui_api_types::AssetPublicConfiguration::Mcp(
+                    tjuaeui_api_types::McpAssetConfiguration {
+                        transport: tjuaeui_api_types::McpAssetTransport::StreamableHttp,
+                        executable_path: None,
+                        arguments: Vec::new(),
+                        instance_url: Some("https://example.invalid/mcp".into()),
+                        environment: Vec::new(),
+                        headers: vec![tjuaeui_api_types::AssetNamedSecretSlot {
+                            name: "Authorization".into(),
+                            secret_slot: "authorization".into(),
+                        }],
+                        values: Vec::new(),
+                        secrets: Vec::new(),
+                    },
+                ),
+                secrets: std::collections::BTreeMap::from([("authorization".into(), "Bearer session-only".into())]),
+            });
+        let caps = AcpMcpCapabilities {
+            stdio: true,
+            http: true,
+            sse: true,
+        };
+
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps, "user-1", Some(resolver.as_ref()))
+            .await
+            .expect("managed MCP resolves for the conversation owner");
+        let McpServer::Http(server) = &servers[0] else {
+            panic!("expected HTTP MCP");
+        };
+        assert!(
+            server
+                .headers
+                .iter()
+                .any(|header| header.name == "Authorization" && header.value == "Bearer session-only")
+        );
+        assert_eq!(
+            persisted_projection,
+            r#"{"url":"https://example.invalid/mcp","headers":{}}"#
+        );
+        assert!(!persisted_projection.contains("session-only"));
+    }
+
+    #[tokio::test]
+    async fn managed_engine_credentials_are_jit_injected_into_command_spec() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let command = std::env::current_exe()
+            .expect("current executable")
+            .to_string_lossy()
+            .into_owned();
+        let mut metadata = tjuaeui_api_types::AgentMetadata {
+            id: "managed-engine".into(),
+            icon: None,
+            name: "Managed Engine".into(),
+            name_i18n: None,
+            description: None,
+            description_i18n: None,
+            backend: None,
+            agent_type: tjuaeui_common::AgentType::Acp,
+            agent_source: tjuaeui_api_types::AgentSource::Extension,
+            agent_source_info: tjuaeui_api_types::AgentSourceInfo {
+                tjuae_local_asset_id: Some("engine:managed".into()),
+                ..Default::default()
+            },
+            enabled: true,
+            available: true,
+            command: Some(command),
+            resolved_command: None,
+            args: Vec::new(),
+            env: Vec::new(),
+            native_skills_dirs: None,
+            behavior_policy: Default::default(),
+            yolo_id: None,
+            sort_order: 0,
+            team_capable: false,
+            last_check_status: None,
+            last_check_kind: None,
+            last_check_error_code: None,
+            last_check_error_message: None,
+            last_check_error_details: None,
+            last_check_guidance: None,
+            last_check_latency_ms: None,
+            last_check_at: None,
+            last_success_at: None,
+            last_failure_at: None,
+            handshake: Default::default(),
+            has_command_override: false,
+            env_override_key_count: 0,
+        };
+        metadata.agent_source_info.binary_name = metadata.command.clone();
+        let resolver: Arc<dyn tjuaeui_asset::RuntimeAssetConfigurationResolver> =
+            Arc::new(MockRuntimeConfigurationResolver {
+                expected_user_id: "user-1".into(),
+                configuration: tjuaeui_api_types::AssetPublicConfiguration::EngineAdapter(
+                    tjuaeui_api_types::EngineAdapterAssetConfiguration {
+                        environment: vec![tjuaeui_api_types::AssetNamedSecretSlot {
+                            name: "ENGINE_API_TOKEN".into(),
+                            secret_slot: "token".into(),
+                        }],
+                        working_directory: Some(workspace.path().to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                ),
+                secrets: std::collections::BTreeMap::from([("token".into(), "session-only".into())]),
+            });
+
+        let spec = resolve_agent_command_spec(
+            &metadata,
+            "unused-conversation-workspace",
+            "user-1",
+            Some(resolver.as_ref()),
+            "conv-1",
+            Arc::new(tjuaeui_realtime::BroadcastEventBus::new(16)),
+        )
+        .await
+        .expect("managed Engine resolves for the conversation owner");
+        assert!(
+            spec.env
+                .iter()
+                .any(|entry| entry.name == "ENGINE_API_TOKEN" && entry.value == "session-only")
+        );
+        assert_eq!(spec.cwd.as_deref(), Some(workspace.path().to_string_lossy().as_ref()));
+        assert!(metadata.env.is_empty(), "legacy projection remains credential-free");
     }
 }

@@ -1,0 +1,33 @@
+{
+  "runtimeSnapshotId": "sha256-b4bd3526544e3fee922ee78bc47887ad1df2e47f3f81a32cb88031686ea8d462",
+  "assets": [
+    {
+      "localAssetId": "assistant.default",
+      "kind": "assistant",
+      "localDefinitionDigest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtimeContentDigest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "localAssetId": "engine.tjuae-cli",
+      "kind": "engineAdapter",
+      "localDefinitionDigest": "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "runtimeContentDigest": "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "localAssetId": "mcp.docs",
+      "kind": "mcp",
+      "localDefinitionDigest": "sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "runtimeContentDigest": "sha256-1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "localAssetId": "skill.frontend-design",
+      "kind": "skill",
+      "localDefinitionDigest": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "runtimeContentDigest": "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "upstreamPackage": "tjuae-official/assets",
+      "upstreamAssetId": "skills/frontend-design",
+      "upstreamVersion": "1.0.0",
+      "upstreamRevision": "0123456789abcdef0123456789abcdef01234567"
+    }
+  ]
+}

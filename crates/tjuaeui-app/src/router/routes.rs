@@ -13,9 +13,9 @@ use axum::routing::get;
 use axum::{Router, middleware};
 use tower_http::cors::{Any, CorsLayer};
 
-use tjuaeui_ai_agent::{agent_routes, remote_agent_routes};
+use tjuaeui_ai_agent::engine_routes;
 use tjuaeui_api_types::ErrorResponse;
-use tjuaeui_assets::{AssetRouterState, asset_routes};
+use tjuaeui_asset::{hub_routes, skill_routes};
 use tjuaeui_assistant::assistant_routes;
 use tjuaeui_auth::{
     AuthRouterState, AuthState, auth_middleware, auth_routes, csrf_middleware, security_headers_middleware,
@@ -26,8 +26,9 @@ use tjuaeui_channel::weixin_login_route;
 use tjuaeui_common::ApiErrorLogContext;
 use tjuaeui_conversation::{conversation_ops_routes, conversation_routes};
 use tjuaeui_cron::cron_routes;
-use tjuaeui_extension::{extension_routes, hub_routes, skill_routes};
+use tjuaeui_extension::extension_routes;
 use tjuaeui_file::file_routes;
+use tjuaeui_logo_catalog::{LogoCatalogRouterState, logo_asset_routes};
 use tjuaeui_mcp::mcp_routes;
 use tjuaeui_office::office_routes;
 use tjuaeui_realtime::{WsHandlerState, ws_upgrade_handler};
@@ -37,7 +38,10 @@ use tjuaeui_team::{TeamSessionService, team_routes};
 
 use crate::services::AppServices;
 
+use super::asset_protocol::require_asset_protocol;
 use super::health::health_check;
+use super::local_assets::local_asset_routes;
+use super::market_assets::market_asset_routes;
 use super::runtime_team_tools::{RuntimeTeamToolsState, runtime_team_tools_routes};
 use super::state::{ModuleStates, RouterBuildError, build_module_states, build_ws_state};
 use super::trace::with_access_log;
@@ -69,8 +73,27 @@ pub async fn create_router_with_runtime(services: &AppServices) -> Result<(Route
     let mut event_rx = services.event_bus.subscribe();
     let ws_manager = services.ws_manager.clone();
     tokio::spawn(async move {
-        while let Ok(event) = event_rx.recv().await {
-            ws_manager.broadcast_all(event);
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => ws_manager.broadcast_all(event),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "WebSocket 全局事件转发发生积压");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    let mut user_event_rx = services.event_bus.subscribe_user();
+    let ws_manager = services.ws_manager.clone();
+    tokio::spawn(async move {
+        loop {
+            match user_event_rx.recv().await {
+                Ok(targeted) => ws_manager.broadcast_to_user(&targeted.user_id, targeted.event),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "WebSocket 用户定向事件转发发生积压");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 
@@ -168,13 +191,9 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
-    // Remote agent routes protected by auth middleware
-    let remote_agent_authenticated = remote_agent_routes(states.remote_agent)
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-
     // Unified agent listing/refresh/test routes protected by auth middleware
-    let agent_authenticated =
-        agent_routes(states.agent).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let engine_authenticated =
+        engine_routes(states.agent).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
     // Connection test routes (Bedrock, Gemini) protected by auth middleware
     let connection_test_authenticated = connection_test_routes(states.connection_test)
@@ -227,8 +246,12 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     // handlers return 500 "not implemented"; T1b wires real service)
     let assistant_authenticated =
         assistant_routes(states.assistant).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let local_asset_authenticated =
+        local_asset_routes(states.local_asset).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let market_authenticated =
+        market_asset_routes(states.market).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
-    let public_assets = asset_routes(AssetRouterState::default());
+    let public_logo_assets = logo_asset_routes(LogoCatalogRouterState::default());
 
     // WebSocket upgrade route — exempt from CSRF (no cookie-based
     // double-submit) but still gets security response headers.
@@ -245,8 +268,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(system_authenticated)
         .merge(conversation_authenticated)
         .merge(conversation_ops_authenticated)
-        .merge(remote_agent_authenticated)
-        .merge(agent_authenticated)
+        .merge(engine_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
         .merge(mcp_authenticated)
@@ -258,6 +280,8 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(cron_authenticated)
         .merge(office_authenticated)
         .merge(shell_authenticated)
+        .merge(local_asset_authenticated)
+        .merge(market_authenticated)
         .merge(assistant_authenticated);
 
     // Conditionally merge WeChat login SSE route (feature-gated)
@@ -274,13 +298,14 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     }
     .merge(ws_routes)
     .merge(runtime_team_tools)
-    .merge(public_assets)
+    .merge(public_logo_assets)
     .layer(middleware::from_fn(security_headers_middleware));
 
     // Raise the default request body limit from axum's 2MB default to
     // `BODY_LIMIT` (10MB). Routes that need a larger cap (e.g. `/api/fs/upload`)
     // disable this default and install their own `RequestBodyLimitLayer`.
     let router = router.layer(DefaultBodyLimit::max(tjuaeui_common::constants::BODY_LIMIT));
+    let router = router.layer(middleware::from_fn(require_asset_protocol));
     let router = router.layer(middleware::from_fn(normalize_boundary_error_response));
 
     let router = with_access_log(router);

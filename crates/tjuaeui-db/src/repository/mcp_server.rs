@@ -70,6 +70,16 @@ pub trait IMcpServerRepository: Send + Sync {
     /// Updates only the tools JSON for a server.
     /// Returns `DbError::NotFound` if the ID doesn't exist.
     async fn update_tools(&self, id: &str, tools: Option<&str>) -> Result<(), DbError>;
+
+    /// 精确恢复运行时投影覆盖前的完整行。
+    async fn restore_projection_row(&self, _row: &McpServerRow) -> Result<(), DbError> {
+        Err(DbError::Init("当前 MCP 仓储不支持精确投影恢复".into()))
+    }
+
+    /// 物理清理补偿事务中新建、但最终未提交的投影行。
+    async fn purge_projection_row(&self, _id: &str) -> Result<(), DbError> {
+        Err(DbError::Init("当前 MCP 仓储不支持清理未提交投影".into()))
+    }
 }
 
 /// Parameters for creating a new MCP server.

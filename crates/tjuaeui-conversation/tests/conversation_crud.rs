@@ -73,11 +73,7 @@ struct EmptySkillResolver;
 
 #[async_trait::async_trait]
 impl SkillResolver for EmptySkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    async fn resolve_skills(&self, _names: &[String]) -> Vec<tjuaeui_extension::ResolvedAgentSkill> {
+    async fn resolve_skills(&self, _names: &[String]) -> Vec<tjuaeui_asset::ResolvedAgentSkill> {
         Vec::new()
     }
 
@@ -85,7 +81,7 @@ impl SkillResolver for EmptySkillResolver {
         &self,
         _workspace: &std::path::Path,
         _rel_dirs: &[&str],
-        _skills: &[tjuaeui_extension::ResolvedAgentSkill],
+        _skills: &[tjuaeui_asset::ResolvedAgentSkill],
     ) -> usize {
         0
     }

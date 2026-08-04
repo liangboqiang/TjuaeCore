@@ -33,7 +33,6 @@ fn ext(name: &str, version: &str, deps: &[(&str, &str)]) -> LoadedExtension {
             entry_point: None,
             permissions: None,
             contributes: None,
-            lifecycle: None,
             i18n: None,
         },
         directory: format!("/extensions/{name}"),

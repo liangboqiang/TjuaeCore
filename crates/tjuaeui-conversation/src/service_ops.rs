@@ -220,7 +220,7 @@ impl ConversationService {
 
         // Security: reject direct traversal outside the workspace root, but allow
         // symlinked directories mounted inside the workspace (e.g. native skill
-        // dirs that point at the builtin skills corpus under data-dir).
+        // dirs that point at the managed skills corpus under data-dir).
         let canonical_base = base
             .canonicalize()
             .map_err(|e| ConversationError::internal(format!("Failed to resolve workspace path: {e}")))?;

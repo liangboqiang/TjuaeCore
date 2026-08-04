@@ -21,6 +21,8 @@ use tjuaeui_realtime::EventBroadcaster;
 use tjuaeui_runtime::ensure_runtime_command;
 use tracing::{info, warn};
 
+use crate::error::AgentError;
+
 /// Resolve a conversation's user-configured MCP servers into neutral
 /// [`SessionMcpServer`]s. `selected_ids = Some` → that frozen snapshot defines the
 /// session (injected regardless of the row's global `enabled` flag); `None` → all
@@ -37,8 +39,10 @@ pub async fn resolve_session_mcp_servers(
     repo: &dyn IMcpServerRepository,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
+    user_id: &str,
+    runtime_configuration_resolver: Option<&dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>,
     _broadcaster: Arc<dyn EventBroadcaster>,
-) -> Vec<SessionMcpServer> {
+) -> Result<Vec<SessionMcpServer>, AgentError> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
@@ -47,7 +51,7 @@ pub async fn resolve_session_mcp_servers(
         Ok(r) => r,
         Err(err) => {
             warn!(conversation_id, error = %err, "mcp_resolve: list() failed; skipping injection");
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
 
@@ -59,8 +63,27 @@ pub async fn resolve_session_mcp_servers(
         if !selected || row.builtin {
             continue;
         }
-        match row_to_session_mcp_server(&row).await {
+        let managed_local_asset_id = crate::runtime_asset_jit::managed_mcp_local_asset_id(&row)?;
+        let jit = match managed_local_asset_id.as_deref() {
+            Some(local_asset_id) => {
+                let configuration = crate::runtime_asset_jit::resolve_mcp_configuration(
+                    runtime_configuration_resolver,
+                    user_id,
+                    local_asset_id,
+                )
+                .await?;
+                crate::runtime_asset_jit::verify_managed_mcp_projection(&row, &configuration)?;
+                Some(configuration)
+            }
+            None => None,
+        };
+        match row_to_session_mcp_server(&row, jit.as_ref()).await {
             Ok(server) => servers.push(server),
+            Err(_) if managed_local_asset_id.is_some() => {
+                return Err(AgentError::bad_request(
+                    "RUNTIME_ASSET_JIT_MCP_PROJECTION_INVALID：托管 MCP 的公开运行投影无效",
+                ));
+            }
             Err(err) => {
                 warn!(
                     conversation_id,
@@ -80,13 +103,16 @@ pub async fn resolve_session_mcp_servers(
             "mcp_resolve: resolved user MCP servers"
         );
     }
-    servers
+    Ok(servers)
 }
 
 /// Parse one `McpServerRow` into a neutral `SessionMcpServer`, resolving the stdio
 /// launch command. Mirrors `factory::acp::row_to_sdk_mcp_server` but emits the
 /// neutral type. Returns an error string when `transport_config` is malformed.
-async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServer, String> {
+async fn row_to_session_mcp_server(
+    row: &McpServerRow,
+    jit: Option<&crate::runtime_asset_jit::McpJitConfiguration>,
+) -> Result<SessionMcpServer, String> {
     let value: serde_json::Value =
         serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
 
@@ -110,6 +136,13 @@ async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServe
                         .collect()
                 })
                 .unwrap_or_default();
+            if let Some(jit) = jit {
+                env.extend(
+                    jit.environment
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+            }
 
             // Resolve the launch command (npx/bun → bundled path) + fold in the
             // runtime-provided args prefix + env, exactly like the legacy
@@ -136,10 +169,11 @@ async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServe
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "http: missing url".to_owned())?
                 .to_owned();
-            SessionMcpTransport::StreamableHttp {
-                url,
-                headers: parse_headers(value.get("headers")),
+            let mut headers = parse_headers(value.get("headers"));
+            if let Some(jit) = jit {
+                headers.extend(jit.headers.iter().map(|(name, value)| (name.clone(), value.clone())));
             }
+            SessionMcpTransport::StreamableHttp { url, headers }
         }
         "sse" => {
             let url = value
@@ -147,10 +181,11 @@ async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServe
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "sse: missing url".to_owned())?
                 .to_owned();
-            SessionMcpTransport::Sse {
-                url,
-                headers: parse_headers(value.get("headers")),
+            let mut headers = parse_headers(value.get("headers"));
+            if let Some(jit) = jit {
+                headers.extend(jit.headers.iter().map(|(name, value)| (name.clone(), value.clone())));
             }
+            SessionMcpTransport::Sse { url, headers }
         }
         other => return Err(format!("unknown transport type: {other}")),
     };

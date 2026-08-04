@@ -4,22 +4,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{AppConfig, derive_encryption_key};
+use crate::runtime_asset_cleanup::cleanup_orphaned_runtime_asset_projections;
+use crate::runtime_asset_projection::CoreRuntimeAssetProjector;
 use tjuaeui_ai_agent::{
     AcpSessionSyncService, AcpSkillManager, ActiveLeaseRegistry, AgentFactoryDeps, AgentRegistry, IWorkerTaskManager,
     RuntimeTokenService, WorkerTaskManagerImpl, build_agent_factory,
 };
+use tjuaeui_asset::AssetCatalogService;
 use tjuaeui_auth::{CookieConfig, JwtService, QrTokenStore, resolve_jwt_secret};
 use tjuaeui_common::OnConversationDelete;
 use tjuaeui_conversation::{ConversationService, runtime_state::ConversationRuntimeStateService};
 use tjuaeui_db::{
-    Database, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository, IMcpServerRepository,
-    IProjectStore, ISkillRepository, IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    Database, IA2aRepository, IAcpSessionRepository, IAgentMetadataRepository, IAssetRepository,
+    IConversationRepository, IMcpServerRepository, IProjectStore, ISkillRepository, IUserRepository,
+    SqliteA2aRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssetRepository,
     SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository,
     SqliteConversationRepository, SqliteMcpServerRepository, SqliteProjectStore, SqliteProviderRepository,
-    SqliteSkillRepository, SqliteUserRepository,
+    SqliteSettingsRepository, SqliteSkillRepository, SqliteUserRepository,
 };
+use tjuaeui_mcp::McpConnectionTestService;
 use tjuaeui_project::ProjectService;
 use tjuaeui_realtime::{BroadcastEventBus, WebSocketManager};
+use tjuaeui_system::SettingsService;
 
 pub struct AppServices {
     pub database: Database,
@@ -34,6 +40,9 @@ pub struct AppServices {
     pub runtime_token_service: Arc<RuntimeTokenService>,
     pub conversation_runtime_state: Arc<ConversationRuntimeStateService>,
     pub conversation_service: ConversationService,
+    pub settings_service: SettingsService,
+    /// Core-managed local asset repository.
+    pub asset_catalog: Arc<AssetCatalogService>,
     /// Project-bind service (project-bind side branch). Shared by conversation
     /// and team wiring to bind/backfill project/folder rows. Cheap to clone.
     pub project_service: ProjectService,
@@ -43,6 +52,7 @@ pub struct AppServices {
     /// mock `worker_task_manager` that does not implement the trait.
     pub task_manager_delete_hook: Option<Arc<dyn OnConversationDelete>>,
     pub agent_registry: Arc<AgentRegistry>,
+    pub session_spawner: Arc<dyn tjuaeui_process::Spawner>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw JWT secret string, used to derive encryption keys.
@@ -55,7 +65,7 @@ pub struct AppServices {
     pub app_version: String,
     /// Resolved skill paths. Shared with the `ConversationService` for
     /// snapshot resolution at create time.
-    pub skill_paths: Arc<tjuaeui_extension::SkillPaths>,
+    pub skill_paths: Arc<tjuaeui_asset::SkillPaths>,
     /// User skill metadata and import history repository.
     pub skill_repo: Arc<dyn ISkillRepository>,
     runtime_helper_bin: String,
@@ -82,6 +92,7 @@ impl AppServices {
             event_bus: self.event_bus.clone(),
             skill_paths: self.skill_paths.clone(),
             skill_repo: self.skill_repo.clone(),
+            asset_catalog: self.asset_catalog.clone(),
             worker_task_manager: self.worker_task_manager.clone(),
             conversation_runtime_state: self.conversation_runtime_state.clone(),
             conversation_repo: self.conversation_repo.clone(),
@@ -101,6 +112,11 @@ impl AppServices {
         let dump_prompts = config.dump_prompts;
         let app_version = config.app_version.clone();
         let user_repo: Arc<dyn IUserRepository> = Arc::new(SqliteUserRepository::new(database.pool().clone()));
+        let settings_service = SettingsService::new(Arc::new(SqliteSettingsRepository::new(database.pool().clone())));
+        settings_service
+            .initialize_network_proxy()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize network proxy policy: {e}"))?;
 
         // Resolve JWT secret: env var → system user db field → random generation
         let env_secret = std::env::var("JWT_SECRET").ok();
@@ -136,23 +152,16 @@ impl AppServices {
 
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));
-        let agent_registry = AgentRegistry::new(agent_metadata_repo);
-        agent_registry
-            .hydrate()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to hydrate agent registry: {e}"))?;
-        // Settle any slow version probes off the readiness path (#675):
-        // hydrate never waits beyond the inline budget per agent.
-        agent_registry.spawn_slow_probe_recheck();
+        let agent_registry = AgentRegistry::new(agent_metadata_repo.clone());
 
         let acp_session_repo: Arc<dyn IAcpSessionRepository> =
             Arc::new(SqliteAcpSessionRepository::new(database.pool().clone()));
         let acp_agent_service = AcpSessionSyncService::new(acp_session_repo.clone());
+        let a2a_repo: Arc<dyn IA2aRepository> = Arc::new(SqliteA2aRepository::new(database.pool().clone()));
 
         let conversation_repo: Arc<dyn IConversationRepository> =
             Arc::new(SqliteConversationRepository::new(database.pool().clone()));
         let skill_repo: Arc<dyn ISkillRepository> = Arc::new(SqliteSkillRepository::new(database.pool().clone()));
-
         // Project-bind service (side branch). temp_root mirrors the existing
         // conversation temp-workspace root (`work_dir/conversations`) so
         // `resolve_existing` classifies auto workspaces as temp and
@@ -168,10 +177,47 @@ impl AppServices {
             .and_then(|p| p.canonicalize().ok())
             .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let skill_paths = Arc::new(tjuaeui_extension::resolve_skill_paths(&app_resource_dir, &data_dir));
-        tjuaeui_extension::sync_skill_catalog_into_repo(skill_paths.as_ref(), skill_repo.as_ref())
+        let skill_paths = Arc::new(tjuaeui_asset::resolve_skill_paths(&app_resource_dir, &data_dir));
+        cleanup_orphaned_runtime_asset_projections(database.pool(), skill_paths.as_ref(), &data_dir)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to synchronize skill catalog: {e}"))?;
+            .map_err(|error| anyhow::anyhow!("Failed to clean orphaned runtime asset projections: {error}"))?;
+        tjuaeui_asset::sync_generated_skill_projections(skill_paths.as_ref(), skill_repo.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to synchronize generated skill projections: {e}"))?;
+        agent_registry
+            .hydrate()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to hydrate agent registry: {e}"))?;
+        // Settle any slow version probes off the readiness path (#675):
+        // hydrate never waits beyond the inline budget per agent.
+        agent_registry.spawn_slow_probe_recheck();
+        let assistant_definition_repo: Arc<dyn tjuaeui_db::IAssistantDefinitionRepository> =
+            Arc::new(SqliteAssistantDefinitionRepository::new(database.pool().clone()));
+        let assistant_overlay_repo: Arc<dyn tjuaeui_db::IAssistantOverlayRepository> =
+            Arc::new(SqliteAssistantOverlayRepository::new(database.pool().clone()));
+        let assistant_preference_repo: Arc<dyn tjuaeui_db::IAssistantPreferenceRepository> =
+            Arc::new(SqliteAssistantPreferenceRepository::new(database.pool().clone()));
+        let mcp_probe_http_client =
+            tjuaeui_runtime::build_http_client(std::time::Duration::from_secs(10), std::time::Duration::from_secs(35))
+                .map_err(|error| anyhow::anyhow!("Failed to build MCP probe HTTP client: {error}"))?;
+        let runtime_projector = Arc::new(CoreRuntimeAssetProjector::new(
+            assistant_definition_repo,
+            assistant_overlay_repo,
+            assistant_preference_repo,
+            skill_repo.clone(),
+            skill_paths.clone(),
+            agent_metadata_repo,
+            agent_registry.clone(),
+            mcp_server_repo.clone(),
+            McpConnectionTestService::new(mcp_probe_http_client, event_bus.clone()),
+            &data_dir,
+        ));
+        let asset_repo: Arc<dyn IAssetRepository> = Arc::new(SqliteAssetRepository::new(database.pool().clone()));
+        let asset_catalog = Arc::new(
+            AssetCatalogService::new(asset_repo, &data_dir)
+                .with_credential_encryption_key(encryption_key)
+                .with_runtime_projector(runtime_projector),
+        );
 
         // Absolute path to this process's binary. Reused as the `command` for
         // the stdio MCP bridge spawned by ACP CLIs when a team session is
@@ -197,6 +243,7 @@ impl AppServices {
         let factory = build_agent_factory(AgentFactoryDeps {
             skill_manager: AcpSkillManager::new_with_repo(skill_paths.clone(), skill_repo.clone()),
             provider_repo,
+            a2a_repo,
             encryption_key,
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),
@@ -204,8 +251,9 @@ impl AppServices {
             dump_prompts,
             broadcaster: event_bus.clone(),
             backend_binary_path: backend_binary_path.clone(),
-            mcp_server_repo: Some(mcp_server_repo),
-            session_spawner,
+            mcp_server_repo: Some(mcp_server_repo.clone()),
+            runtime_asset_configuration_resolver: Some(asset_catalog.clone()),
+            session_spawner: session_spawner.clone(),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -226,6 +274,7 @@ impl AppServices {
             event_bus: event_bus.clone(),
             skill_paths: skill_paths.clone(),
             skill_repo: skill_repo.clone(),
+            asset_catalog: asset_catalog.clone(),
             worker_task_manager: worker_task_manager.clone(),
             conversation_runtime_state: conversation_runtime_state.clone(),
             conversation_repo: conversation_repo.clone(),
@@ -235,23 +284,40 @@ impl AppServices {
             runtime_token_service: runtime_token_service.clone(),
             project_service: project_service.clone(),
         });
+        if let Err(error) = conversation_service.recover_interrupted_traces().await {
+            tracing::warn!(
+                error = %error,
+                "恢复中断的对话 Trace 失败；应用将继续启动"
+            );
+        }
+        let jwt_service = Arc::new(JwtService::new(secret.clone()));
+        let user_id_resolver: tjuaeui_realtime::UserIdResolver = if local {
+            Arc::new(|_| Some("system_default_user".to_owned()))
+        } else {
+            let jwt_service = Arc::clone(&jwt_service);
+            Arc::new(move |token| jwt_service.verify(token).ok().map(|payload| payload.user_id))
+        };
+        let ws_manager = Arc::new(WebSocketManager::with_user_id_resolver(user_id_resolver));
 
         Ok(Self {
             database,
-            jwt_service: Arc::new(JwtService::new(secret.clone())),
+            jwt_service,
             user_repo,
             cookie_config: Arc::new(CookieConfig::from_env()),
             qr_token_store: Arc::new(QrTokenStore::new()),
-            ws_manager: Arc::new(WebSocketManager::new()),
+            ws_manager,
             event_bus,
             worker_task_manager,
             active_lease_registry,
             runtime_token_service,
             conversation_runtime_state,
             conversation_service,
+            settings_service,
+            asset_catalog,
             project_service,
             task_manager_delete_hook: Some(task_manager_delete_hook),
             agent_registry,
+            session_spawner,
             conversation_repo,
             acp_session_sync: acp_agent_service,
             jwt_secret_raw: secret,
@@ -272,8 +338,9 @@ struct ConversationServiceDeps<'a> {
     database: &'a Database,
     work_dir: PathBuf,
     event_bus: Arc<BroadcastEventBus>,
-    skill_paths: Arc<tjuaeui_extension::SkillPaths>,
+    skill_paths: Arc<tjuaeui_asset::SkillPaths>,
     skill_repo: Arc<dyn ISkillRepository>,
+    asset_catalog: Arc<AssetCatalogService>,
     worker_task_manager: Arc<dyn IWorkerTaskManager>,
     conversation_runtime_state: Arc<ConversationRuntimeStateService>,
     conversation_repo: Arc<dyn IConversationRepository>,
@@ -288,6 +355,7 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         deps.skill_paths,
         deps.skill_repo,
+        deps.asset_catalog.clone(),
     ));
     let service = ConversationService::new(
         deps.work_dir,
@@ -302,6 +370,7 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
     .with_runtime_helper_context(deps.runtime_helper_bin, deps.runtime_base_url)
     .with_runtime_token_service(deps.runtime_token_service);
     service.with_mcp_server_repo(Arc::new(SqliteMcpServerRepository::new(deps.database.pool().clone())));
+    service.with_runtime_asset_catalog(deps.asset_catalog);
     service.with_assistant_definition_repo(Arc::new(SqliteAssistantDefinitionRepository::new(
         deps.database.pool().clone(),
     )));
@@ -315,12 +384,18 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
         service.with_delete_hook(hook);
     }
     service.with_project_service(Arc::new(deps.project_service));
+    service.with_trace_repository(Arc::new(tjuaeui_db::SqliteConversationTraceRepository::new(
+        deps.database.pool().clone(),
+    )));
     service
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tjuaeui_api_types::WebSocketMessage;
+    use tjuaeui_realtime::{PER_CONNECTION_BUFFER, WsOutbound};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_app_services_from_memory_db() {
@@ -364,6 +439,30 @@ mod tests {
 
         assert_eq!(services.app_version, "9.9.9");
 
+        services.database.close().await;
+    }
+
+    #[tokio::test]
+    async fn websocket_user_targeting_uses_verified_jwt_owner() {
+        let db = tjuaeui_db::init_database_memory().await.unwrap();
+        let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+        let alice_token = services.jwt_service.sign("alice", "alice").unwrap();
+        let bob_token = services.jwt_service.sign("bob", "bob").unwrap();
+        let (alice_tx, mut alice_rx) = mpsc::channel(PER_CONNECTION_BUFFER);
+        let (bob_tx, mut bob_rx) = mpsc::channel(PER_CONNECTION_BUFFER);
+        services.ws_manager.add_client(alice_token, alice_tx);
+        services.ws_manager.add_client(bob_token, bob_tx);
+
+        services.ws_manager.broadcast_to_user(
+            "alice",
+            WebSocketMessage::new(
+                "conversation.traceUpdated",
+                serde_json::json!({"trace_id": "turn-private"}),
+            ),
+        );
+
+        assert!(matches!(alice_rx.try_recv(), Ok(WsOutbound::Text(_))));
+        assert!(bob_rx.try_recv().is_err(), "Bob must not receive Alice's Trace event");
         services.database.close().await;
     }
 }

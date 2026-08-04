@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 
 pub use managed::{
-    install_and_validate as install_managed_runtime, managed_node_contract_for_export,
+    install_and_validate as install_managed_runtime, managed_node_contract_for_export, managed_node_runtime_key,
     probe_support as probe_node_runtime_supported,
 };
 pub use system::{derive_runtime_root, tool_command, validate_same_root};

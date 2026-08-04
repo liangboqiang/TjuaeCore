@@ -400,6 +400,18 @@ fn initialize_params() -> HandshakeParams {
     }))
 }
 
+fn skills_extra_roots_frame(id: u64, roots: &[String]) -> Option<Value> {
+    if roots.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "skills/extraRoots/set",
+        "params": { "extraRoots": roots },
+    }))
+}
+
 /// `thread/start` params (Fresh / lost-Resume). approvalPolicy/sandbox are valid
 /// AskForApproval/SandboxMode enum values; cwd threaded from config.
 ///
@@ -1112,6 +1124,9 @@ impl CodexSessionBackend {
         *self.resume_poison.lock().await = None;
         self.write_frame(initialize_params().into_frame(self.next_rpc_id(), "initialize"))
             .await?;
+        if let Some(frame) = skills_extra_roots_frame(self.next_rpc_id(), &self.wake.config.init.skill_roots) {
+            self.write_frame(frame).await?;
+        }
         match resume_thread_id {
             Some(tid) => {
                 *self.thread_binding.lock().await = Some(tid.to_string());
@@ -6297,6 +6312,15 @@ mod tests {
             "experimentalApi must NOT be top-level (codex ignores it there)"
         );
         assert_eq!(frame["params"]["clientInfo"]["name"], "tjuaeui-session");
+    }
+
+    #[test]
+    fn managed_skill_roots_use_process_scoped_codex_request() {
+        let roots = vec!["C:\\TjuaeUI\\runtime\\skills\\codex\\conv-1".to_owned()];
+        let frame = skills_extra_roots_frame(2, &roots).expect("non-empty roots emit a request");
+        assert_eq!(frame["method"], "skills/extraRoots/set");
+        assert_eq!(frame["params"]["extraRoots"][0], roots[0]);
+        assert!(skills_extra_roots_frame(3, &[]).is_none());
     }
 
     /// thread/start params thread cwd from config; approvalPolicy/sandbox are valid

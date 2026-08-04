@@ -23,6 +23,16 @@ pub enum AgentErrorCode {
     TjuaeUIPermissionError,
     #[serde(rename = "TJUAE_INTERNAL_ERROR")]
     TjuaeUIInternalError,
+    #[serde(rename = "TJUAE_RUNTIME_ASSET_RECEIPT_UNSUPPORTED")]
+    TjuaeUIRuntimeAssetReceiptUnsupported,
+    #[serde(rename = "TJUAE_RUNTIME_ASSET_RECEIPT_MISSING")]
+    TjuaeUIRuntimeAssetReceiptMissing,
+    #[serde(rename = "TJUAE_RUNTIME_ASSET_RECEIPT_UNEXPECTED")]
+    TjuaeUIRuntimeAssetReceiptUnexpected,
+    #[serde(rename = "TJUAE_RUNTIME_ASSET_RECEIPT_MISMATCH")]
+    TjuaeUIRuntimeAssetReceiptMismatch,
+    #[serde(rename = "TJUAE_RUNTIME_ASSET_RECEIPT_PERSIST_FAILED")]
+    TjuaeUIRuntimeAssetReceiptPersistFailed,
     #[serde(alias = "WORKSPACE_PATH_CONTAINS_WHITESPACE_RUNTIME_UNSUPPORTED")]
     WorkspacePathRuntimeUnavailable,
     UserAgentHandshakeFailed,
@@ -222,6 +232,38 @@ mod tests {
         let decoded: AgentErrorCode =
             serde_json::from_value(serde_json::json!("USER_AGENT_OPENCLAW_GATEWAY_UNREACHABLE")).unwrap();
         assert_eq!(decoded, AgentErrorCode::UserAgentOpenClawGatewayUnreachable);
+    }
+
+    #[test]
+    fn runtime_asset_receipt_reason_codes_are_stable() {
+        let cases = [
+            (
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnsupported,
+                "TJUAE_RUNTIME_ASSET_RECEIPT_UNSUPPORTED",
+            ),
+            (
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptMissing,
+                "TJUAE_RUNTIME_ASSET_RECEIPT_MISSING",
+            ),
+            (
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptUnexpected,
+                "TJUAE_RUNTIME_ASSET_RECEIPT_UNEXPECTED",
+            ),
+            (
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptMismatch,
+                "TJUAE_RUNTIME_ASSET_RECEIPT_MISMATCH",
+            ),
+            (
+                AgentErrorCode::TjuaeUIRuntimeAssetReceiptPersistFailed,
+                "TJUAE_RUNTIME_ASSET_RECEIPT_PERSIST_FAILED",
+            ),
+        ];
+
+        for (code, expected) in cases {
+            let json = serde_json::to_value(code).unwrap();
+            assert_eq!(json, expected);
+            assert_eq!(serde_json::from_value::<AgentErrorCode>(json).unwrap(), code);
+        }
     }
 
     #[test]

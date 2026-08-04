@@ -17,8 +17,8 @@ use tjuaeui_db::{
 };
 
 use common::{
-    body_json, build_app, build_app_with_mock_agents, delete_with_token, get_request, get_with_token, json_with_token,
-    setup_and_login,
+    body_json, build_app, build_app_with_mock_agents, delete_with_token, get_request, get_with_token,
+    install_test_assistant, json_with_token, setup_and_login, with_asset_protocol,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -28,7 +28,11 @@ const DEFAULT_CRON_ASSISTANT_ID: &str = "cron-e2e-assistant";
 fn default_assistant_agent_config(name: &str) -> serde_json::Value {
     json!({
         "name": name,
-        "assistant_id": DEFAULT_CRON_ASSISTANT_ID
+        "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
+        "model": {
+            "provider_id": "test-provider",
+            "model": "test-model"
+        }
     })
 }
 
@@ -67,31 +71,64 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
 }
 
 async fn ensure_default_assistant(app: &mut axum::Router, token: &str, csrf: &str) {
-    let req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": DEFAULT_CRON_ASSISTANT_ID,
-            "name": "Cron E2E Assistant",
-            "agent_id": "2d23ff1c"
-        }),
+    let get = with_asset_protocol(get_with_token(
+        &format!("/api/assets/{DEFAULT_CRON_ASSISTANT_ID}"),
         token,
-        csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert!(
-        resp.status() == StatusCode::CREATED || resp.status() == StatusCode::CONFLICT,
-        "expected assistant seed to be created or already exist, got {}",
-        resp.status()
-    );
+    ));
+    let get_response = app.clone().oneshot(get).await.unwrap();
+    let detail = if get_response.status() == StatusCode::OK {
+        body_json(get_response).await["data"].clone()
+    } else {
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+        let create = with_asset_protocol(json_with_token(
+            "POST",
+            "/api/assets",
+            json!({
+                "id": DEFAULT_CRON_ASSISTANT_ID,
+                "kind": "assistant",
+                "displayName": "Cron E2E Assistant",
+                "runtimeId": DEFAULT_CRON_ASSISTANT_ID
+            }),
+            token,
+            csrf,
+        ));
+        let create_response = app.clone().oneshot(create).await.unwrap();
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        body_json(create_response).await["data"].clone()
+    };
+    if detail["runtimeState"] == "active" {
+        return;
+    }
+    let digest = detail["definitionDigest"]
+        .as_str()
+        .expect("test assistant definition digest");
+    for (operation, idempotency_suffix) in [
+        ("validate", "validate"),
+        ("try-run", "try-run"),
+        ("activate", "activate"),
+    ] {
+        let request = with_asset_protocol(json_with_token(
+            "POST",
+            &format!("/api/assets/{DEFAULT_CRON_ASSISTANT_ID}/{operation}"),
+            json!({
+                "idempotencyKey": format!("{DEFAULT_CRON_ASSISTANT_ID}-{idempotency_suffix}"),
+                "expectedDefinitionDigest": digest
+            }),
+            token,
+            csrf,
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "asset operation {operation}");
+    }
 }
 
 async fn create_job(app: &mut axum::Router, token: &str, csrf: &str, body: serde_json::Value) -> serde_json::Value {
     ensure_default_assistant(app, token, csrf).await;
     let req = json_with_token("POST", "/api/cron/jobs", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "response={json}");
     assert_eq!(json["success"], true);
     json["data"].clone()
 }
@@ -139,29 +176,6 @@ async fn au2_unauthenticated_all_endpoints() {
     }
 }
 
-#[test]
-fn cron_skill_does_not_instruct_agents_to_write_payload_files() {
-    let skill = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/builtin-skills/auto-inject/cron/SKILL.md"),
-    )
-    .unwrap();
-
-    assert!(!skill.contains("--input"));
-    assert!(!skill.contains("cat >"));
-    assert!(!skill.contains("/tmp/tjuaeui-cron"));
-    assert!(!skill.contains("python3"));
-    assert!(!skill.contains("tjuaeui_cron.py"));
-    assert!(skill.contains("$TJUAE_HELPER_BIN"));
-    assert!(!skill.contains("cron-helper"));
-    assert!(skill.contains("config cron current list"));
-    assert!(skill.contains("config cron current create"));
-    assert!(skill.contains("config cron current update"));
-    assert!(skill.contains("\"job_id\""));
-    assert!(skill.contains("成功后只给普通用户能理解的简短确认"));
-    assert!(skill.contains("不显示"));
-    assert!(skill.contains("cron_..."));
-}
-
 // ── CJ-1: Create cron job ───────────────────────────────────────────
 
 #[tokio::test]
@@ -179,7 +193,7 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["target"]["payload"]["kind"], "message");
     assert_eq!(data["target"]["payload"]["text"], "test message");
     assert_eq!(data["metadata"]["conversation_id"], "conv_1");
-    assert_eq!(data["metadata"]["agent_type"], "acp");
+    assert_eq!(data["metadata"]["agent_type"], "tjuaecli");
     assert_eq!(data["metadata"]["created_by"], "user");
 }
 
@@ -269,6 +283,7 @@ async fn cj3b_create_accepts_workspace_with_whitespace_segment() {
         "agent_config": {
             "name": "Cron Agent",
             "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
+            "model": { "provider_id": "test-provider", "model": "test-model" },
             "workspace": workspace.to_string_lossy()
         }
     });
@@ -298,6 +313,7 @@ async fn cj3c_create_rejects_missing_workspace_path() {
         "agent_config": {
             "name": "Claude Code",
             "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
+            "model": { "provider_id": "test-provider", "model": "test-model" },
             "workspace": "/tmp/cron-job-workspace-missing-path"
         }
     });
@@ -679,7 +695,7 @@ async fn rn1b_run_now_returns_active_conversation_when_conversation_is_busy() {
 }
 
 #[tokio::test]
-async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcps() {
+async fn rn1c_run_now_new_conversation_does_not_inherit_untracked_legacy_mcp_rows() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -711,25 +727,7 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
         .await
         .expect("create extra mcp");
 
-    let create_assistant_req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": "u-fixed-mcp",
-            "name": "Cron MCP Assistant",
-            "agent_id": "8e1acf31",
-            "defaults": {
-                "mcps": {
-                    "mode": "fixed",
-                    "value": [fixed_mcp.id]
-                }
-            }
-        }),
-        &token,
-        &csrf,
-    );
-    let create_assistant_resp = app.clone().oneshot(create_assistant_req).await.unwrap();
-    assert_eq!(create_assistant_resp.status(), StatusCode::CREATED);
+    install_test_assistant(&services, "u-fixed-mcp", "Cron MCP Assistant").await;
 
     let create_job_req = json_with_token(
         "POST",
@@ -743,7 +741,11 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
             "execution_mode": "new_conversation",
             "agent_config": {
                 "name": "Cron MCP Assistant",
-                "assistant_id": "u-fixed-mcp"
+                "assistant_id": "u-fixed-mcp",
+                "model": {
+                    "provider_id": "test-provider",
+                    "model": "test-model"
+                }
             }
         }),
         &token,
@@ -794,8 +796,8 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
     assert!(extra.get("assistant_id").is_none());
     assert!(extra.get("preset_assistant_id").is_none());
     assert!(extra.get("custom_agent_id").is_none());
-    assert_eq!(extra["mcp_server_ids"], json!([fixed_mcp.id]));
-    assert_eq!(extra["mcp_servers"], json!(["fixed-mcp"]));
+    assert_eq!(extra["mcp_server_ids"], json!([]));
+    assert_eq!(extra["mcp_servers"], json!([]));
     assert!(
         extra["skills"].as_array().is_some_and(|skills| {
             skills.iter().all(|skill| skill != "cron") && skills.iter().any(|skill| skill == &saved_skill_name)
@@ -810,7 +812,7 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
         .expect("load assistant snapshot")
         .expect("preset assistant cron conversation should persist snapshot");
     assert_eq!(snapshot.assistant_id, "u-fixed-mcp");
-    assert_eq!(snapshot.resolved_mcp_ids, json!([fixed_mcp.id]).to_string());
+    assert_eq!(snapshot.resolved_mcp_ids, json!([]).to_string());
 }
 
 #[tokio::test]

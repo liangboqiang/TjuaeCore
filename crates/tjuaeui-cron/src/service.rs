@@ -3,10 +3,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use tjuaeui_api_types::{
-    CreateConversationCronRequest, CreateConversationCronResponse, CreateCronJobRequest, CronJobResponse,
+    AssetKind, CreateConversationCronRequest, CreateConversationCronResponse, CreateCronJobRequest, CronJobResponse,
     CronScheduleDto, HasSkillResponse, ListCronJobsQuery, RunNowResponse, SaveCronSkillRequest,
     UpdateConversationCronRequest, UpdateCronJobRequest,
 };
+use tjuaeui_asset::{AssetCatalogService, AssetError};
 use tjuaeui_common::{
     AgentType, ProviderWithModel, WorkspacePathValidationError, generate_prefixed_id, now_ms,
     validate_workspace_path_availability,
@@ -52,6 +53,7 @@ pub struct CronService {
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
     assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
     assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
+    runtime_asset_catalog: Option<Arc<AssetCatalogService>>,
     scheduler: Arc<CronScheduler>,
     executor: Arc<JobExecutor>,
     emitter: CronEventEmitter,
@@ -64,6 +66,9 @@ pub struct CronServiceDeps {
     pub agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
     pub assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
     pub assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
+    /// Production supplies the Core catalog. Lower-layer scheduling tests may
+    /// omit it when asset I/O is outside the test boundary.
+    pub runtime_asset_catalog: Option<Arc<AssetCatalogService>>,
     pub scheduler: Arc<CronScheduler>,
     pub executor: Arc<JobExecutor>,
     pub emitter: CronEventEmitter,
@@ -77,6 +82,7 @@ impl CronService {
             agent_metadata_repo: deps.agent_metadata_repo,
             assistant_definition_repo: deps.assistant_definition_repo,
             assistant_overlay_repo: deps.assistant_overlay_repo,
+            runtime_asset_catalog: deps.runtime_asset_catalog,
             scheduler: deps.scheduler,
             executor: deps.executor,
             emitter: deps.emitter,
@@ -824,8 +830,7 @@ impl CronService {
 
     async fn resolve_agent_type_for_assistant_id(&self, assistant_id: &str) -> Result<String, CronError> {
         let definition = self
-            .assistant_definition_repo
-            .get_by_assistant_id(assistant_id)
+            .resolve_assistant_definition(assistant_id)
             .await?
             .ok_or_else(|| CronError::InvalidAgentConfig(format!("找不到助手 '{assistant_id}'")))?;
         let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
@@ -1661,7 +1666,7 @@ impl CronService {
             return Ok(None);
         };
 
-        let Some(definition) = self.assistant_definition_repo.get_by_assistant_id(assistant_id).await? else {
+        let Some(definition) = self.resolve_assistant_definition(assistant_id).await? else {
             return Ok(None);
         };
         let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
@@ -1679,8 +1684,7 @@ impl CronService {
         };
 
         Ok(self
-            .assistant_definition_repo
-            .get_by_assistant_id(assistant_id)
+            .resolve_assistant_definition(assistant_id)
             .await?
             .map(|definition| definition.name.trim().to_owned())
             .filter(|value| !value.is_empty()))
@@ -1763,7 +1767,7 @@ impl CronService {
             return Ok(None);
         };
 
-        let Some(definition) = self.assistant_definition_repo.get_by_assistant_id(assistant_id).await? else {
+        let Some(definition) = self.resolve_assistant_definition(assistant_id).await? else {
             return Ok(None);
         };
         let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
@@ -1789,6 +1793,35 @@ impl CronService {
         };
 
         Ok(rows.into_iter().find(|row| row.id == binding.agent_id))
+    }
+
+    /// Resolve the portable local assistant id to the current user's active
+    /// projection. Cron records keep the portable id; the internal projection
+    /// id is consumed only inside Core and never enters HTTP or persisted job
+    /// configuration.
+    async fn resolve_assistant_definition(
+        &self,
+        assistant_id: &str,
+    ) -> Result<Option<tjuaeui_db::models::AssistantDefinitionRow>, CronError> {
+        let runtime_id = match self.runtime_asset_catalog.as_ref() {
+            Some(catalog) => match catalog
+                .resolve_bound_runtime_asset("system_default_user", AssetKind::Assistant, assistant_id)
+                .await
+            {
+                Ok(bound) => bound.projection_runtime_id,
+                Err(AssetError::NotFound(_)) => return Ok(None),
+                Err(error) => {
+                    return Err(CronError::InvalidAgentConfig(format!(
+                        "助手 active Binding 解析失败：{error}"
+                    )));
+                }
+            },
+            None => assistant_id.to_owned(),
+        };
+        self.assistant_definition_repo
+            .get_by_assistant_id(&runtime_id)
+            .await
+            .map_err(CronError::from)
     }
 }
 

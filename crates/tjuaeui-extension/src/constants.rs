@@ -7,9 +7,6 @@ pub const EXTENSIONS_DIR_NAME: &str = "extensions";
 /// Current extension API version.
 pub const EXTENSION_API_VERSION: &str = "1.0.0";
 
-/// Hub index schema version we support.
-pub const HUB_SUPPORTED_SCHEMA_VERSION: u32 = 1;
-
 /// Cache TTL for agent activity snapshots (milliseconds).
 pub const ACTIVITY_SNAPSHOT_TTL_MS: u64 = 3000;
 
@@ -24,22 +21,6 @@ pub const RESERVED_NAME_PREFIXES: &[&str] = &["tjuae-", "internal-", "builtin-",
 
 /// Preset agent type identifiers.
 pub const PRESET_AGENT_TYPES: &[&str] = &["gemini", "claude", "codex", "codebuddy", "opencode"];
-
-// ---------------------------------------------------------------------------
-// Lifecycle hook timeouts (seconds)
-// ---------------------------------------------------------------------------
-
-/// Timeout for `onInstall` hook — may involve downloading dependencies.
-pub const LIFECYCLE_ON_INSTALL_TIMEOUT_SECS: u64 = 120;
-
-/// Timeout for `onUninstall` hook — cleanup operations.
-pub const LIFECYCLE_ON_UNINSTALL_TIMEOUT_SECS: u64 = 60;
-
-/// Timeout for `onActivate` hook — runs every activation.
-pub const LIFECYCLE_ON_ACTIVATE_TIMEOUT_SECS: u64 = 30;
-
-/// Timeout for `onDeactivate` hook — runs every deactivation.
-pub const LIFECYCLE_ON_DEACTIVATE_TIMEOUT_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // Reserved WebUI route prefixes
@@ -58,55 +39,8 @@ pub const SKILLS_DIR_NAME: &str = "skills";
 /// Default subdirectory name for per-job cron skills under the data dir.
 pub const CRON_SKILLS_DIR_NAME: &str = "cron/skills";
 
-/// Default subdirectory name for built-in skills.
-pub const BUILTIN_SKILLS_DIR_NAME: &str = "builtin-skills";
-
-/// Default subdirectory name for built-in rules.
-pub const BUILTIN_RULES_DIR_NAME: &str = "builtin-rules";
-
-/// Subdirectory inside the built-in skills corpus whose children are
-/// auto-injected into every assistant. Historical name was `_builtin`;
-/// renamed to `auto-inject` as part of the 2026-04-23 built-in skill
-/// migration (skills are now embedded in the backend binary via
-/// `include_dir!`).
-pub const BUILTIN_AUTO_SKILLS_SUBDIR: &str = "auto-inject";
-
-/// Default subdirectory name for assistant-level rules.
-pub const ASSISTANT_RULES_DIR_NAME: &str = "assistant-rules";
-
-/// Default subdirectory name for assistant-level skills.
-pub const ASSISTANT_SKILLS_DIR_NAME: &str = "assistant-skills";
-
 /// Filename that identifies a skill directory.
 pub const SKILL_MANIFEST_FILE: &str = "SKILL.md";
-
-/// Persistence file for custom external skill paths.
-pub const CUSTOM_SKILL_PATHS_FILE: &str = "custom-skill-paths.json";
-
-/// Well-known skill source name for TjuaeHub.
-pub const SKILLS_MARKET_NAME: &str = "tjuae-hub";
-
-/// Well-known skill source path for TjuaeHub.
-///
-/// NOTE: This is a URL placeholder, not a filesystem path. When used in
-/// `ExternalPathsManager`, it serves as an identifier for the skills market
-/// source. Filesystem scanning functions like `detect_and_count_external_skills`
-/// will silently skip it since the path does not exist on disk.
-pub const SKILLS_MARKET_PATH: &str = "https://github.com/liangboqiang/TjuaeHub";
-
-/// Common skill directory names to detect on the filesystem.
-///
-/// Each tuple is `(display_name, relative_path, source_slug)`:
-/// - `display_name` — user-facing label (e.g. the tab title).
-/// - `relative_path` — path under the user's home directory.
-/// - `source_slug` — stable machine-readable identifier mirrored to
-///   the renderer as `ExternalSkillSourceResponse.source`. Used as a
-///   React key and `data-testid` suffix in `SkillsHubSettings.tsx`.
-pub const COMMON_SKILL_DIRS: &[(&str, &str, &str)] = &[
-    ("Claude Skills", ".claude/skills", "claude"),
-    ("Gemini Skills", ".gemini/skills", "gemini"),
-    ("Agents", ".agents", "agents"),
-];
 
 #[cfg(test)]
 mod tests {
@@ -129,16 +63,6 @@ mod tests {
     fn test_agent_ids_non_empty() {
         assert!(!PRESET_AGENT_TYPES.is_empty());
         assert!(PRESET_AGENT_TYPES.contains(&"claude"));
-    }
-
-    #[test]
-    fn test_lifecycle_timeouts_ordering() {
-        // onInstall should have the longest timeout
-        const {
-            assert!(LIFECYCLE_ON_INSTALL_TIMEOUT_SECS >= LIFECYCLE_ON_ACTIVATE_TIMEOUT_SECS);
-            assert!(LIFECYCLE_ON_INSTALL_TIMEOUT_SECS >= LIFECYCLE_ON_DEACTIVATE_TIMEOUT_SECS);
-            assert!(LIFECYCLE_ON_UNINSTALL_TIMEOUT_SECS >= LIFECYCLE_ON_DEACTIVATE_TIMEOUT_SECS);
-        }
     }
 
     #[test]

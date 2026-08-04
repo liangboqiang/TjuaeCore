@@ -504,9 +504,7 @@ impl JobExecutor {
                 // so subsequent runs reuse it.
                 let conversation_id = job.conversation_id.trim();
                 if conversation_id.is_empty() {
-                    return self
-                        .create_new_conversation(job, saved_skill, ConversationPurpose::ExistingReplacement)
-                        .await;
+                    return self.create_new_conversation(job, saved_skill).await;
                 }
                 if !self.conversation_exists(conversation_id).await? {
                     warn!(
@@ -514,16 +512,11 @@ impl JobExecutor {
                         conversation_id,
                         "Cron existing-mode conversation is missing; creating a replacement conversation"
                     );
-                    return self
-                        .create_new_conversation(job, saved_skill, ConversationPurpose::ExistingReplacement)
-                        .await;
+                    return self.create_new_conversation(job, saved_skill).await;
                 }
                 Ok(job.conversation_id.clone())
             }
-            ExecutionMode::NewConversation => {
-                self.create_new_conversation(job, saved_skill, ConversationPurpose::NewConversationExecution)
-                    .await
-            }
+            ExecutionMode::NewConversation => self.create_new_conversation(job, saved_skill).await,
         }
     }
 
@@ -540,13 +533,12 @@ impl JobExecutor {
         &self,
         job: &CronJob,
         saved_skill: Option<&SavedSkillContext>,
-        purpose: ConversationPurpose,
     ) -> Result<String, CronError> {
         let agent_type = parse_agent_type(&self.agent_registry, &job.agent_type).await?;
         let model = resolve_model(job);
         let user_id = self.resolve_conversation_owner_user_id(job).await?;
 
-        let extra = build_conversation_extra(&self.agent_registry, job, saved_skill, purpose).await;
+        let extra = build_conversation_extra(&self.agent_registry, job, saved_skill).await;
         let assistant = build_assistant_request(job);
 
         let req = CreateConversationRequest {
@@ -1087,29 +1079,15 @@ struct SavedSkillContext {
     raw_content: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConversationPurpose {
-    NewConversationExecution,
-    ExistingReplacement,
-}
-
 async fn build_conversation_extra(
     registry: &AgentRegistry,
     job: &CronJob,
     saved_skill: Option<&SavedSkillContext>,
-    purpose: ConversationPurpose,
 ) -> serde_json::Value {
     let assistant_backed = build_assistant_request(job).is_some();
     let mut extra = serde_json::Map::new();
     extra.insert("cron_job_id".to_owned(), serde_json::Value::String(job.id.clone()));
     extra.insert("cronJobId".to_owned(), serde_json::Value::String(job.id.clone()));
-    if matches!(purpose, ConversationPurpose::NewConversationExecution) {
-        extra.insert(
-            "exclude_auto_inject_skills".to_owned(),
-            serde_json::Value::Array(vec![serde_json::Value::String("cron".to_owned())]),
-        );
-    }
-
     if let Some(saved_skill) = saved_skill {
         extra.insert(
             "preset_enabled_skills".to_owned(),
@@ -1715,33 +1693,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_conversation_extra_without_saved_skill_excludes_cron_auto_inject_only() {
+    async fn build_conversation_extra_without_saved_skill_has_no_skill_selection() {
         let registry = hydrated_registry().await;
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
 
-        let extra =
-            build_conversation_extra(&registry, &job, None, ConversationPurpose::NewConversationExecution).await;
+        let extra = build_conversation_extra(&registry, &job, None).await;
 
         assert_eq!(extra["cron_job_id"], "cron_test1");
-        assert_eq!(extra["exclude_auto_inject_skills"], serde_json::json!(["cron"]));
         assert!(extra.get("preset_enabled_skills").is_none());
     }
 
     #[tokio::test]
-    async fn build_conversation_extra_for_existing_replacement_keeps_cron_auto_inject() {
+    async fn build_conversation_extra_for_existing_replacement_has_no_skill_selection() {
         let registry = hydrated_registry().await;
         let job = CronJob {
             execution_mode: ExecutionMode::Existing,
             ..sample_job()
         };
 
-        let extra = build_conversation_extra(&registry, &job, None, ConversationPurpose::ExistingReplacement).await;
+        let extra = build_conversation_extra(&registry, &job, None).await;
 
         assert_eq!(extra["cron_job_id"], "cron_test1");
-        assert!(extra.get("exclude_auto_inject_skills").is_none());
         assert!(extra.get("preset_enabled_skills").is_none());
     }
 
@@ -1757,15 +1732,8 @@ mod tests {
             raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
-        let extra = build_conversation_extra(
-            &registry,
-            &job,
-            Some(&saved_skill),
-            ConversationPurpose::NewConversationExecution,
-        )
-        .await;
+        let extra = build_conversation_extra(&registry, &job, Some(&saved_skill)).await;
 
-        assert_eq!(extra["exclude_auto_inject_skills"], serde_json::json!(["cron"]));
         assert_eq!(extra["preset_enabled_skills"], serde_json::json!(["cron-cron_test1"]));
     }
 
@@ -1779,8 +1747,7 @@ mod tests {
         config.is_preset = Some(true);
         config.custom_agent_id = None;
 
-        let extra =
-            build_conversation_extra(&registry, &job, None, ConversationPurpose::NewConversationExecution).await;
+        let extra = build_conversation_extra(&registry, &job, None).await;
 
         assert!(extra.get("assistant_id").is_none());
         assert!(extra.get("preset_assistant_id").is_none());
@@ -1812,8 +1779,7 @@ mod tests {
             ..sample_job()
         };
 
-        let extra =
-            build_conversation_extra(&registry, &job, None, ConversationPurpose::NewConversationExecution).await;
+        let extra = build_conversation_extra(&registry, &job, None).await;
 
         assert_eq!(
             extra["workspace"],
@@ -1831,8 +1797,7 @@ mod tests {
             ..sample_job()
         };
 
-        let extra =
-            build_conversation_extra(&registry, &job, None, ConversationPurpose::NewConversationExecution).await;
+        let extra = build_conversation_extra(&registry, &job, None).await;
 
         assert_eq!(extra["backend"], "claude");
     }
@@ -2450,10 +2415,6 @@ mod tests {
         struct StubSkillResolver;
         #[async_trait::async_trait]
         impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-            async fn auto_inject_names(&self) -> Vec<String> {
-                Vec::new()
-            }
-
             async fn resolve_skills(
                 &self,
                 _names: &[String],
@@ -3149,10 +3110,6 @@ mod tests {
 
         #[async_trait::async_trait]
         impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-            async fn auto_inject_names(&self) -> Vec<String> {
-                Vec::new()
-            }
-
             async fn resolve_skills(
                 &self,
                 _names: &[String],

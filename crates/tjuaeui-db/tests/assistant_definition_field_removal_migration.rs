@@ -40,7 +40,7 @@ async fn migration_024_removes_unused_fields_and_preserves_definition() {
             recommended_prompts, recommended_prompts_i18n,
             default_model_mode, default_permission_mode,
             default_skills_mode, default_skill_ids, custom_skill_names,
-            default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids,
+            default_mcps_mode, default_mcp_ids,
             created_at, updated_at
         ) VALUES (
             'definition-1', 'custom-1', 'user', 'user', 'custom-1', '1.0.0', 'hash',
@@ -49,7 +49,7 @@ async fn migration_024_removes_unused_fields_and_preserves_definition() {
             '[]', '{}',
             'auto', 'auto',
             'fixed', '[]', '[]',
-            '[]', 'auto', '[]',
+            'auto', '[]',
             1, 1
         )",
     )
@@ -65,7 +65,7 @@ async fn migration_024_removes_unused_fields_and_preserves_definition() {
             recommended_prompts, recommended_prompts_i18n,
             default_model_mode, default_permission_mode,
             default_skills_mode, default_skill_ids, custom_skill_names,
-            default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids,
+            default_mcps_mode, default_mcp_ids,
             created_at, updated_at
         ) VALUES (
             'definition-2', 'builtin-1', 'builtin', 'system', 'builtin-1',
@@ -74,7 +74,7 @@ async fn migration_024_removes_unused_fields_and_preserves_definition() {
             '[]', '{}',
             'auto', 'auto',
             'fixed', '[]', '[]',
-            '[]', 'auto', '[]',
+            'auto', '[]',
             1, 1
         )",
     )

@@ -27,14 +27,19 @@ pub trait TeamConversationLookupPort: Send + Sync {
 
 #[async_trait]
 pub trait TeamAssistantCatalogPort: Send + Sync {
-    async fn list_team_selectable_assistants(&self) -> Result<Vec<TeamAssistantCatalogEntry>, TeamError>;
+    /// 只返回指定用户已经激活并完成运行时绑定的助手。
+    ///
+    /// `assistant_id` 必须是 Core 本地资产 ID；内部投影 ID 不得穿过此端口。
+    async fn list_team_selectable_assistants(&self, user_id: &str)
+    -> Result<Vec<TeamAssistantCatalogEntry>, TeamError>;
 
     async fn resolve_team_selectable_assistant(
         &self,
+        user_id: &str,
         assistant_id: &str,
     ) -> Result<Option<TeamAssistantCatalogEntry>, TeamError> {
         Ok(self
-            .list_team_selectable_assistants()
+            .list_team_selectable_assistants(user_id)
             .await?
             .into_iter()
             .find(|assistant| assistant.assistant_id == assistant_id))
@@ -48,6 +53,7 @@ pub struct TeamAssistantCatalogEntry {
     pub backend: String,
     pub description: String,
     pub skills: Vec<String>,
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3,6 +3,73 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_NETWORK_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
+
+/// Tjuae 全局网络代理模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProxyMode {
+    FollowSystem,
+    Manual,
+    Disabled,
+}
+
+/// 持久化的全局网络代理设置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkProxySettings {
+    pub mode: NetworkProxyMode,
+    pub proxy_url: Option<String>,
+    pub no_proxy: String,
+}
+
+impl Default for NetworkProxySettings {
+    fn default() -> Self {
+        Self {
+            mode: NetworkProxyMode::FollowSystem,
+            proxy_url: None,
+            no_proxy: DEFAULT_NETWORK_PROXY_BYPASS.to_owned(),
+        }
+    }
+}
+
+/// 当前生效代理的连接状态。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProxyState {
+    Active,
+    Direct,
+}
+
+/// 当前生效代理的来源。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProxySource {
+    Manual,
+    Environment,
+    WindowsSystem,
+    Disabled,
+    None,
+}
+
+/// 系统代理解析时发现的非致命问题。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProxyWarning {
+    PacUnsupported,
+    InvalidSystemProxy,
+}
+
+/// 当前实际生效的代理状态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkProxyStatusResponse {
+    pub mode: NetworkProxyMode,
+    pub state: NetworkProxyState,
+    pub source: NetworkProxySource,
+    pub proxy_url: Option<String>,
+    pub no_proxy: String,
+    pub warning: Option<NetworkProxyWarning>,
+}
+
 /// Response for `GET /api/settings`.
 ///
 /// Returns all backend system settings with their current values.
@@ -14,6 +81,7 @@ pub struct SystemSettingsResponse {
     pub cron_notification_enabled: bool,
     pub command_queue_enabled: bool,
     pub save_upload_to_workspace: bool,
+    pub network_proxy: NetworkProxySettings,
 }
 
 impl Default for SystemSettingsResponse {
@@ -24,6 +92,7 @@ impl Default for SystemSettingsResponse {
             cron_notification_enabled: false,
             command_queue_enabled: false,
             save_upload_to_workspace: false,
+            network_proxy: NetworkProxySettings::default(),
         }
     }
 }
@@ -39,6 +108,7 @@ pub struct UpdateSettingsRequest {
     pub cron_notification_enabled: Option<bool>,
     pub command_queue_enabled: Option<bool>,
     pub save_upload_to_workspace: Option<bool>,
+    pub network_proxy: Option<NetworkProxySettings>,
 }
 
 impl UpdateSettingsRequest {
@@ -49,6 +119,7 @@ impl UpdateSettingsRequest {
             && self.cron_notification_enabled.is_none()
             && self.command_queue_enabled.is_none()
             && self.save_upload_to_workspace.is_none()
+            && self.network_proxy.is_none()
     }
 }
 
@@ -135,6 +206,7 @@ mod tests {
         assert!(!resp.cron_notification_enabled);
         assert!(!resp.command_queue_enabled);
         assert!(!resp.save_upload_to_workspace);
+        assert_eq!(resp.network_proxy, NetworkProxySettings::default());
     }
 
     #[test]
@@ -146,6 +218,7 @@ mod tests {
         assert_eq!(json["cron_notification_enabled"], false);
         assert_eq!(json["command_queue_enabled"], false);
         assert_eq!(json["save_upload_to_workspace"], false);
+        assert_eq!(json["network_proxy"]["mode"], "follow_system");
         // Verify snake_case, not camelCase
         assert!(json.get("notificationEnabled").is_none());
         assert!(json.get("cronNotificationEnabled").is_none());
@@ -158,7 +231,12 @@ mod tests {
             "notification_enabled": false,
             "cron_notification_enabled": true,
             "command_queue_enabled": true,
-            "save_upload_to_workspace": true
+            "save_upload_to_workspace": true,
+            "network_proxy": {
+                "mode": "manual",
+                "proxy_url": "http://127.0.0.1:7897",
+                "no_proxy": "localhost,127.0.0.1,::1"
+            }
         });
         let resp: SystemSettingsResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.language, "zh-CN");
@@ -166,6 +244,7 @@ mod tests {
         assert!(resp.cron_notification_enabled);
         assert!(resp.command_queue_enabled);
         assert!(resp.save_upload_to_workspace);
+        assert_eq!(resp.network_proxy.mode, NetworkProxyMode::Manual);
     }
 
     #[test]
@@ -176,6 +255,10 @@ mod tests {
             cron_notification_enabled: true,
             command_queue_enabled: true,
             save_upload_to_workspace: true,
+            network_proxy: NetworkProxySettings {
+                mode: NetworkProxyMode::Disabled,
+                ..Default::default()
+            },
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SystemSettingsResponse = serde_json::from_str(&json).unwrap();
@@ -193,6 +276,7 @@ mod tests {
         assert!(req.cron_notification_enabled.is_none());
         assert!(req.command_queue_enabled.is_none());
         assert!(req.save_upload_to_workspace.is_none());
+        assert!(req.network_proxy.is_none());
     }
 
     #[test]
@@ -244,25 +328,25 @@ mod tests {
     fn test_client_preferences_response_mixed_types() {
         let mut resp: ClientPreferencesResponse = HashMap::new();
         resp.insert("system.closeToTray".into(), json!(false));
-        resp.insert("pet.size".into(), json!(280));
-        resp.insert("theme".into(), json!("dark"));
+        resp.insert("ui.fontSize.chat".into(), json!(14));
+        resp.insert("theme.activeId".into(), json!("dark"));
         resp.insert("ui.zoomFactor".into(), json!(1.0));
 
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["system.closeToTray"], false);
-        assert_eq!(json["pet.size"], 280);
-        assert_eq!(json["theme"], "dark");
+        assert_eq!(json["ui.fontSize.chat"], 14);
+        assert_eq!(json["theme.activeId"], "dark");
         assert_eq!(json["ui.zoomFactor"], 1.0);
     }
 
     #[test]
     fn test_update_client_preferences_with_null_delete() {
         let raw = json!({
-            "theme": null,
-            "pet.size": 360
+            "theme.activeId": null,
+            "ui.zoomFactor": 1.25
         });
         let req: UpdateClientPreferencesRequest = serde_json::from_value(raw).unwrap();
-        assert!(req["theme"].is_null());
-        assert_eq!(req["pet.size"], 360);
+        assert!(req["theme.activeId"].is_null());
+        assert_eq!(req["ui.zoomFactor"], 1.25);
     }
 }

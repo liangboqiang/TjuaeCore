@@ -140,11 +140,11 @@ async fn workspace_browse_treats_symlinked_skill_dir_as_directory() {
 
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
-    let builtin = tmp.path().join("builtin-skills/auto-inject/tjuaeui-skills");
+    let managed = tmp.path().join("managed-skills/auto-inject/tjuaeui-skills");
     std::fs::create_dir_all(workspace.join(".claude/skills")).unwrap();
-    std::fs::create_dir_all(&builtin).unwrap();
-    std::fs::write(builtin.join("SKILL.md"), b"---\ndescription: test\n---\nbody").unwrap();
-    std::os::unix::fs::symlink(&builtin, workspace.join(".claude/skills/tjuaeui-skills")).unwrap();
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::write(managed.join("SKILL.md"), b"---\ndescription: test\n---\nbody").unwrap();
+    std::os::unix::fs::symlink(&managed, workspace.join(".claude/skills/tjuaeui-skills")).unwrap();
 
     let ws = workspace.to_string_lossy().into_owned();
     let conv_id = create_conversation_with_workspace(&mut app, &token, &csrf, "Test Conv", "acp", &ws).await;

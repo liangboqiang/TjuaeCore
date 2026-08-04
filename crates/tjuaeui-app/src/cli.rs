@@ -334,17 +334,17 @@ pub(crate) enum ConfigCommand {
     Context,
     /// 管理对话。
     Conversation(ConfigConversationArgs),
-    /// 管理助手及其行为。
+    /// 查看助手及其行为。
     Assistants(ConfigAssistantsArgs),
-    /// 管理 TjuaeUI 技能。
+    /// 查看 TjuaeUI 技能。
     Skills(ConfigSkillsArgs),
-    /// 管理 MCP 服务与 OAuth 状态。
+    /// 查看 MCP 服务。
     Mcp(ConfigMcpArgs),
     /// 管理模型提供商。
     Providers(ConfigProvidersArgs),
     /// 管理后端和客户端设置。
     Settings(ConfigSettingsArgs),
-    /// 管理智能体目录和自定义智能体。
+    /// 查看智能体目录。
     Agents(ConfigAgentsArgs),
     /// 管理定时任务。
     Cron(ConfigCronArgs),
@@ -360,13 +360,7 @@ pub(crate) struct ConfigAssistantsArgs {
 pub(crate) enum ConfigAssistantsCommand {
     List,
     Get,
-    Create,
-    Update,
-    Delete,
-    Import,
-    State,
     Rule(ConfigAssistantRuleArgs),
-    Skill(ConfigAssistantSkillArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -375,17 +369,9 @@ pub(crate) struct ConfigAssistantRuleArgs {
     pub command: ConfigAssistantTextCommand,
 }
 
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigAssistantSkillArgs {
-    #[command(subcommand)]
-    pub command: ConfigAssistantTextCommand,
-}
-
 #[derive(Subcommand, Debug, Clone, Copy)]
 pub(crate) enum ConfigAssistantTextCommand {
     Read,
-    Write,
-    Delete,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -397,38 +383,6 @@ pub(crate) struct ConfigSkillsArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigSkillsCommand {
     List,
-    Info,
-    Paths,
-    Import,
-    Delete,
-    Scan,
-    ExternalPaths(ConfigSkillsExternalPathsArgs),
-    Market(ConfigSkillsMarketArgs),
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigSkillsExternalPathsArgs {
-    #[command(subcommand)]
-    pub command: ConfigSkillsExternalPathsCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigSkillsExternalPathsCommand {
-    List,
-    Add,
-    Remove,
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigSkillsMarketArgs {
-    #[command(subcommand)]
-    pub command: ConfigSkillsMarketCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigSkillsMarketCommand {
-    Enable,
-    Disable,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -440,9 +394,7 @@ pub(crate) struct ConfigMcpArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigMcpCommand {
     Servers(ConfigMcpServersArgs),
-    TestConnection,
     AgentConfigs,
-    Oauth(ConfigMcpOauthArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -455,25 +407,6 @@ pub(crate) struct ConfigMcpServersArgs {
 pub(crate) enum ConfigMcpServersCommand {
     List,
     Get,
-    Create,
-    Update,
-    Delete,
-    Toggle,
-    Import,
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigMcpOauthArgs {
-    #[command(subcommand)]
-    pub command: ConfigMcpOauthCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigMcpOauthCommand {
-    CheckStatus,
-    Login,
-    Logout,
-    Authenticated,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -539,9 +472,7 @@ pub(crate) struct ConfigAgentsArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigAgentsCommand {
     List,
-    Enable,
     Overrides(ConfigAgentOverridesArgs),
-    Custom(ConfigAgentCustomArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -553,21 +484,6 @@ pub(crate) struct ConfigAgentOverridesArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigAgentOverridesCommand {
     Get,
-    Set,
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigAgentCustomArgs {
-    #[command(subcommand)]
-    pub command: ConfigAgentCustomCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigAgentCustomCommand {
-    Create,
-    Update,
-    Delete,
-    TryConnect,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -809,36 +725,11 @@ mod tests {
             &["tjuaecore", "config", "conversation", "rename"],
             &["tjuaecore", "config", "assistants", "list"],
             &["tjuaecore", "config", "assistants", "get"],
-            &["tjuaecore", "config", "assistants", "create"],
-            &["tjuaecore", "config", "assistants", "update"],
-            &["tjuaecore", "config", "assistants", "delete"],
-            &["tjuaecore", "config", "assistants", "import"],
-            &["tjuaecore", "config", "assistants", "state"],
             &["tjuaecore", "config", "assistants", "rule", "read"],
-            &["tjuaecore", "config", "assistants", "rule", "write"],
-            &["tjuaecore", "config", "assistants", "rule", "delete"],
-            &["tjuaecore", "config", "assistants", "skill", "read"],
-            &["tjuaecore", "config", "assistants", "skill", "write"],
-            &["tjuaecore", "config", "assistants", "skill", "delete"],
             &["tjuaecore", "config", "skills", "list"],
-            &["tjuaecore", "config", "skills", "info"],
-            &["tjuaecore", "config", "skills", "paths"],
-            &["tjuaecore", "config", "skills", "import"],
-            &["tjuaecore", "config", "skills", "delete"],
-            &["tjuaecore", "config", "skills", "scan"],
             &["tjuaecore", "config", "mcp", "servers", "list"],
             &["tjuaecore", "config", "mcp", "servers", "get"],
-            &["tjuaecore", "config", "mcp", "servers", "create"],
-            &["tjuaecore", "config", "mcp", "servers", "update"],
-            &["tjuaecore", "config", "mcp", "servers", "delete"],
-            &["tjuaecore", "config", "mcp", "servers", "toggle"],
-            &["tjuaecore", "config", "mcp", "servers", "import"],
-            &["tjuaecore", "config", "mcp", "test-connection"],
             &["tjuaecore", "config", "mcp", "agent-configs"],
-            &["tjuaecore", "config", "mcp", "oauth", "check-status"],
-            &["tjuaecore", "config", "mcp", "oauth", "login"],
-            &["tjuaecore", "config", "mcp", "oauth", "logout"],
-            &["tjuaecore", "config", "mcp", "oauth", "authenticated"],
             &["tjuaecore", "config", "providers", "list"],
             &["tjuaecore", "config", "providers", "create"],
             &["tjuaecore", "config", "providers", "update"],
@@ -852,13 +743,7 @@ mod tests {
             &["tjuaecore", "config", "settings", "client", "get"],
             &["tjuaecore", "config", "settings", "client", "put"],
             &["tjuaecore", "config", "agents", "list"],
-            &["tjuaecore", "config", "agents", "enable"],
             &["tjuaecore", "config", "agents", "overrides", "get"],
-            &["tjuaecore", "config", "agents", "overrides", "set"],
-            &["tjuaecore", "config", "agents", "custom", "create"],
-            &["tjuaecore", "config", "agents", "custom", "update"],
-            &["tjuaecore", "config", "agents", "custom", "delete"],
-            &["tjuaecore", "config", "agents", "custom", "try-connect"],
             &["tjuaecore", "config", "cron", "jobs", "list"],
             &["tjuaecore", "config", "cron", "jobs", "get"],
             &["tjuaecore", "config", "cron", "jobs", "create"],
@@ -868,16 +753,44 @@ mod tests {
             &["tjuaecore", "config", "cron", "jobs", "skill", "get"],
             &["tjuaecore", "config", "cron", "jobs", "skill", "save"],
             &["tjuaecore", "config", "cron", "jobs", "skill", "delete"],
-            &["tjuaecore", "config", "skills", "external-paths", "list"],
-            &["tjuaecore", "config", "skills", "external-paths", "add"],
-            &["tjuaecore", "config", "skills", "external-paths", "remove"],
-            &["tjuaecore", "config", "skills", "market", "enable"],
-            &["tjuaecore", "config", "skills", "market", "disable"],
         ];
 
         for command in commands {
             let result = Cli::try_parse_from(*command);
             assert!(result.is_ok(), "command should parse: {command:?}");
+        }
+    }
+
+    #[test]
+    fn config_cli_rejects_removed_assistant_asset_command_paths() {
+        let commands: &[&[&str]] = &[
+            &["tjuaecore", "config", "assistants", "create"],
+            &["tjuaecore", "config", "assistants", "update"],
+            &["tjuaecore", "config", "assistants", "delete"],
+            &["tjuaecore", "config", "assistants", "state"],
+            &["tjuaecore", "config", "assistants", "import"],
+            &["tjuaecore", "config", "assistants", "rule", "write"],
+            &["tjuaecore", "config", "assistants", "rule", "delete"],
+            &["tjuaecore", "config", "assistants", "skill", "read"],
+            &["tjuaecore", "config", "assistants", "skill", "write"],
+            &["tjuaecore", "config", "assistants", "skill", "delete"],
+            &["tjuaecore", "config", "mcp", "servers", "create"],
+            &["tjuaecore", "config", "mcp", "servers", "update"],
+            &["tjuaecore", "config", "mcp", "servers", "delete"],
+            &["tjuaecore", "config", "mcp", "servers", "toggle"],
+            &["tjuaecore", "config", "mcp", "servers", "import"],
+            &["tjuaecore", "config", "mcp", "test-connection"],
+            &["tjuaecore", "config", "mcp", "oauth", "login"],
+            &["tjuaecore", "config", "agents", "enable"],
+            &["tjuaecore", "config", "agents", "overrides", "set"],
+            &["tjuaecore", "config", "agents", "custom", "create"],
+        ];
+
+        for command in commands {
+            assert!(
+                Cli::try_parse_from(*command).is_err(),
+                "removed command must be rejected: {command:?}"
+            );
         }
     }
 

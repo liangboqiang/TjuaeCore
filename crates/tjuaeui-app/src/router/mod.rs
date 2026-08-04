@@ -1,6 +1,10 @@
 //! HTTP router assembly for the application.
 
+mod asset_protocol;
 mod health;
+mod hub_assets;
+mod local_assets;
+mod market_assets;
 mod routes;
 mod runtime_team_tools;
 mod state;

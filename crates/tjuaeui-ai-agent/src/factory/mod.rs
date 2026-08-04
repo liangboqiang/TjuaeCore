@@ -1,5 +1,6 @@
 pub mod acp_assembler;
 
+mod a2a;
 mod acp;
 mod acp_launch_policy;
 mod context;
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
-use tjuaeui_db::{IMcpServerRepository, IProviderRepository};
+use tjuaeui_db::{IA2aRepository, IMcpServerRepository, IProviderRepository};
 use tjuaeui_realtime::EventBroadcaster;
 
 use crate::agent_task::AgentInstance;
@@ -26,6 +27,7 @@ use crate::types::BuildTaskOptions;
 pub struct AgentFactoryDeps {
     pub skill_manager: Arc<AcpSkillManager>,
     pub provider_repo: Arc<dyn IProviderRepository>,
+    pub a2a_repo: Arc<dyn IA2aRepository>,
     pub encryption_key: [u8; 32],
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,
@@ -40,6 +42,10 @@ pub struct AgentFactoryDeps {
     /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
+    /// Resolves the current user's non-persisted runtime Overlay and credentials
+    /// for managed Engine/MCP assets immediately before a process/connection is
+    /// created. `None` is only valid when no managed runtime asset is launched.
+    pub runtime_asset_configuration_resolver: Option<Arc<dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>>,
     /// Subprocess spawner for the clean-slate session model. claude/codex always
     /// run through `SessionAgentTask` (direct-CLI) instead of the ACP manager, so
     /// the spawner is unconditionally wired — there is no fallback to the ACP path.
@@ -63,12 +69,43 @@ pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentFactory {
 }
 
 async fn build_agent(deps: Arc<AgentFactoryDeps>, options: BuildTaskOptions) -> Result<AgentInstance, AgentError> {
+    let runtime_asset_request = options.runtime_asset_request;
+    let runtime_boundary_reporter = options.runtime_boundary_reporter;
     let context = options.context;
     let ctx = FactoryContext::resolve(&context).await?;
     let model = context.model.clone();
     match context.kind {
-        AgentSessionKind::Acp(acp_context) => acp::build(deps, *acp_context, ctx).await,
-        AgentSessionKind::TjuaeCli(tjuae_cli_context) => tjuae_cli::build(deps, *tjuae_cli_context, model, ctx).await,
+        AgentSessionKind::Acp(acp_context) => {
+            acp::build(
+                deps,
+                *acp_context,
+                ctx,
+                runtime_asset_request,
+                runtime_boundary_reporter,
+            )
+            .await
+        }
+        AgentSessionKind::A2a(a2a_context) => {
+            a2a::build(
+                deps,
+                *a2a_context,
+                ctx,
+                runtime_asset_request,
+                runtime_boundary_reporter,
+            )
+            .await
+        }
+        AgentSessionKind::TjuaeCli(tjuae_cli_context) => {
+            tjuae_cli::build(
+                deps,
+                *tjuae_cli_context,
+                model,
+                ctx,
+                runtime_asset_request,
+                runtime_boundary_reporter,
+            )
+            .await
+        }
     }
 }
 

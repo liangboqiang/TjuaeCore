@@ -376,9 +376,9 @@ mod tests {
     }
 
     #[test]
-    fn scan_loads_tjuaeui_main_contract_extension() {
+    fn scan_loads_current_tjuaeui_main_contract_extension() {
         let tmp = TempDir::new().unwrap();
-        let ext_dir = tmp.path().join("legacy-ext");
+        let ext_dir = tmp.path().join("main-contract-ext");
         fs::create_dir(&ext_dir).unwrap();
         fs::create_dir(ext_dir.join("contributes")).unwrap();
 
@@ -386,10 +386,10 @@ mod tests {
             ext_dir.join("contributes/settings-tabs.json"),
             serde_json::to_vec_pretty(&serde_json::json!([
                 {
-                    "id": "legacy-settings",
-                    "name": "Legacy Settings",
-                    "entryPoint": "settings/legacy.html",
-                    "position": { "anchor": "display", "placement": "after" }
+                    "id": "extension-settings",
+                    "label": "Extension Settings",
+                    "url": "settings/index.html",
+                    "position": { "relativeTo": "display", "placement": "after" }
                 }
             ]))
             .unwrap(),
@@ -399,8 +399,8 @@ mod tests {
         fs::write(
             ext_dir.join(EXTENSION_MANIFEST_FILE),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "name": "legacy-ext",
-                "displayName": "Legacy Extension",
+                "name": "main-contract-ext",
+                "displayName": "Main Contract Extension",
                 "version": "1.0.0",
                 "i18n": {
                     "localesDir": "i18n",
@@ -408,20 +408,15 @@ mod tests {
                 },
                 "contributes": {
                     "settingsTabs": "$file:contributes/settings-tabs.json",
-                    "webui": {
-                        "apiRoutes": [
-                            {
-                                "path": "/legacy-ext/collect",
-                                "entryPoint": "webui/collector.js"
-                            }
-                        ],
-                        "staticAssets": [
-                            {
-                                "urlPrefix": "/legacy-ext/assets",
-                                "directory": "assets"
-                            }
-                        ]
-                    }
+                    "webui": [{
+                        "id": "main-contract-webui",
+                        "directory": "webui",
+                        "routes": [{
+                            "path": "/main-contract-ext/collect",
+                            "method": "POST",
+                            "handler": "collector.js"
+                        }]
+                    }]
                 }
             }))
             .unwrap(),
@@ -431,10 +426,10 @@ mod tests {
         let result = scan_directory(tmp.path(), ExtensionSource::Local);
         assert_eq!(result.len(), 1);
         let manifest = &result[0].manifest;
-        assert_eq!(manifest.display_name.as_deref(), Some("Legacy Extension"));
+        assert_eq!(manifest.display_name.as_deref(), Some("Main Contract Extension"));
         assert_eq!(manifest.i18n.as_ref().unwrap().locales, vec!["en-US".to_owned()]);
         assert_eq!(manifest.contributes.as_ref().unwrap().settings_tabs.len(), 1);
-        assert_eq!(manifest.contributes.as_ref().unwrap().webui.len(), 2);
+        assert_eq!(manifest.contributes.as_ref().unwrap().webui.len(), 1);
     }
 
     #[test]
@@ -570,7 +565,6 @@ mod tests {
                 entry_point: None,
                 permissions: None,
                 contributes: None,
-                lifecycle: None,
                 i18n: None,
             },
             directory: format!("/test/{name}"),

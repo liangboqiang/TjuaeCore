@@ -37,71 +37,51 @@ impl From<ExtensionError> for ApiError {
             ExtensionError::InvalidWebuiRouteNamespace { .. } => ApiError::BadRequest(err.to_string()),
             ExtensionError::ReservedWebuiRoute { .. } => ApiError::BadRequest(err.to_string()),
             ExtensionError::ThemeCssNotFound(path) => ApiError::NotFound(format!("找不到主题 CSS：{path}")),
-            ExtensionError::HookTimeout { .. } => ApiError::Internal(err.to_string()),
-            ExtensionError::HookFailed { .. } => ApiError::Internal(err.to_string()),
-            ExtensionError::HookNotFound(path) => ApiError::NotFound(format!("找不到 Hook 脚本：{path}")),
             ExtensionError::ResolutionFailed { .. } => ApiError::Internal(err.to_string()),
             ExtensionError::NotFound(name) => ApiError::NotFound(format!("找不到扩展：{name}")),
+            ExtensionError::HubNetwork(message) => ApiError::coded(
+                StatusCode::BAD_GATEWAY,
+                "HUB_NETWORK_ERROR",
+                format!("访问 TjuaeHub 失败：{message}"),
+                None,
+            ),
+            ExtensionError::HubIntegrity(message) => ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "HUB_INTEGRITY_CHECK_FAILED",
+                format!("Hub 资产包完整性校验失败：{message}"),
+                None,
+            ),
+            ExtensionError::HubPackageTooLarge { actual, limit } => ApiError::coded(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "HUB_PACKAGE_TOO_LARGE",
+                format!("Hub 数据体积为 {actual} 字节，超过上限 {limit} 字节。"),
+                Some(json!({ "actual": actual, "limit": limit })),
+            ),
+            ExtensionError::HubPublishPrerequisite(message) => ApiError::coded(
+                StatusCode::PRECONDITION_FAILED,
+                "HUB_PUBLISH_PREREQUISITE_FAILED",
+                format!("远程发布前置条件未满足：{message}"),
+                None,
+            ),
+            ExtensionError::HubPublishFailed(message) => ApiError::coded(
+                StatusCode::BAD_GATEWAY,
+                "HUB_PUBLISH_FAILED",
+                format!("远程发布失败：{message}"),
+                None,
+            ),
+            ExtensionError::HubPublishConflict(message) => ApiError::coded(
+                StatusCode::CONFLICT,
+                "HUB_PUBLISH_CONFLICT",
+                format!("远程发布幂等冲突：{message}"),
+                None,
+            ),
+            ExtensionError::AssetSanitization(message) => ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ASSET_SANITIZATION_FAILED",
+                format!("资产导出被安全策略拒绝：{message}"),
+                None,
+            ),
             ExtensionError::StatePersistence(msg) => ApiError::Internal(msg),
-            ExtensionError::BuiltinSkillDeletion(name) => ApiError::BadRequest(format!("无法删除内置技能：{name}")),
-            ExtensionError::SkillNotFound(name) => ApiError::NotFound(format!("找不到技能：{name}")),
-            ExtensionError::InvalidSkillPath(path) => ApiError::BadRequest(format!("技能路径无效：{path}")),
-            ExtensionError::SkillInvalidFrontmatter(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_INVALID_FRONTMATTER",
-                "技能 frontmatter 无效。",
-                None,
-            ),
-            ExtensionError::SkillImportNoSkillFound(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_NO_SKILL_FOUND",
-                "所选路径中没有有效技能。",
-                None,
-            ),
-            ExtensionError::SkillImportInvalidSource(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_INVALID_SOURCE",
-                "所选路径不是技能目录、SKILL.md、父目录或 zip 压缩包。",
-                None,
-            ),
-            ExtensionError::SkillImportSymlinkEntry(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_SYMLINK_ENTRY",
-                "技能导入内容不能包含符号链接。",
-                None,
-            ),
-            ExtensionError::SkillImportFileTooLarge {
-                file_path,
-                file_bytes,
-                limit_bytes,
-            } => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_FILE_TOO_LARGE",
-                "技能导入内容包含过大的文件。",
-                Some(json!({
-                    "error_path": file_path,
-                    "file_bytes": file_bytes,
-                    "limit_bytes": limit_bytes,
-                })),
-            ),
-            ExtensionError::SkillImportTotalTooLarge {
-                total_bytes,
-                limit_bytes,
-            } => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_TOTAL_TOO_LARGE",
-                "技能导入内容过大。",
-                Some(json!({
-                    "total_bytes": total_bytes,
-                    "limit_bytes": limit_bytes,
-                })),
-            ),
-            ExtensionError::SkillImportInvalidZip(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_INVALID_ZIP",
-                "所选 zip 压缩包不是有效的技能包。",
-                None,
-            ),
             ExtensionError::Db(tjuaeui_db::DbError::NotFound(msg)) => ApiError::NotFound(msg),
             ExtensionError::Db(tjuaeui_db::DbError::Conflict(msg)) => ApiError::Conflict(msg),
             ExtensionError::Db(err) => ApiError::Internal(err.to_string()),
@@ -136,11 +116,6 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         // Query routes
         .route("/api/extensions", get(get_loaded_extensions))
         .route("/api/extensions/themes", get(get_themes))
-        .route("/api/extensions/assistants", get(get_assistants))
-        .route("/api/extensions/acp-adapters", get(get_acp_adapters))
-        .route("/api/extensions/agents", get(get_agents))
-        .route("/api/extensions/mcp-servers", get(get_mcp_servers))
-        .route("/api/extensions/skills", get(get_skills))
         .route("/api/extensions/channel-plugins", get(get_channel_plugins))
         .route("/api/extensions/settings-tabs", get(get_settings_tabs))
         .route(
@@ -206,175 +181,6 @@ async fn get_themes(
                     "is_preset": true,
                     "created_at": timestamp,
                     "updated_at": timestamp,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/assistants` — get all resolved assistants.
-async fn get_assistants(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let assistants = state.registry.get_assistants().await;
-    let value = serde_json::Value::Array(
-        assistants
-            .into_iter()
-            .map(|assistant| {
-                serde_json::json!({
-                    "id": format!("ext-{}", assistant.id),
-                    "name": assistant.name,
-                    "description": assistant.description,
-                    "avatar": assistant.icon,
-                    "agentId": assistant.agent_id,
-                    "context": assistant.context.unwrap_or_default(),
-                    "models": assistant.models,
-                    "enabledSkills": assistant.enabled_skills,
-                    "prompts": assistant.prompts,
-                    "isPreset": true,
-                    "isBuiltin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "_extensionName": assistant.extension_name,
-                    "_kind": "assistant",
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/acp-adapters` — get all resolved ACP adapters.
-async fn get_acp_adapters(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let adapters = state.registry.get_acp_adapters().await;
-    let value = serde_json::Value::Array(
-        adapters
-            .into_iter()
-            .map(|adapter| {
-                let cli_command = adapter.cli_command.clone();
-                let default_cli_path = adapter.default_cli_path.clone().or_else(|| cli_command.clone());
-                serde_json::json!({
-                    "id": adapter.id,
-                    "name": adapter.name,
-                    "description": adapter.description,
-                    "cliCommand": cli_command,
-                    "defaultCliPath": default_cli_path,
-                    "acpArgs": adapter.acp_args,
-                    "env": adapter.env,
-                    "avatar": adapter.avatar,
-                    "authRequired": adapter.auth_required,
-                    "supportsStreaming": adapter.supports_streaming.unwrap_or(false),
-                    "connectionType": adapter.connection_type.unwrap_or_else(|| "cli".to_string()),
-                    "endpoint": adapter.endpoint,
-                    "models": adapter.models,
-                    "yoloMode": adapter.yolo_mode,
-                    "healthCheck": adapter.health_check,
-                    "apiKeyFields": adapter.api_key_fields,
-                    "isPreset": false,
-                    "isBuiltin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "_extensionName": adapter.extension_name,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/agents` — get all resolved agents.
-async fn get_agents(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let agents = state.registry.get_agents().await;
-    let value = serde_json::Value::Array(
-        agents
-            .into_iter()
-            .map(|agent| {
-                serde_json::json!({
-                    "id": format!("ext-{}", agent.id),
-                    "name": agent.name,
-                    "description": agent.description,
-                    "avatar": agent.icon,
-                    "agentType": agent.agent_type,
-                    "context": agent.context.unwrap_or_default(),
-                    "models": agent.models,
-                    "enabledSkills": agent.enabled_skills,
-                    "prompts": agent.prompts,
-                    "isPreset": true,
-                    "isBuiltin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "_extensionName": agent.extension_name,
-                    "_kind": "agent",
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/mcp-servers` — get all resolved MCP servers.
-async fn get_mcp_servers(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let servers = state.registry.get_mcp_servers().await;
-    let timestamp = now_ms();
-    let value = serde_json::Value::Array(
-        servers
-            .into_iter()
-            .map(|server| {
-                let enabled = server
-                    .config
-                    .get("enabled")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true);
-                let transport = server
-                    .config
-                    .get("transport")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let original_transport = transport.clone();
-                let original_json = serde_json::json!({
-                    "name": server.name,
-                    "description": server.description,
-                    "enabled": enabled,
-                    "transport": original_transport,
-                });
-                serde_json::json!({
-                    "id": format!("ext-{}-{}", server.extension_name, server.name),
-                    "name": server.name,
-                    "description": server.description,
-                    "enabled": enabled,
-                    "transport": transport,
-                    "created_at": timestamp,
-                    "updated_at": timestamp,
-                    "original_json": serde_json::to_string_pretty(&original_json).unwrap_or_default(),
-                    "_source": "extension",
-                    "_extensionName": server.extension_name,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/skills` — get all resolved skills.
-async fn get_skills(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let skills = state.registry.get_skills().await;
-    let value = serde_json::Value::Array(
-        skills
-            .into_iter()
-            .map(|skill| {
-                serde_json::json!({
-                    "name": skill.name,
-                    "description": skill.description.unwrap_or_else(|| format!("Skill from extension: {}", skill.extension_name)),
-                    "location": skill.path,
                 })
             })
             .collect(),

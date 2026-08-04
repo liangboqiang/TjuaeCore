@@ -1,7 +1,8 @@
-//! MCP E2E tests beyond CRUD: connection test, agent config discovery, OAuth, auth.
+//! MCP read-boundary and removed legacy-route E2E tests.
 //!
-//! Covers test-plan sections 2 (connection test error paths), 3 (agent config discovery),
-//! 4 (OAuth status), and 6 (authentication).
+//! Validation, probes, private overlay credentials, and activation now belong
+//! to the typed asset lifecycle. The former ad-hoc connection and OAuth routes
+//! must stay absent.
 
 mod common;
 
@@ -12,11 +13,11 @@ use tower::ServiceExt;
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
 // ===========================================================================
-// CT-3: Connection test — command not found (ENOENT)
+// Legacy connection testing is part of asset validate/try-run.
 // ===========================================================================
 
 #[tokio::test]
-async fn connection_test_enoent_command() {
+async fn legacy_stdio_connection_test_route_is_removed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -34,21 +35,12 @@ async fn connection_test_enoent_command() {
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let json = body_json(resp).await;
-    assert!(!json["success"].as_bool().unwrap());
-    assert_eq!(json["code"], "MCP_COMMAND_NOT_FOUND");
-    assert_eq!(json["details"]["command"], "nonexistent-mcp-command-xyz-12345");
-    assert!(!json["error"].as_str().unwrap().is_empty());
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
-// CT-4: Connection test — unreachable URL
-// ===========================================================================
-
 #[tokio::test]
-async fn connection_test_unreachable_url() {
+async fn legacy_http_connection_test_route_is_removed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -66,13 +58,7 @@ async fn connection_test_unreachable_url() {
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-
-    let json = body_json(resp).await;
-    assert!(!json["success"].as_bool().unwrap());
-    assert_eq!(json["code"], "MCP_CONNECTION_FAILED");
-    assert_eq!(json["details"]["transport"], "http");
-    assert!(!json["error"].as_str().unwrap().is_empty());
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
@@ -98,11 +84,11 @@ async fn get_agent_configs() {
 }
 
 // ===========================================================================
-// OA-1: OAuth check status — unauthenticated server
+// Legacy MCP-specific OAuth state is replaced by typed private overlay slots.
 // ===========================================================================
 
 #[tokio::test]
-async fn oauth_check_status_unauthenticated_server() {
+async fn legacy_oauth_check_status_route_is_removed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -114,19 +100,12 @@ async fn oauth_check_status_unauthenticated_server() {
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert!(json["success"].as_bool().unwrap());
-    assert!(!json["data"]["authenticated"].as_bool().unwrap());
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
-// OA-3: Get all authenticated servers (empty at start)
-// ===========================================================================
-
 #[tokio::test]
-async fn oauth_authenticated_servers_empty() {
+async fn legacy_oauth_authenticated_servers_route_is_removed() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -135,19 +114,12 @@ async fn oauth_authenticated_servers_empty() {
         .oneshot(get_with_token("/api/mcp/oauth/authenticated", &token))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert!(json["success"].as_bool().unwrap());
-    assert_eq!(json["data"], json!([]));
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================
-// OA-7: Logout from never-authenticated server (idempotent)
-// ===========================================================================
-
 #[tokio::test]
-async fn oauth_logout_idempotent() {
+async fn legacy_oauth_logout_route_is_removed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -159,10 +131,7 @@ async fn oauth_logout_idempotent() {
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert!(json["success"].as_bool().unwrap());
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================

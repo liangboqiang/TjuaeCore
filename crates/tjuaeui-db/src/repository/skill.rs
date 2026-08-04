@@ -1,7 +1,7 @@
 use crate::error::DbError;
-use crate::models::{SkillImportRecordRow, SkillRow};
+use crate::models::SkillRow;
 
-/// Skill metadata and import-history data access abstraction.
+/// Runtime skill projection data access abstraction.
 #[async_trait::async_trait]
 pub trait ISkillRepository: Send + Sync {
     /// Returns active skills ordered by most recent update first.
@@ -18,15 +18,6 @@ pub trait ISkillRepository: Send + Sync {
 
     /// Soft-deletes an active skill by name.
     async fn delete_by_name(&self, name: &str) -> Result<SkillRow, DbError>;
-
-    /// Appends one import record.
-    async fn create_import_record(
-        &self,
-        params: CreateSkillImportRecordParams<'_>,
-    ) -> Result<SkillImportRecordRow, DbError>;
-
-    /// Lists recent import records ordered by creation time descending.
-    async fn list_import_records(&self, limit: i64) -> Result<Vec<SkillImportRecordRow>, DbError>;
 }
 
 /// Parameters for creating or updating a skill row.
@@ -37,22 +28,4 @@ pub struct UpsertSkillParams<'a> {
     pub path: &'a str,
     pub source: &'a str,
     pub enabled: bool,
-}
-
-/// Parameters for appending a skill import history row.
-#[derive(Debug, Clone)]
-pub struct CreateSkillImportRecordParams<'a> {
-    pub operation_id: &'a str,
-    pub source_label: &'a str,
-    pub source_path: Option<&'a str>,
-    pub source_name: &'a str,
-    pub skill_id: Option<&'a str>,
-    pub skill_name: Option<&'a str>,
-    pub status: &'a str,
-    pub error_code: Option<&'a str>,
-    pub error_path: Option<&'a str>,
-    pub actual_bytes: Option<i64>,
-    pub limit_bytes: Option<i64>,
-    pub line: Option<i64>,
-    pub column: Option<i64>,
 }

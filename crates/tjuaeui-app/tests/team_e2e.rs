@@ -7,8 +7,8 @@ use tokio::net::TcpStream;
 use tower::ServiceExt;
 
 use common::{
-    body_json, build_app, build_app_with_mock_agents, delete_with_token, get_request, get_with_token, json_with_token,
-    setup_and_login,
+    body_json, build_app, build_app_with_mock_agents, delete_with_token, get_request, get_with_token,
+    install_test_assistant, json_with_token, setup_and_login,
 };
 use tjuaeui_api_types::TeamMcpStdioConfig;
 use tjuaeui_team::mcp::protocol::{read_frame, write_frame};
@@ -62,30 +62,9 @@ async fn ensure_default_team_agent_installed(services: &tjuaeui_app::AppServices
         .expect("reload deterministic team agent");
 }
 
-async fn ensure_default_team_assistant(
-    app: &mut axum::Router,
-    services: &tjuaeui_app::AppServices,
-    token: &str,
-    csrf: &str,
-) {
+async fn ensure_default_team_assistant(services: &tjuaeui_app::AppServices) {
     ensure_default_team_agent_installed(services).await;
-    let req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": DEFAULT_TEAM_ASSISTANT_ID,
-            "name": "Team E2E Assistant",
-            "agent_id": DEFAULT_TEAM_AGENT_ID
-        }),
-        token,
-        csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert!(
-        resp.status() == StatusCode::CREATED || resp.status() == StatusCode::CONFLICT,
-        "expected team assistant seed to be created or already exist, got {}",
-        resp.status()
-    );
+    install_test_assistant(services, DEFAULT_TEAM_ASSISTANT_ID, "Team E2E Assistant").await;
 }
 
 async fn mark_claude_backend_team_mcp_stdio_capable(services: &tjuaeui_app::AppServices) {
@@ -115,7 +94,7 @@ async fn create_team(
     token: &str,
     csrf: &str,
 ) -> serde_json::Value {
-    ensure_default_team_assistant(app, services, token, csrf).await;
+    ensure_default_team_assistant(services).await;
     let req = json_with_token("POST", "/api/teams", two_agent_body(), token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -198,7 +177,7 @@ async fn tc1_create_team_with_multiple_agents() {
 async fn tc2_create_single_agent_team() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
 
     let body = json!({
         "name": "Solo",
@@ -260,7 +239,7 @@ async fn tc3_each_agent_has_conversation_id() {
 }
 
 #[tokio::test]
-async fn tc3b_create_team_writes_legacy_extra_shape() {
+async fn tc3b_create_team_writes_runtime_extra_without_projection_identity() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -274,9 +253,13 @@ async fn tc3b_create_team_writes_legacy_extra_shape() {
     assert_eq!(extra["teamId"], data["id"]);
     assert!(extra["slot_id"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(extra["role"], "lead");
-    assert_eq!(extra["backend"], "claude");
-    assert_eq!(extra["session_mode"], "bypassPermissions");
-    assert_eq!(extra["current_model_id"], "claude");
+    assert_eq!(extra["backend"], "tjuaecli");
+    assert_eq!(extra["session_mode"], "yolo");
+    assert!(extra["current_model_id"].is_null());
+    if let Some(assistant_id) = extra.get("assistant_id") {
+        assert_eq!(assistant_id, DEFAULT_TEAM_ASSISTANT_ID);
+    }
+    assert!(!extra.to_string().contains("tjuae-proj-v1-"));
 }
 
 #[tokio::test]
@@ -309,7 +292,7 @@ async fn tc3c_team_conversation_rejects_standalone_runtime_ensure() {
 async fn tc4_explicit_lead_is_returned_first() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
 
     let body = json!({
         "name": "T",
@@ -348,7 +331,7 @@ async fn tc5_empty_agents_returns_error() {
 async fn tc6_missing_name_returns_error() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
 
     let body = json!({ "agents": [json!({
         "name": "L",
@@ -365,7 +348,7 @@ async fn tc6_missing_name_returns_error() {
 async fn tc6b_workspace_with_whitespace_segment_is_accepted() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("Archive ");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -387,7 +370,7 @@ async fn tc6b_workspace_with_whitespace_segment_is_accepted() {
 async fn tc6c_create_team_rejects_missing_workspace_path() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
     let missing_workspace =
         std::env::temp_dir().join(format!("tjuaeui-team-missing-{}", tjuaeui_common::generate_short_id()));
 
@@ -454,7 +437,7 @@ async fn tl2_list_multiple_teams() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     create_team(&mut app, &services, &token, &csrf).await;
-    ensure_default_team_assistant(&mut app, &services, &token, &csrf).await;
+    ensure_default_team_assistant(&services).await;
 
     let body = json!({
         "name": "Beta",
@@ -1064,7 +1047,7 @@ async fn es1b_team_mcp_list_assistants_matches_assistant_projection() {
         .unwrap()
         .iter()
         .filter(|assistant| assistant["team_selectable"].as_bool().unwrap_or(false))
-        .filter(|assistant| assistant["agent"].is_object())
+        .filter(|assistant| assistant["engine"].is_object())
         .map(|assistant| assistant["id"].as_str().unwrap().to_owned())
         .collect();
     expected_ids.sort();

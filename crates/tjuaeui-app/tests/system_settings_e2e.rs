@@ -86,7 +86,7 @@ async fn client_prefs_empty_then_write_with_auth() {
     let req = json_with_token(
         "PUT",
         "/api/settings/client",
-        json!({"theme": "dark", "pet.size": 360, "system.closeToTray": true}),
+        json!({"theme.activeId": "dark", "ui.zoomFactor": 1.25, "system.closeToTray": true}),
         &token,
         &csrf,
     );
@@ -99,11 +99,17 @@ async fn client_prefs_empty_then_write_with_auth() {
         .await
         .unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["theme"], "dark");
-    assert_eq!(json["data"]["pet.size"], 360);
+    assert_eq!(json["data"]["theme.activeId"], "dark");
+    assert_eq!(json["data"]["ui.zoomFactor"], 1.25);
     assert_eq!(json["data"]["system.closeToTray"], true);
 
-    let req = json_with_token("PUT", "/api/settings/client", json!({"theme": null}), &token, &csrf);
+    let req = json_with_token(
+        "PUT",
+        "/api/settings/client",
+        json!({"theme.activeId": null}),
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -112,8 +118,8 @@ async fn client_prefs_empty_then_write_with_auth() {
         .await
         .unwrap();
     let json = body_json(resp).await;
-    assert!(json["data"].get("theme").is_none());
-    assert_eq!(json["data"]["pet.size"], 360);
+    assert!(json["data"].get("theme.activeId").is_none());
+    assert_eq!(json["data"]["ui.zoomFactor"], 1.25);
 }
 
 #[tokio::test]

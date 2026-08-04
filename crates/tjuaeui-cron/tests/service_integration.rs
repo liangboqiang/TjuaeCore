@@ -532,7 +532,6 @@ impl IConversationRepository for StubConvRepo {
             resolved_thought_level_value: params.resolved_thought_level_value.map(ToOwned::to_owned),
             default_skills_mode: params.default_skills_mode.to_owned(),
             resolved_skill_ids: params.resolved_skill_ids.to_owned(),
-            resolved_disabled_builtin_skill_ids: params.resolved_disabled_builtin_skill_ids.to_owned(),
             default_mcps_mode: params.default_mcps_mode.to_owned(),
             resolved_mcp_ids: params.resolved_mcp_ids.to_owned(),
             created_at: now,
@@ -797,10 +796,6 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
     struct StubSkillResolver;
     #[async_trait::async_trait]
     impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
         async fn resolve_skills(
             &self,
             _names: &[String],
@@ -853,6 +848,7 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
         agent_metadata_repo: agent_metadata_repo.clone(),
         assistant_definition_repo: assistant_definition_repo.clone(),
         assistant_overlay_repo: assistant_overlay_repo.clone(),
+        runtime_asset_catalog: None,
         scheduler,
         executor,
         emitter,
@@ -899,10 +895,6 @@ async fn setup_with_assistant_repos() -> (
     struct StubSkillResolver;
     #[async_trait::async_trait]
     impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
         async fn resolve_skills(
             &self,
             _names: &[String],
@@ -954,6 +946,7 @@ async fn setup_with_assistant_repos() -> (
         agent_metadata_repo,
         assistant_definition_repo: assistant_definition_repo.clone(),
         assistant_overlay_repo: assistant_overlay_repo.clone(),
+        runtime_asset_catalog: None,
         scheduler,
         executor,
         emitter,
@@ -1038,7 +1031,6 @@ async fn seed_assistant_definition(
         default_skills_mode: "auto",
         default_skill_ids: "[]",
         custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
         default_mcps_mode: "auto",
         default_mcp_ids: "[]",
     })

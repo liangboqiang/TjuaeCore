@@ -9,8 +9,8 @@ use axum::routing::{delete, get, post};
 use tjuaeui_api_types::{
     ApiResponse, ClientPreferencesResponse, CreateProviderRequest, DetectProtocolRequest, EnsureNodeRuntimeRequest,
     EnsureNodeRuntimeResponse, FeedbackDiagnosticsQuery, FeedbackDiagnosticsResponse, FetchModelsAnonymousRequest,
-    FetchModelsRequest, FetchModelsResponse, ProtocolDetectionResponse, ProviderResponse, SystemInfoResponse,
-    SystemSettingsResponse, UpdateCheckRequest, UpdateCheckResult, UpdateClientPreferencesRequest,
+    FetchModelsRequest, FetchModelsResponse, NetworkProxyStatusResponse, ProtocolDetectionResponse, ProviderResponse,
+    SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest, UpdateCheckResult, UpdateClientPreferencesRequest,
     UpdateProviderRequest, UpdateSettingsRequest,
 };
 use tjuaeui_auth::CurrentUser;
@@ -60,6 +60,7 @@ impl From<SystemError> for ApiError {
 /// Endpoints:
 /// - `GET  /api/settings`                    — get all backend settings
 /// - `PATCH /api/settings`                   — partial update backend settings
+/// - `GET  /api/settings/network-proxy/status` — get effective proxy status
 /// - `GET  /api/settings/client`             — get client preferences
 /// - `PUT  /api/settings/client`             — batch update client preferences
 /// - `GET  /api/providers`                   — list all providers
@@ -76,6 +77,7 @@ impl From<SystemError> for ApiError {
 pub fn system_routes(state: SystemRouterState) -> Router {
     Router::new()
         .route("/api/settings", get(get_settings).patch(update_settings))
+        .route("/api/settings/network-proxy/status", get(get_network_proxy_status))
         .route(
             "/api/settings/client",
             get(get_client_preferences).put(update_client_preferences),
@@ -109,6 +111,12 @@ async fn get_settings(
 ) -> Result<Json<ApiResponse<SystemSettingsResponse>>, ApiError> {
     let settings = state.settings_service.get_settings().await.map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(settings)))
+}
+
+async fn get_network_proxy_status(
+    State(state): State<SystemRouterState>,
+) -> Json<ApiResponse<NetworkProxyStatusResponse>> {
+    Json(ApiResponse::ok(state.settings_service.network_proxy_status()))
 }
 
 async fn get_feedback_diagnostics(

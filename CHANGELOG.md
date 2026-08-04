@@ -2,6 +2,17 @@
 
 TjuaeCore 的重要变更都会记录在本文件中。
 
+## 0.3.0 - 2026-08-04
+
+- 建立 Core 本地资产库与 Hub 远程资产库分离的双资源库模型。
+- 完成 assistant、engineAdapter、skill、mcp 四类 Definition、typed Overlay、加密凭据、
+  Tracking/Base、事务投影、运行绑定和 Trace。
+- 资产安装、同步、发布和 GitHub Device Flow 全部通过 Core REST 实现，应用运行时不依赖
+  `gh` 或本机 `git`。
+- 删除第三方 CLI 托管、下载与安装能力；引擎适配器只检测并连接用户已安装的命令。
+- 官方助手与技能迁移到 TjuaeHub；缺网时只回退到经过固定提交校验的离线种子。
+- 临时会话目录使用逐目录单次信任注入，通知使用稳定错误码并由 UI 本地化。
+
 ## 0.2.0 - 2026-07-27
 
 - 建立 TjuaeCore 产品身份与仓库契约。

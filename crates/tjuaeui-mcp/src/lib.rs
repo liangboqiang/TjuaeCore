@@ -1,11 +1,10 @@
 #![warn(clippy::disallowed_types)]
 
-//! MCP server configuration, multi-agent sync adapters, OAuth, and connection testing.
+//! MCP 运行投影查询、多智能体同步适配与连接试跑。
 pub mod adapter;
 pub mod adapters;
 pub mod connection_test;
 pub mod error;
-pub mod oauth_service;
 pub mod routes;
 pub mod service;
 pub mod session_injection;
@@ -19,7 +18,6 @@ pub use adapters::{
 };
 pub use connection_test::McpConnectionTestService;
 pub use error::McpError;
-pub use oauth_service::McpOAuthService;
 pub use routes::{McpRouterState, mcp_routes};
 pub use service::McpConfigService;
 pub use session_injection::{

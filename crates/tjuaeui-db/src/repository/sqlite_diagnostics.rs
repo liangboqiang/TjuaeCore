@@ -483,7 +483,7 @@ impl SqliteFeedbackDiagnosticsRepository {
                 cas.default_model_mode, cas.resolved_model_id, \
                 cas.default_permission_mode, cas.resolved_permission_value, \
                 cas.default_thought_level_mode, cas.resolved_thought_level_value, \
-                cas.default_skills_mode, cas.resolved_skill_ids, cas.resolved_disabled_builtin_skill_ids, \
+                cas.default_skills_mode, cas.resolved_skill_ids, \
                 cas.default_mcps_mode, cas.resolved_mcp_ids, \
                 length(cas.rules_content) AS rules_content_bytes, cas.created_at, cas.updated_at \
              FROM conversation_assistant_snapshots cas \
@@ -512,7 +512,6 @@ impl SqliteFeedbackDiagnosticsRepository {
             "resolved_thought_level_value": row.try_get::<Option<String>, _>("resolved_thought_level_value")?,
             "default_skills_mode": row.try_get::<String, _>("default_skills_mode")?,
             "resolved_skill_count": json_array_count(Some(&row.try_get::<String, _>("resolved_skill_ids")?)),
-            "resolved_disabled_builtin_skill_count": json_array_count(Some(&row.try_get::<String, _>("resolved_disabled_builtin_skill_ids")?)),
             "default_mcps_mode": row.try_get::<String, _>("default_mcps_mode")?,
             "resolved_mcp_count": json_array_count(Some(&row.try_get::<String, _>("resolved_mcp_ids")?)),
             "rules_content_bytes": row.try_get::<Option<i64>, _>("rules_content_bytes")?,

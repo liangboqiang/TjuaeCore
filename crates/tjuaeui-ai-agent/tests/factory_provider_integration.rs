@@ -12,8 +12,8 @@ use tjuaeui_ai_agent::types::BuildTaskOptions;
 use tjuaeui_api_types::TjuaeCliBuildExtra;
 use tjuaeui_common::{AgentType, ProviderWithModel, encrypt_string};
 use tjuaeui_db::{
-    CreateProviderParams, IAcpSessionRepository, IProviderRepository, SqliteAcpSessionRepository,
-    SqliteAgentMetadataRepository, SqliteProviderRepository, init_database_memory,
+    CreateProviderParams, IA2aRepository, IAcpSessionRepository, IProviderRepository, SqliteA2aRepository,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteProviderRepository, init_database_memory,
 };
 use tjuaeui_realtime::BroadcastEventBus;
 
@@ -25,6 +25,7 @@ async fn setup() -> (
     Arc<dyn IProviderRepository>,
     Arc<AgentRegistry>,
     Arc<AcpSessionSyncService>,
+    Arc<dyn IA2aRepository>,
 ) {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
@@ -32,9 +33,10 @@ async fn setup() -> (
     let metadata_repo = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
     let registry = AgentRegistry::new(metadata_repo);
     registry.hydrate().await.unwrap();
-    let session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
+    let session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool.clone()));
     let acp_agent_service = AcpSessionSyncService::new(session_repo);
-    (provider_repo, registry, acp_agent_service)
+    let a2a_repo: Arc<dyn IA2aRepository> = Arc::new(SqliteA2aRepository::new(pool));
+    (provider_repo, registry, acp_agent_service, a2a_repo)
 }
 
 async fn insert_test_provider(repo: &dyn IProviderRepository, id: &str, platform: &str) {
@@ -65,9 +67,10 @@ fn make_factory(
     provider_repo: Arc<dyn IProviderRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
+    a2a_repo: Arc<dyn IA2aRepository>,
 ) -> tjuaeui_ai_agent::task_manager::AgentFactory {
     let tmp = tempfile::TempDir::new().unwrap();
-    let skill_paths = Arc::new(tjuaeui_extension::resolve_skill_paths(tmp.path(), tmp.path()));
+    let skill_paths = Arc::new(tjuaeui_asset::resolve_skill_paths(tmp.path(), tmp.path()));
     // These provider integration tests only build tjuae_cli tasks, which never touch
     // the session spawner. It just has to be constructable (the field is no longer
     // optional now that claude/codex always use the direct-CLI session path).
@@ -80,6 +83,7 @@ fn make_factory(
     build_agent_factory(AgentFactoryDeps {
         skill_manager: AcpSkillManager::new(skill_paths),
         provider_repo,
+        a2a_repo,
         encryption_key: test_encryption_key(),
         agent_registry,
         acp_agent_service,
@@ -88,6 +92,7 @@ fn make_factory(
         broadcaster: Arc::new(BroadcastEventBus::new(16)),
         backend_binary_path: Arc::new(PathBuf::from("/tmp/tjuaecli-test/tjuaecore")),
         mcp_server_repo: None,
+        runtime_asset_configuration_resolver: None,
         session_spawner,
     })
 }
@@ -112,6 +117,7 @@ fn make_tjuae_cli_options(
         },
         model,
         skills: vec![],
+        skill_roots: vec![],
         runtime_env: vec![],
         team: None,
         kind: AgentSessionKind::TjuaeCli(Box::new(TjuaeCliSessionBuildContext {
@@ -124,8 +130,8 @@ fn make_tjuae_cli_options(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tjuae_cli_factory_returns_error_for_missing_provider() {
-    let (provider_repo, agent_registry, acp_agent_service) = setup().await;
-    let factory = make_factory(provider_repo, agent_registry, acp_agent_service);
+    let (provider_repo, agent_registry, acp_agent_service, a2a_repo) = setup().await;
+    let factory = make_factory(provider_repo, agent_registry, acp_agent_service, a2a_repo);
 
     let options = make_tjuae_cli_options(
         "conv-test-1",
@@ -150,9 +156,9 @@ async fn tjuae_cli_factory_returns_error_for_missing_provider() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tjuae_cli_factory_resolves_provider_from_db() {
-    let (provider_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, agent_registry, acp_agent_service, a2a_repo) = setup().await;
     insert_test_provider(&*provider_repo, "prov-001", "openai").await;
-    let factory = make_factory(provider_repo, agent_registry, acp_agent_service);
+    let factory = make_factory(provider_repo, agent_registry, acp_agent_service, a2a_repo);
 
     let options = make_tjuae_cli_options(
         "conv-test-2",
@@ -171,9 +177,9 @@ async fn tjuae_cli_factory_resolves_provider_from_db() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tjuae_cli_factory_respects_use_model_override() {
-    let (provider_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, agent_registry, acp_agent_service, a2a_repo) = setup().await;
     insert_test_provider(&*provider_repo, "prov-002", "openai").await;
-    let factory = make_factory(provider_repo, agent_registry, acp_agent_service);
+    let factory = make_factory(provider_repo, agent_registry, acp_agent_service, a2a_repo);
 
     let options = make_tjuae_cli_options(
         "conv-test-3",

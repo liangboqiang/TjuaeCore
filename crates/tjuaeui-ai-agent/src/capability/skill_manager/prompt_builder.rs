@@ -180,8 +180,7 @@ mod tests {
             name: "review".into(),
             description: "Review".into(),
             location: PathBuf::new(),
-            source: tjuaeui_extension::SkillSource::Custom,
-            relative_location: None,
+            source: tjuaeui_asset::SkillSource::Managed,
             body: Some("Full review instructions here.".into()),
         }];
         let result = prepare_first_message("Hello", &skills, None);
@@ -222,8 +221,7 @@ mod tests {
             name: "helper".into(),
             description: "A helper".into(),
             location: PathBuf::new(),
-            source: tjuaeui_extension::SkillSource::Custom,
-            relative_location: None,
+            source: tjuaeui_asset::SkillSource::Managed,
             body: Some("Helper body content.".into()),
         }];
         let result = build_system_instructions("Base prompt", &skills);
@@ -257,8 +255,7 @@ mod tests {
             name: "unloaded".into(),
             description: "Not loaded".into(),
             location: PathBuf::new(),
-            source: tjuaeui_extension::SkillSource::Custom,
-            relative_location: None,
+            source: tjuaeui_asset::SkillSource::Managed,
             body: None,
         }];
         let result = build_system_instructions("Base", &skills);

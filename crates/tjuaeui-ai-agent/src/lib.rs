@@ -5,6 +5,7 @@ pub mod active_lease;
 pub(crate) mod agent_runtime;
 pub mod agent_task;
 pub mod capability;
+pub(crate) mod catalog;
 pub mod cc_switch;
 pub(crate) mod cli_probe;
 pub(crate) mod dev_prompt_dump;
@@ -21,6 +22,8 @@ pub(crate) mod persistence;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
+pub(crate) mod runtime_asset_jit;
+pub mod runtime_assets;
 pub(crate) mod runtime_status;
 pub mod runtime_token;
 pub(crate) mod services;
@@ -49,18 +52,26 @@ pub use persistence::AcpSessionSyncService;
 pub use protocol::error::AcpError;
 pub use protocol::events::AgentStreamEvent;
 pub use protocol::send_error::AgentSendError;
+pub use protocol::{probe_engine_adapter, probe_engine_adapter_in_directory};
 pub use registry::{AgentRegistry, UnavailableReason};
-pub use routes::{AgentRouterState, RemoteAgentRouterState, agent_routes, remote_agent_routes};
+pub use routes::{AgentRouterState, engine_routes};
+pub use runtime_assets::{
+    RuntimeAssetContractError, RuntimeAssetFailureReason, RuntimeAssetLoadReceipt, RuntimeAssetLoadRequest,
+    RuntimeAssetReceiptPort, RuntimeAssetRef, RuntimeBoundaryEvent, RuntimeBoundaryPhase, RuntimeBoundaryReporter,
+    RuntimeBoundaryStatus, RuntimeManagedMcpRef, RuntimeManagedSkillRef, core_only_runtime_asset_receipt,
+    deterministic_runtime_snapshot_id, digest_runtime_definition, digest_runtime_skill_tree,
+    handshake_runtime_asset_receipt, runtime_boundary_event_from_tjuae_cli, verify_runtime_asset_receipt,
+};
 pub use runtime_token::{
     RuntimeTokenClaims, RuntimeTokenError, RuntimeTokenIssue, RuntimeTokenScope, RuntimeTokenService,
     TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
 };
+pub use services::A2aAgentService;
 pub use services::AgentAvailabilityFeedbackPort;
 pub use services::AgentService;
-pub use services::RemoteAgentService;
 pub use session_context::{
-    AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, ConversationContext, TjuaeCliSessionBuildContext,
-    WorkspaceContext,
+    A2aSessionBuildContext, AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, ConversationContext,
+    TjuaeCliSessionBuildContext, WorkspaceContext,
 };
 pub use task_manager::{IWorkerTaskManager, WorkerTaskManagerImpl};
 pub use tjuaeui_api_types::{AcpBuildExtra, AcpModelInfo, SlashCommandItem, TjuaeCliBuildExtra};

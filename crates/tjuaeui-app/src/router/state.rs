@@ -4,43 +4,41 @@
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tjuaeui_ai_agent::{AgentRouterState, AgentService, RemoteAgentRouterState, RemoteAgentService};
-use tjuaeui_assistant::{
-    AssistantAgentCatalogPort, AssistantError, AssistantRouterState, AssistantService, BuiltinAssistantRegistry,
+use tjuaeui_ai_agent::{A2aAgentService, AgentRegistry, AgentRouterState, AgentService};
+use tjuaeui_asset::{
+    AssistantRuleDispatcher, DisabledHubAssetPort, GitHubRestPublishProvider, HubAssetService, HubRouterState,
+    SkillRouterState,
 };
+use tjuaeui_assistant::{AssistantAgentCatalogPort, AssistantError, AssistantRouterState, AssistantService};
 use tjuaeui_auth::extract_token_from_ws_headers;
 use tjuaeui_channel::ChannelRouterState;
 use tjuaeui_conversation::{ConversationRouterState, ConversationService};
 use tjuaeui_cron::{CronEventEmitter, CronRouterState, service::CronServiceDeps};
 use tjuaeui_db::{
     IAcpSessionRepository, IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-    IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository, IConversationRepository,
-    IProviderRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
-    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository,
-    SqliteAssistantPreferenceRepository, SqliteAssistantRepository, SqliteClientPreferenceRepository,
-    SqliteConversationRepository, SqliteFeedbackDiagnosticsRepository, SqliteProviderRepository,
-    SqliteRemoteAgentRepository, SqliteSettingsRepository,
+    IAssistantPreferenceRepository, IConversationRepository, IProviderRepository, SqliteA2aRepository,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
+    SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository, SqliteClientPreferenceRepository,
+    SqliteConversationRepository, SqliteFeedbackDiagnosticsRepository, SqliteGithubPublishCredentialRepository,
+    SqliteGithubPublishOperationRepository, SqliteProviderRepository,
 };
 use tjuaeui_extension::{
-    AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
-    HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
-    resolve_scan_paths_for_data_dir, resolve_state_file_path,
+    ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, resolve_scan_paths_for_data_dir,
+    resolve_state_file_path,
 };
 use tjuaeui_file::{BrowseRoots, FileRouterState, FileService, FileWatchService, SnapshotService};
 use tjuaeui_mcp::{
-    ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService,
-    McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter, TjuaeCliAdapter,
-    TjuaeUIAdapter,
+    ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService, McpRouterState,
+    McpSyncService, OpencodeAdapter, QwenAdapter, TjuaeCliAdapter, TjuaeUIAdapter,
 };
 use tjuaeui_office::{ConversionService, OfficeRouterState, SnapshotService as OfficeSnapshotService};
 use tjuaeui_realtime::{NoopMessageRouter, WsHandlerState};
 use tjuaeui_shell::ShellRouterState;
 use tjuaeui_system::{
     ClientPrefService, ConnectionTestRouterState, ConnectionTestService, FeedbackDiagnosticsService, ModelFetchService,
-    ProtocolDetectionService, ProviderService, RuntimePrepareService, SettingsService, SystemRouterState,
-    VersionCheckService,
+    ProtocolDetectionService, ProviderService, RuntimePrepareService, SystemRouterState, VersionCheckService,
 };
 use tjuaeui_team::{
     AgentTurnCancellationPort, AgentTurnExecutionPort, TeamAssistantCatalogEntry, TeamAssistantCatalogPort,
@@ -48,6 +46,9 @@ use tjuaeui_team::{
 };
 
 use crate::config::derive_encryption_key;
+use crate::router::hub_assets::AppHubAssetPort;
+use crate::router::local_assets::LocalAssetRouterState;
+use crate::router::market_assets::MarketRouterState;
 use crate::router::team_conversation_adapters::TeamConversationAdapters;
 use crate::services::AppServices;
 
@@ -122,7 +123,6 @@ impl std::error::Error for RouterBuildError {
 pub struct ModuleStates {
     pub system: SystemRouterState,
     pub conversation: ConversationRouterState,
-    pub remote_agent: RemoteAgentRouterState,
     pub agent: AgentRouterState,
 
     pub connection_test: ConnectionTestRouterState,
@@ -137,6 +137,8 @@ pub struct ModuleStates {
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
     pub assistant: AssistantRouterState,
+    pub local_asset: LocalAssetRouterState,
+    pub market: MarketRouterState,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -193,7 +195,7 @@ pub async fn build_module_states(
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
-    let (ext_state, hub_state, mut skill_state) = build_extension_states(services).await;
+    let (ext_state, mut hub_state, mut skill_state) = build_extension_states(services).await;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: extension states built"
@@ -255,22 +257,60 @@ pub async fn build_module_states(
     let pool = services.database.pool().clone();
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
     let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
+    let a2a_service = Arc::new(
+        A2aAgentService::new(
+            Arc::new(SqliteA2aRepository::new(pool)),
+            services.agent_registry.clone(),
+            encryption_key,
+        )
+        .with_broadcaster(services.event_bus.clone()),
+    );
     let agent_service = AgentService::new(
         services.agent_registry.clone(),
+        a2a_service.clone(),
         services.event_bus.clone(),
         provider_repo,
         encryption_key,
         services.data_dir.clone(),
+        services.session_spawner.clone(),
     );
     services
         .conversation_service
         .with_agent_availability_feedback(agent_service.availability_feedback_port());
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: agent service built");
 
+    let agent = AgentRouterState {
+        agent_registry: services.agent_registry.clone(),
+        service: agent_service.clone(),
+        a2a_service,
+    };
+    let mcp = build_mcp_state(services);
+    let asset_port = Arc::new(AppHubAssetPort::new(services.asset_catalog.clone()));
+    let publish_provider = Arc::new(
+        GitHubRestPublishProvider::new(
+            Arc::new(SqliteGithubPublishCredentialRepository::new(
+                services.database.pool().clone(),
+            )),
+            Arc::new(SqliteGithubPublishOperationRepository::new(
+                services.database.pool().clone(),
+            )),
+            encryption_key,
+        )
+        .map_err(|error| {
+            RouterBuildError::new(
+                "router.hub.publish",
+                "failed to initialize GitHub REST publishing provider",
+            )
+            .with_source(error)
+        })?,
+    );
+    hub_state.asset_service = HubAssetService::new(asset_port).with_publish_provider(publish_provider);
+
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: module states bundle started"
     );
+    let market_manager = Arc::new(tjuaeui_asset::MarketIndexManager::new(&services.data_dir));
     let states = ModuleStates {
         system: build_module_state_phase(&boot, "system", || build_system_state(services)),
         conversation: build_module_state_phase(&boot, "conversation", || {
@@ -280,14 +320,10 @@ pub async fn build_module_states(
                 Some(assistant.service.clone() as Arc<dyn AssistantRuleDispatcher>),
             )
         }),
-        remote_agent: build_module_state_phase(&boot, "remote_agent", || build_remote_agent_state(services)),
-        agent: build_module_state_phase(&boot, "agent", || AgentRouterState {
-            agent_registry: services.agent_registry.clone(),
-            service: agent_service,
-        }),
+        agent: build_module_state_phase(&boot, "agent", || agent),
         connection_test: build_module_state_phase(&boot, "connection_test", build_connection_test_state),
         file: build_module_state_phase(&boot, "file", || build_file_state(services))?,
-        mcp: build_module_state_phase(&boot, "mcp", || build_mcp_state(services)),
+        mcp: build_module_state_phase(&boot, "mcp", || mcp),
         extension: ext_state,
         hub: hub_state,
         skill: skill_state,
@@ -304,6 +340,14 @@ pub async fn build_module_states(
         office: build_module_state_phase(&boot, "office", || build_office_state(services)),
         shell: build_module_state_phase(&boot, "shell", || build_shell_state(services)),
         assistant,
+        local_asset: LocalAssetRouterState {
+            service: services.asset_catalog.clone(),
+            market: market_manager.clone(),
+        },
+        market: MarketRouterState {
+            manager: market_manager,
+            catalog: services.asset_catalog.clone(),
+        },
     };
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
@@ -339,14 +383,10 @@ pub fn build_assistant_state(services: &AppServices) -> AssistantRouterState {
         Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
     let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
         Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
-    let repo: Arc<dyn IAssistantRepository> = Arc::new(SqliteAssistantRepository::new(pool.clone()));
-    let override_repo: Arc<dyn IAssistantOverrideRepository> =
-        Arc::new(SqliteAssistantOverrideRepository::new(pool.clone()));
     // Used by `AssistantService::resolve_default_agent_type` to infer a
     // working `agent_id` from the configured provider list when
     // the caller does not supply one (ELECTRON-1J1 / 1KV).
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let builtin = Arc::new(BuiltinAssistantRegistry::load());
     // Pin user_data_dir to the runtime-resolved data directory so dev /
     // packaged / multi-instance launches all keep their assistant rule files
     // alongside the matching SQLite database (avoiding the historical bug
@@ -358,13 +398,11 @@ pub fn build_assistant_state(services: &AppServices) -> AssistantRouterState {
             definition_repo,
             state_repo,
             preference_repo,
-            repo,
-            override_repo,
             provider_repo,
-            builtin,
             agent_catalog: Some(Arc::new(RegistryAssistantAgentCatalog {
                 registry: services.agent_registry.clone(),
             })),
+            runtime_asset_catalog: services.asset_catalog.clone(),
         },
         services.data_dir.clone(),
     ));
@@ -376,10 +414,10 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
     let pool = services.database.pool().clone();
     let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let http_client = reqwest::Client::new();
+    let http_client = proxy_aware_http_client();
 
     SystemRouterState {
-        settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone()))),
+        settings_service: services.settings_service.clone(),
         client_pref_service: ClientPrefService::with_keep_awake_controller(
             Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
             Arc::new(tjuaeui_system::SystemKeepAwakeController::new()),
@@ -393,6 +431,11 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
             SqliteFeedbackDiagnosticsRepository::new(pool),
         )),
     }
+}
+
+fn proxy_aware_http_client() -> reqwest::Client {
+    tjuaeui_runtime::build_http_client(Duration::from_secs(10), Duration::from_secs(120))
+        .expect("统一代理 HTTP 客户端必须能够初始化")
 }
 
 /// Build the default `ConversationRouterState` from application services.
@@ -415,20 +458,10 @@ pub fn build_conversation_state(
     }
 }
 
-/// Build the default `RemoteAgentRouterState` from application services.
-pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterState {
-    let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
-    let pool = services.database.pool().clone();
-    let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
-    RemoteAgentRouterState {
-        service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
-    }
-}
-
 /// Build the default `ConnectionTestRouterState`.
 pub fn build_connection_test_state() -> ConnectionTestRouterState {
     ConnectionTestRouterState {
-        service: ConnectionTestService::new(reqwest::Client::new()),
+        service: ConnectionTestService::new(proxy_aware_http_client()),
     }
 }
 
@@ -469,22 +502,54 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
         Arc::new(TjuaeUIAdapter::new(repo.clone())),
     ];
 
-    let oauth_token_repo: Arc<dyn tjuaeui_db::IOAuthTokenRepository> = Arc::new(
-        tjuaeui_db::SqliteOAuthTokenRepository::new(services.database.pool().clone()),
-    );
-    let http_client = reqwest::Client::new();
-
     McpRouterState {
         config_service: McpConfigService::new(repo.clone()),
         sync_service: McpSyncService::new(repo, adapters),
-        connection_test_service: McpConnectionTestService::new(http_client.clone(), services.event_bus.clone()),
-        oauth_service: tjuaeui_mcp::McpOAuthService::new(oauth_token_repo, http_client),
     }
 }
 
-fn build_channel_settings_service(
+async fn build_channel_settings_service(
     services: &AppServices,
 ) -> Arc<tjuaeui_channel::channel_settings::ChannelSettingsService> {
+    use tjuaeui_api_types::AssetKind;
+    use tjuaeui_channel::channel_settings::{ChannelAssistantCatalogBinding, ChannelAssistantCatalogPort};
+
+    struct ActiveChannelAssistantCatalog {
+        asset_catalog: Arc<tjuaeui_asset::AssetCatalogService>,
+        user_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelAssistantCatalogPort for ActiveChannelAssistantCatalog {
+        async fn list_active_assistants(
+            &self,
+        ) -> Result<Vec<ChannelAssistantCatalogBinding>, tjuaeui_channel::error::ChannelError> {
+            self.asset_catalog
+                .list_active_runtime_bindings(&self.user_id, AssetKind::Assistant)
+                .await
+                .map(|bindings| {
+                    bindings
+                        .into_iter()
+                        .map(|binding| ChannelAssistantCatalogBinding {
+                            assistant_id: binding.provenance.local_asset_id,
+                            projection_runtime_id: binding.projection_runtime_id,
+                        })
+                        .collect()
+                })
+                .map_err(|error| {
+                    tjuaeui_channel::error::ChannelError::InvalidConfig(format!("当前用户的助手目录不可用：{error}"))
+                })
+        }
+    }
+
+    let user_id = services
+        .user_repo
+        .get_primary_webui_user()
+        .await
+        .ok()
+        .flatten()
+        .map(|user| user.id)
+        .unwrap_or_else(|| "system_default_user".to_owned());
     let pref_repo: Arc<dyn tjuaeui_db::IClientPreferenceRepository> =
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone()));
 
@@ -498,7 +563,11 @@ fn build_channel_settings_service(
                     services.database.pool().clone(),
                 )),
                 Arc::new(SqliteAssistantOverlayRepository::new(services.database.pool().clone())),
-            ),
+            )
+            .with_assistant_catalog(Arc::new(ActiveChannelAssistantCatalog {
+                asset_catalog: services.asset_catalog.clone(),
+                user_id,
+            })),
     )
 }
 
@@ -554,7 +623,7 @@ pub async fn build_channel_state(
         Arc::new(Box::new(tjuaeui_channel::plugins::create_plugin));
 
     // Build channel settings service for per-plugin agent/model configuration.
-    let channel_settings = build_channel_settings_service(services);
+    let channel_settings = build_channel_settings_service(services).await;
 
     // Build orchestrator dependencies
     let action_executor = Arc::new(tjuaeui_channel::action::ActionExecutor::new(
@@ -602,43 +671,129 @@ pub fn build_team_state(
     services: &AppServices,
     _cron_service: Option<Arc<tjuaeui_cron::service::CronService>>,
     backend_binary_path: Arc<std::path::PathBuf>,
-    assistant_service: Arc<AssistantService>,
+    _assistant_service: Arc<AssistantService>,
 ) -> TeamRouterState {
     #[derive(Clone)]
-    struct AssistantServiceTeamCatalog {
-        assistant_service: Arc<AssistantService>,
+    struct ActiveAssetTeamCatalog {
+        asset_catalog: Arc<tjuaeui_asset::AssetCatalogService>,
+        assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
+        assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
+        agent_registry: Arc<AgentRegistry>,
     }
 
     #[async_trait::async_trait]
-    impl TeamAssistantCatalogPort for AssistantServiceTeamCatalog {
+    impl TeamAssistantCatalogPort for ActiveAssetTeamCatalog {
         async fn list_team_selectable_assistants(
             &self,
+            user_id: &str,
         ) -> Result<Vec<TeamAssistantCatalogEntry>, tjuaeui_team::TeamError> {
-            let assistants = self.assistant_service.list().await.map_err(|error| {
-                tjuaeui_team::TeamError::InvalidRequest(format!("assistant catalog unavailable: {error}"))
-            })?;
+            use std::collections::{HashMap, HashSet};
+            use tjuaeui_api_types::{AgentSource, AssetKind};
 
-            Ok(assistants
+            let assistants = self
+                .asset_catalog
+                .list_active_runtime_bindings(user_id, AssetKind::Assistant)
+                .await
+                .map_err(|error| {
+                    tjuaeui_team::TeamError::InvalidRequest(format!("当前用户的助手目录不可用：{error}"))
+                })?;
+            let engine_projection_ids = self
+                .asset_catalog
+                .list_active_runtime_bindings(user_id, AssetKind::EngineAdapter)
+                .await
+                .map_err(|error| tjuaeui_team::TeamError::InvalidRequest(format!("当前用户的引擎目录不可用：{error}")))?
                 .into_iter()
-                .filter(|assistant| assistant.team_selectable)
-                .filter_map(|assistant| {
-                    let agent = assistant.agent?;
-                    let backend = agent
-                        .acp_backend
-                        .unwrap_or_else(|| agent.r#type.serde_name().to_owned());
-                    Some(TeamAssistantCatalogEntry {
-                        assistant_id: assistant.id,
-                        name: assistant.name,
-                        backend,
-                        description: assistant.description.unwrap_or_default(),
-                        skills: assistant
-                            .enabled_skills
-                            .into_iter()
-                            .chain(assistant.custom_skill_names)
-                            .collect(),
-                    })
-                })
-                .collect())
+                .map(|binding| binding.projection_runtime_id)
+                .collect::<HashSet<_>>();
+            let skill_ids_by_projection = self
+                .asset_catalog
+                .list_active_runtime_bindings(user_id, AssetKind::Skill)
+                .await
+                .map_err(|error| tjuaeui_team::TeamError::InvalidRequest(format!("当前用户的技能目录不可用：{error}")))?
+                .into_iter()
+                .map(|binding| (binding.projection_runtime_id, binding.provenance.local_asset_id))
+                .collect::<HashMap<_, _>>();
+
+            let mut result = Vec::with_capacity(assistants.len());
+            for binding in assistants {
+                let projection_id = binding.projection_runtime_id;
+                let definition = self
+                    .assistant_definition_repo
+                    .get_by_assistant_id(&projection_id)
+                    .await
+                    .map_err(|error| tjuaeui_team::TeamError::InvalidRequest(format!("助手内部投影读取失败：{error}")))?
+                    .ok_or_else(|| {
+                        tjuaeui_team::TeamError::InvalidRequest(
+                            "助手 active Binding 缺少内部运行投影，已拒绝使用".to_owned(),
+                        )
+                    })?;
+                let source_projection = definition
+                    .source_ref
+                    .as_deref()
+                    .and_then(|source| source.strip_prefix("asset:").or_else(|| source.strip_prefix("market:")))
+                    .filter(|source| *source == projection_id)
+                    .ok_or_else(|| {
+                        tjuaeui_team::TeamError::InvalidRequest(
+                            "助手内部投影与 active Binding 不一致，已拒绝使用".to_owned(),
+                        )
+                    })?;
+                debug_assert_eq!(source_projection, projection_id);
+
+                let overlay = self.assistant_overlay_repo.get(&definition.id).await.map_err(|error| {
+                    tjuaeui_team::TeamError::InvalidRequest(format!("助手运行配置读取失败：{error}"))
+                })?;
+                if overlay.as_ref().is_some_and(|row| !row.enabled) {
+                    continue;
+                }
+                let engine_id = overlay
+                    .as_ref()
+                    .and_then(|row| row.agent_id_override.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(definition.agent_id.as_str());
+                let engine_is_user_asset = tjuaeui_asset::is_projection_runtime_id(engine_id);
+                if engine_is_user_asset && !engine_projection_ids.contains(engine_id) {
+                    return Err(tjuaeui_team::TeamError::InvalidRequest(
+                        "助手引用的用户引擎没有当前用户 active Binding，已拒绝使用".to_owned(),
+                    ));
+                }
+                let engine = self.agent_registry.get(engine_id).await.ok_or_else(|| {
+                    tjuaeui_team::TeamError::InvalidRequest("助手引用的引擎内部投影不存在，已拒绝使用".to_owned())
+                })?;
+                if !engine_is_user_asset && !matches!(engine.agent_source, AgentSource::Internal | AgentSource::Builtin)
+                {
+                    return Err(tjuaeui_team::TeamError::InvalidRequest(
+                        "助手引用了未绑定的非系统引擎，已拒绝使用".to_owned(),
+                    ));
+                }
+                if !engine.enabled || !engine.team_capable {
+                    continue;
+                }
+
+                let mut skills = serde_json::from_str::<Vec<String>>(&definition.default_skill_ids).unwrap_or_default();
+                skills.extend(serde_json::from_str::<Vec<String>>(&definition.custom_skill_names).unwrap_or_default());
+                skills = skills
+                    .into_iter()
+                    .filter_map(|projection| skill_ids_by_projection.get(&projection).cloned())
+                    .collect();
+                skills.sort();
+                skills.dedup();
+
+                result.push(TeamAssistantCatalogEntry {
+                    assistant_id: binding.provenance.local_asset_id,
+                    name: definition.name,
+                    backend: engine
+                        .backend
+                        .unwrap_or_else(|| engine.agent_type.serde_name().to_owned()),
+                    description: definition.description.unwrap_or_default(),
+                    skills,
+                    default_model: (definition.default_model_mode == "fixed")
+                        .then_some(definition.default_model_value)
+                        .flatten(),
+                });
+            }
+            result.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(result)
         }
     }
 
@@ -658,11 +813,17 @@ pub fn build_team_state(
     let service = TeamSessionService::new_with_prompt_dump(
         team_repo,
         Arc::new(SqliteAgentMetadataRepository::new(services.database.pool().clone())),
-        Arc::new(AssistantServiceTeamCatalog { assistant_service }),
+        Arc::new(ActiveAssetTeamCatalog {
+            asset_catalog: services.asset_catalog.clone(),
+            assistant_definition_repo: Arc::new(SqliteAssistantDefinitionRepository::new(
+                services.database.pool().clone(),
+            )),
+            assistant_overlay_repo: Arc::new(SqliteAssistantOverlayRepository::new(services.database.pool().clone())),
+            agent_registry: services.agent_registry.clone(),
+        }),
         Arc::new(SqliteAssistantDefinitionRepository::new(
             services.database.pool().clone(),
         )),
-        Arc::new(SqliteAssistantOverlayRepository::new(services.database.pool().clone())),
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         conversation_port,
         projection_store,
@@ -693,6 +854,7 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
         services.skill_repo.clone(),
+        services.asset_catalog.clone(),
     ));
     let conv_service = ConversationService::new(
         services.work_dir.clone(),
@@ -708,6 +870,7 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
     conv_service.with_mcp_server_repo(Arc::new(tjuaeui_db::SqliteMcpServerRepository::new(
         services.database.pool().clone(),
     )));
+    conv_service.with_runtime_asset_catalog(services.asset_catalog.clone());
     conv_service.with_assistant_definition_repo(Arc::new(SqliteAssistantDefinitionRepository::new(
         services.database.pool().clone(),
     )));
@@ -718,6 +881,9 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
         services.database.pool().clone(),
     )));
     conv_service.with_project_service(Arc::new(services.project_service.clone()));
+    conv_service.with_trace_repository(Arc::new(tjuaeui_db::SqliteConversationTraceRepository::new(
+        services.database.pool().clone(),
+    )));
 
     let executor = Arc::new(tjuaeui_cron::executor::JobExecutor::new(
         services.worker_task_manager.clone(),
@@ -752,6 +918,7 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
         agent_metadata_repo,
         assistant_definition_repo,
         assistant_overlay_repo,
+        runtime_asset_catalog: Some(services.asset_catalog.clone()),
         scheduler,
         executor,
         emitter,
@@ -791,7 +958,7 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
         shell_service: Arc::new(tjuaeui_shell::ShellService::new(Arc::new(
             tjuaeui_shell::DefaultSystemOpener,
         ))),
-        stt_service: Arc::new(tjuaeui_shell::SttService::new(reqwest::Client::new())),
+        stt_service: Arc::new(tjuaeui_shell::SttService::new(proxy_aware_http_client())),
         client_pref_service,
     }
 }
@@ -811,25 +978,17 @@ pub async fn build_extension_states(
     let state_store = ExtensionStateStore::new(resolve_state_file_path(&skill_data_dir));
     let registry = ExtensionRegistry::new(state_store, services.event_bus.clone(), services.app_version.clone());
 
-    let hub_dir = resolve_install_target_dir_for_data_dir(&skill_data_dir);
-    let index_manager = HubIndexManager::new(hub_dir, registry.clone());
-    let installer = HubInstaller::new(index_manager.clone(), registry.clone());
-
-    let ext_paths_mgr = Arc::new(ExternalPathsManager::new(&skill_data_dir).await);
+    let asset_service = HubAssetService::new(Arc::new(DisabledHubAssetPort));
 
     let ext_state = ExtensionRouterState {
         registry: registry.clone(),
     };
 
-    let hub_state = HubRouterState {
-        index_manager,
-        installer,
-    };
+    let hub_state = HubRouterState { asset_service };
 
     let skill_state = SkillRouterState {
         skill_paths: services.skill_paths.as_ref().clone(),
-        skill_repo: services.skill_repo.clone(),
-        external_paths_manager: ext_paths_mgr,
+        asset_catalog: services.asset_catalog.clone(),
         assistant_dispatcher: None,
     };
 
@@ -885,13 +1044,15 @@ mod tests {
         AgentError, AgentInstance, AgentSendError, AgentStreamEvent, IAgentTask, IMockAgent, IWorkerTaskManager,
         WorkerTaskManagerImpl,
     };
-    use tjuaeui_api_types::{CreateConversationRequest, SendMessageRequest};
+    use tjuaeui_api_types::{
+        AssetKind, AssetRuntimeCommandRequest, CreateAssetRequest, CreateConversationRequest, SendMessageRequest,
+    };
     use tjuaeui_channel::types::PluginType;
     use tjuaeui_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs};
-    use tjuaeui_db::models::{AssistantSessionRow, UpsertAssistantDefinitionParams};
+    use tjuaeui_db::models::AssistantSessionRow;
     use tjuaeui_db::{
-        IAssistantDefinitionRepository, IClientPreferenceRepository, IConversationRepository,
-        SqliteAssistantDefinitionRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+        IClientPreferenceRepository, IConversationRepository, SqliteClientPreferenceRepository,
+        SqliteConversationRepository,
     };
     use tjuaeui_extension::{ExtensionSource, ScanPath};
 
@@ -989,39 +1150,6 @@ mod tests {
         .unwrap()
     }
 
-    fn channel_state_assistant_definition() -> UpsertAssistantDefinitionParams<'static> {
-        UpsertAssistantDefinitionParams {
-            id: "asstdef-channel-state-tjuaecli",
-            assistant_id: "bare-channel-tjuaecli",
-            source: "generated",
-            owner_type: "system",
-            source_ref: Some("bare-channel-tjuaecli"),
-            name: "Bare Channel TjuaeCLI",
-            name_i18n: "{}",
-            description: Some("Channel state regression assistant"),
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("A"),
-            agent_id: "632f31d2",
-            rule_resource_type: "user_file",
-            rule_resource_ref: None,
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        }
-    }
-
     #[tokio::test]
     async fn build_channel_message_service_uses_app_conversation_service_for_assistant_bindings() {
         let db = tjuaeui_db::init_database_memory().await.unwrap();
@@ -1030,12 +1158,49 @@ mod tests {
             .unwrap()
             .with_worker_task_manager(mock_worker_task_manager());
 
-        let pool = services.database.pool().clone();
-        let definition_repo = SqliteAssistantDefinitionRepository::new(pool.clone());
-        definition_repo
-            .upsert(&channel_state_assistant_definition())
+        let user_id = services
+            .user_repo
+            .get_primary_webui_user()
+            .await
+            .unwrap()
+            .expect("primary test user")
+            .id;
+        let created = services
+            .asset_catalog
+            .create(
+                &user_id,
+                CreateAssetRequest {
+                    id: "bare-channel-tjuaecli".to_owned(),
+                    kind: AssetKind::Assistant,
+                    display_name: "Bare Channel TjuaeCLI".to_owned(),
+                    description: Some("Channel state regression assistant".to_owned()),
+                    runtime_id: Some("bare-channel-tjuaecli".to_owned()),
+                },
+            )
             .await
             .unwrap();
+        let runtime_request = |idempotency_key: &str| AssetRuntimeCommandRequest {
+            idempotency_key: idempotency_key.to_owned(),
+            expected_definition_digest: created.asset.definition_digest.clone(),
+            expected_overlay_version: None,
+        };
+        services
+            .asset_catalog
+            .validate_runtime(&user_id, "bare-channel-tjuaecli", runtime_request("channel-validate"))
+            .await
+            .unwrap();
+        services
+            .asset_catalog
+            .try_run(&user_id, "bare-channel-tjuaecli", runtime_request("channel-try-run"))
+            .await
+            .unwrap();
+        services
+            .asset_catalog
+            .activate(&user_id, "bare-channel-tjuaecli", runtime_request("channel-activate"))
+            .await
+            .unwrap();
+
+        let pool = services.database.pool().clone();
 
         let pref_repo = SqliteClientPreferenceRepository::new(pool.clone());
         pref_repo
@@ -1046,7 +1211,7 @@ mod tests {
             .await
             .unwrap();
 
-        let settings = build_channel_settings_service(&services);
+        let settings = build_channel_settings_service(&services).await;
         let message_service = build_channel_message_service(&services, settings).await;
         let session = AssistantSessionRow {
             id: "session-channel-state".to_owned(),

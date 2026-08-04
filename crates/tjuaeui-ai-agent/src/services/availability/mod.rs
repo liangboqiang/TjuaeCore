@@ -3,16 +3,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tjuaeui_api_types::{
-    AgentManagementRow, AgentMetadata, AgentSnapshotCheckKind, AgentSnapshotCheckStatus, AgentSource,
-    TryConnectCustomAgentResponse,
+    AgentHandshake, AgentManagementRow, AgentMetadata, AgentSnapshotCheckKind, AgentSnapshotCheckStatus, AgentSource,
 };
 use tjuaeui_common::AgentType;
 use tjuaeui_common::now_ms;
 use tjuaeui_db::{IProviderRepository, UpdateAgentAvailabilitySnapshotParams};
+use tjuaeui_process::Spawner;
 
 use crate::error::AgentError;
-use crate::protocol::custom_agent_probe;
+use crate::protocol::engine_adapter_probe;
 use crate::registry::{AgentRegistry, guidance_for_snapshot_error_code};
+use crate::services::direct_diagnostic::{DirectProbeFailure, probe_direct_session_catalog};
 
 #[async_trait::async_trait]
 pub trait AgentAvailabilityFeedbackPort: Send + Sync {
@@ -27,6 +28,7 @@ struct AvailabilitySnapshot {
     error_message: Option<String>,
     latency_ms: i64,
     checked_at: i64,
+    catalog: Option<AgentHandshake>,
 }
 
 #[derive(Clone)]
@@ -35,13 +37,19 @@ pub struct AgentAvailabilityService {
     // Used to decide tjuae_cli (built-in, no external CLI) availability: it is
     // usable only when at least one model provider is configured & enabled.
     provider_repo: Arc<dyn IProviderRepository>,
+    session_spawner: Arc<dyn Spawner>,
 }
 
 impl AgentAvailabilityService {
-    pub fn new(registry: Arc<AgentRegistry>, provider_repo: Arc<dyn IProviderRepository>) -> Self {
+    pub fn new(
+        registry: Arc<AgentRegistry>,
+        provider_repo: Arc<dyn IProviderRepository>,
+        session_spawner: Arc<dyn Spawner>,
+    ) -> Self {
         Self {
             registry,
             provider_repo,
+            session_spawner,
         }
     }
 
@@ -49,7 +57,11 @@ impl AgentAvailabilityService {
         self.registry.list_management_rows().await
     }
 
-    pub async fn run_manual_health_check(&self, id: &str) -> Result<AgentManagementRow, AgentError> {
+    pub async fn run_diagnostic(
+        &self,
+        id: &str,
+        kind: AgentSnapshotCheckKind,
+    ) -> Result<AgentManagementRow, AgentError> {
         let meta = self
             .registry
             .reload_one(id)
@@ -60,13 +72,10 @@ impl AgentAvailabilityService {
         // manual check is the user's self-rescue path. `run_probe` handles a
         // missing binary itself (persisted command_not_found snapshot), and a
         // success restores the agent.
-        let snapshot = run_probe(
-            &self.registry,
-            &self.provider_repo,
-            &meta,
-            AgentSnapshotCheckKind::Manual,
-        )
-        .await;
+        let snapshot = run_probe(&self.registry, &self.provider_repo, &self.session_spawner, &meta, kind).await;
+        if let Some(catalog) = snapshot.catalog.as_ref() {
+            self.registry.apply_diagnostic_catalog(id, catalog).await?;
+        }
         self.persist_snapshot(id, &snapshot).await?;
         self.management_row_by_id(id)
             .await
@@ -82,6 +91,7 @@ impl AgentAvailabilityService {
             error_message: Some(message.to_owned()),
             latency_ms: 0,
             checked_at,
+            catalog: None,
         };
         self.persist_snapshot(agent_id, &snapshot).await
     }
@@ -95,6 +105,7 @@ impl AgentAvailabilityService {
             error_message: None,
             latency_ms: 0,
             checked_at,
+            catalog: None,
         };
         self.persist_snapshot(agent_id, &snapshot).await
     }
@@ -147,25 +158,56 @@ impl AgentAvailabilityService {
 async fn run_probe(
     _registry: &Arc<AgentRegistry>,
     provider_repo: &Arc<dyn IProviderRepository>,
+    session_spawner: &Arc<dyn Spawner>,
     meta: &AgentMetadata,
     kind: AgentSnapshotCheckKind,
 ) -> AvailabilitySnapshot {
     let started_at = now_ms();
     let start = Instant::now();
 
-    let (status, error_code, error_message) = if meta.agent_source == AgentSource::Builtin
-        && matches!(meta.backend.as_deref(), Some("claude") | Some("codex"))
-    {
-        // Builtin claude/codex are direct CLIs that do not speak ACP, so
-        // their deep check is PATH + `--version` (integrity), never a
-        // session/new-style handshake (#675). Uses the wide recheck budget:
-        // the user is explicitly waiting and large Node CLIs load slowly.
+    let (status, error_code, error_message, catalog) = if !meta.enabled {
+        (
+            AgentSnapshotCheckStatus::Offline,
+            Some("disabled".to_owned()),
+            Some("Agent 已禁用".to_owned()),
+            None,
+        )
+    } else if !meta.available {
         match crate::cli_probe::validate_with_budget(meta, crate::cli_probe::CLI_VERSION_RECHECK_TIMEOUT).await {
-            Ok(_) => (AgentSnapshotCheckStatus::Online, None, None),
+            Ok(_) => (
+                AgentSnapshotCheckStatus::Offline,
+                Some("runtime_unavailable".to_owned()),
+                Some("Agent 命令可执行，但运行时目录仍不可用".to_owned()),
+                None,
+            ),
             Err(failure) => (
                 AgentSnapshotCheckStatus::Offline,
                 Some(failure.error_code().to_owned()),
                 Some(failure.detail()),
+                None,
+            ),
+        }
+    } else if meta.agent_source == AgentSource::Builtin
+        && matches!(meta.backend.as_deref(), Some("claude") | Some("codex"))
+    {
+        match crate::cli_probe::validate_with_budget(meta, crate::cli_probe::CLI_VERSION_RECHECK_TIMEOUT).await {
+            Ok(_) => match probe_direct_session_catalog(meta, session_spawner.clone()).await {
+                Ok(catalog) => (AgentSnapshotCheckStatus::Online, None, None, Some(catalog)),
+                Err(DirectProbeFailure::Catalog(message)) => (
+                    AgentSnapshotCheckStatus::Online,
+                    Some("catalog_load_failed".to_owned()),
+                    Some(message),
+                    None,
+                ),
+                Err(DirectProbeFailure::Connection { code, message }) => {
+                    (AgentSnapshotCheckStatus::Offline, Some(code), Some(message), None)
+                }
+            },
+            Err(failure) => (
+                AgentSnapshotCheckStatus::Offline,
+                Some(failure.error_code().to_owned()),
+                Some(failure.detail()),
+                None,
             ),
         }
     } else if let Some(command) = meta.command.as_deref() {
@@ -179,25 +221,31 @@ async fn run_probe(
                 AgentSnapshotCheckStatus::Offline,
                 Some("package_lock_invalid".to_owned()),
                 Some(error),
+                None,
             ),
-            Ok(args) => match custom_agent_probe::try_connect_custom_agent(command, &args, &env, None).await {
-                TryConnectCustomAgentResponse::Success => (AgentSnapshotCheckStatus::Online, None, None),
-                TryConnectCustomAgentResponse::FailCli { error } => (
+            Ok(args) => match engine_adapter_probe::probe_engine_adapter_detailed(command, &args, &env, None).await {
+                engine_adapter_probe::EngineAdapterProbeResult::Success { handshake } => {
+                    (AgentSnapshotCheckStatus::Online, None, None, Some(handshake))
+                }
+                engine_adapter_probe::EngineAdapterProbeResult::FailCli { error } => (
                     AgentSnapshotCheckStatus::Offline,
                     Some("command_not_found".to_owned()),
                     Some(error),
+                    None,
                 ),
-                TryConnectCustomAgentResponse::FailAcp { error } => (
+                engine_adapter_probe::EngineAdapterProbeResult::FailAcp { code, error } => (
                     AgentSnapshotCheckStatus::Offline,
-                    Some("acp_init_failed".to_owned()),
+                    Some(code.to_owned()),
                     Some(error),
+                    None,
                 ),
                 // Reachable but not authorized: still offline (unusable), but a
                 // dedicated code lets the UI guide the user to log in.
-                TryConnectCustomAgentResponse::FailAuth { error } => (
+                engine_adapter_probe::EngineAdapterProbeResult::FailAuth { error } => (
                     AgentSnapshotCheckStatus::Offline,
                     Some("auth_required".to_owned()),
                     Some(error),
+                    None,
                 ),
             },
         }
@@ -205,11 +253,12 @@ async fn run_probe(
         // Commandless builtin fallback: same PATH + `--version` treatment as
         // the direct CLIs — no PATH-only side door (#675).
         match crate::cli_probe::validate_with_budget(meta, crate::cli_probe::CLI_VERSION_RECHECK_TIMEOUT).await {
-            Ok(_) => (AgentSnapshotCheckStatus::Online, None, None),
+            Ok(_) => (AgentSnapshotCheckStatus::Online, None, None, None),
             Err(failure) => (
                 AgentSnapshotCheckStatus::Offline,
                 Some(failure.error_code().to_owned()),
                 Some(failure.detail()),
+                None,
             ),
         }
     } else if meta.agent_type == AgentType::TjuaeCli {
@@ -217,9 +266,10 @@ async fn run_probe(
         // so its usability hinges entirely on having a configured model. It is
         // online only when at least one model provider is enabled — otherwise
         // it cannot run a single turn.
-        probe_tjuae_cli_provider_readiness(provider_repo).await
+        let (status, code, message) = probe_tjuae_cli_provider_readiness(provider_repo).await;
+        (status, code, message, None)
     } else {
-        (AgentSnapshotCheckStatus::Online, None, None)
+        (AgentSnapshotCheckStatus::Online, None, None, None)
     };
 
     let latency_ms = start.elapsed().as_millis() as i64;
@@ -240,6 +290,7 @@ async fn run_probe(
         error_message,
         latency_ms,
         checked_at: started_at,
+        catalog,
     }
 }
 
@@ -301,10 +352,30 @@ mod tests {
         AgentSource, AgentSourceInfo, BehaviorPolicy,
     };
     use tjuaeui_common::AgentType;
+    use tjuaeui_common::CommandSpec;
     use tjuaeui_db::{
         CreateProviderParams, IAgentMetadataRepository, IProviderRepository, SqliteAgentMetadataRepository,
         SqliteProviderRepository, UpsertAgentMetadataParams, init_database_memory,
     };
+    use tjuaeui_process::{ManagedProcess, ProcessError, Spawner};
+
+    struct FailingSpawner;
+
+    #[async_trait::async_trait]
+    impl Spawner for FailingSpawner {
+        async fn spawn(
+            &self,
+            _spec: CommandSpec,
+            _extra_env: &[(String, String)],
+            _opaque_owner_tag: &str,
+        ) -> Result<Arc<ManagedProcess>, ProcessError> {
+            Err(ProcessError::internal("diagnostic test spawner"))
+        }
+    }
+
+    fn test_spawner() -> Arc<dyn Spawner> {
+        Arc::new(FailingSpawner)
+    }
 
     fn enabled_provider_params() -> CreateProviderParams<'static> {
         CreateProviderParams {
@@ -387,7 +458,7 @@ mod tests {
         registry.hydrate().await.unwrap();
 
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry.clone(), provider_repo);
+        let service = AgentAvailabilityService::new(registry.clone(), provider_repo, test_spawner());
         service
             .record_session_failure(
                 "agent-session-failure",
@@ -457,7 +528,7 @@ mod tests {
         registry.hydrate().await.unwrap();
 
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry.clone(), provider_repo);
+        let service = AgentAvailabilityService::new(registry.clone(), provider_repo, test_spawner());
         service
             .record_session_failure(
                 "agent-session-success",
@@ -508,6 +579,7 @@ mod tests {
                 binary_name: Some("definitely-missing-claude-cli".into()),
                 bridge_binary: Some("npx".into()),
                 hub_package_id: None,
+                tjuae_local_asset_id: None,
                 version: None,
             },
             enabled: true,
@@ -536,7 +608,14 @@ mod tests {
             env_override_key_count: 0,
         };
 
-        let snapshot = run_probe(&registry, &provider_repo, &meta, AgentSnapshotCheckKind::Manual).await;
+        let snapshot = run_probe(
+            &registry,
+            &provider_repo,
+            &test_spawner(),
+            &meta,
+            AgentSnapshotCheckKind::Manual,
+        )
+        .await;
 
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("command_not_found"));
@@ -558,7 +637,7 @@ mod tests {
         assert_eq!(explicit_probe_args(&pi).unwrap(), ["-y", "pi-acp@0.0.31"]);
     }
 
-    // ---- #675: manual health check runs --version for direct CLIs and is
+    // ---- #675: manual diagnostics run --version for direct CLIs and are
     // never short-circuited by a stale availability verdict ----
 
     #[cfg(unix)]
@@ -602,7 +681,7 @@ mod tests {
         }
     }
 
-    /// Manual health check on a direct-CLI builtin (claude/codex) must run
+    /// Manual diagnostics on a direct-CLI builtin (claude/codex) must run
     /// `--version` — a corrupted install on PATH is offline with the
     /// classified code, not online-by-PATH (#675).
     #[cfg(unix)]
@@ -624,9 +703,12 @@ mod tests {
         let registry = AgentRegistry::new(repo);
         registry.hydrate().await.unwrap();
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry, provider_repo);
+        let service = AgentAvailabilityService::new(registry, provider_repo, test_spawner());
 
-        let row = service.run_manual_health_check("agent-corrupted-claude").await.unwrap();
+        let row = service
+            .run_diagnostic("agent-corrupted-claude", AgentSnapshotCheckKind::Manual)
+            .await
+            .unwrap();
 
         assert_eq!(row.status, AgentManagementStatus::Offline);
         assert_eq!(row.last_check_status, Some(AgentSnapshotCheckStatus::Offline));
@@ -639,11 +721,11 @@ mod tests {
         );
     }
 
-    /// Manual health check on a healthy direct-CLI builtin stays online and
-    /// records the measured `--version` cost (#675).
+    /// A valid `--version` result is only preflight evidence. The direct CLI
+    /// remains offline when the real no-prompt session handshake cannot start.
     #[cfg(unix)]
     #[tokio::test]
-    async fn manual_check_confirms_healthy_direct_cli_online() {
+    async fn manual_check_requires_session_handshake_after_healthy_version() {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone()));
         let temp = tempfile::tempdir().unwrap();
@@ -656,16 +738,19 @@ mod tests {
         let registry = AgentRegistry::new(repo);
         registry.hydrate().await.unwrap();
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry, provider_repo);
+        let service = AgentAvailabilityService::new(registry, provider_repo, test_spawner());
 
-        let row = service.run_manual_health_check("agent-healthy-claude").await.unwrap();
+        let row = service
+            .run_diagnostic("agent-healthy-claude", AgentSnapshotCheckKind::Manual)
+            .await
+            .unwrap();
 
-        assert_eq!(row.status, AgentManagementStatus::Online);
+        assert_eq!(row.status, AgentManagementStatus::Offline);
         assert_eq!(row.last_check_kind, Some(AgentSnapshotCheckKind::Manual));
-        assert!(row.last_check_error_code.is_none());
+        assert_eq!(row.last_check_error_code.as_deref(), Some("process_start_failed"));
     }
 
-    /// Manual health check must reach its real probe even when the binary is
+    /// Manual diagnostics must reach the real probe even when the binary is
     /// missing entirely: the outcome is a persisted command_not_found manual
     /// snapshot, not a silent early return (#675).
     #[tokio::test]
@@ -709,9 +794,12 @@ mod tests {
         let registry = AgentRegistry::new(repo.clone());
         registry.hydrate().await.unwrap();
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry, provider_repo);
+        let service = AgentAvailabilityService::new(registry, provider_repo, test_spawner());
 
-        let row = service.run_manual_health_check("agent-missing-claude").await.unwrap();
+        let row = service
+            .run_diagnostic("agent-missing-claude", AgentSnapshotCheckKind::Manual)
+            .await
+            .unwrap();
 
         assert_eq!(row.last_check_kind, Some(AgentSnapshotCheckKind::Manual));
         assert_eq!(row.last_check_error_code.as_deref(), Some("command_not_found"));
@@ -777,7 +865,14 @@ mod tests {
             env_override_key_count: 0,
         };
 
-        let snapshot = run_probe(&registry, &provider_repo, &meta, AgentSnapshotCheckKind::Manual).await;
+        let snapshot = run_probe(
+            &registry,
+            &provider_repo,
+            &test_spawner(),
+            &meta,
+            AgentSnapshotCheckKind::Manual,
+        )
+        .await;
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("version_probe_failed"));
         assert!(
@@ -788,11 +883,11 @@ mod tests {
         );
     }
 
-    /// A previously-offline agent (stale probe verdict persisted) is restored
-    /// to online by a successful manual check — the self-rescue path (#675).
+    /// A stale offline verdict is replaced by the current deep-probe failure;
+    /// passing `--version` alone must never restore a direct agent to online.
     #[cfg(unix)]
     #[tokio::test]
-    async fn manual_check_restores_previously_offline_agent() {
+    async fn manual_check_replaces_stale_failure_with_current_session_failure() {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone()));
         let temp = tempfile::tempdir().unwrap();
@@ -821,14 +916,17 @@ mod tests {
         let registry = AgentRegistry::new(repo);
         registry.hydrate().await.unwrap();
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let service = AgentAvailabilityService::new(registry, provider_repo);
+        let service = AgentAvailabilityService::new(registry, provider_repo, test_spawner());
 
         let before = service.management_row_by_id("agent-restored-claude").await.unwrap();
         assert_eq!(before.status, AgentManagementStatus::Offline);
 
-        let row = service.run_manual_health_check("agent-restored-claude").await.unwrap();
-        assert_eq!(row.status, AgentManagementStatus::Online);
+        let row = service
+            .run_diagnostic("agent-restored-claude", AgentSnapshotCheckKind::Manual)
+            .await
+            .unwrap();
+        assert_eq!(row.status, AgentManagementStatus::Offline);
         assert_eq!(row.last_check_kind, Some(AgentSnapshotCheckKind::Manual));
-        assert!(row.last_check_error_code.is_none());
+        assert_eq!(row.last_check_error_code.as_deref(), Some("process_start_failed"));
     }
 }

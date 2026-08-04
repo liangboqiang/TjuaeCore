@@ -5,20 +5,20 @@
 
 ## 最高优先级规则
 
-### 不得猜测 Agent CLI 行为
+### 不得猜测智能体 CLI 行为
 
 不得根据 CLI 名称、经验或“看起来应该如此”来推断 `claude`、`codex`、
 `gemini`、`opencode`、`hermes`、`tjuae-cli` 等程序的协议、字段语义、时序、
 默认值或能力。相关结论必须明确引用以下至少一种一手证据：
 
 1. `~/tjuae/protocols/samples/` 中真实采集的协议流量。
-2. 本机 Cargo registry 中 `agent-client-protocol` 与
+2. 本机 Cargo 注册表中 `agent-client-protocol` 与
    `agent-client-protocol-schema` 的源码。
-3. 官方适配器或 CLI 自身生成的 Schema，例如
+3. 官方适配器或 CLI 自身生成的模式定义，例如
    `samples/codex-cli/<ver>/schema-full/`。
-4. CLI 自身的 `--help`、自描述 Schema，或从真实 CLI 录制并通过的集成夹具。
+4. CLI 自身的 `--help`、自描述模式定义，或从真实 CLI 录制并通过的集成夹具。
 
-若证据不足，必须写明“尚未验证，需要抓包或读取 Schema”，不得把推测写成
+若证据不足，必须写明“尚未验证，需要抓包或读取模式定义”，不得把推测写成
 事实。说明 CLI 行为时，应在同一段中标出证据路径。
 
 ### 未亲自核验，不得断言
@@ -46,8 +46,8 @@
 
 ## 架构
 
-Cargo workspace 分为 Foundation → Capability → Domain → Composition 四层，
-依赖只能向下流动。
+Cargo 工作区分为基础层（Foundation）→ 能力层（Capability）→ 领域层（Domain）→
+组装层（Composition）四层，依赖只能向下流动。
 
 - 上层可依赖下层。
 - 同层模块只能通过 trait 抽象协作。
@@ -58,7 +58,7 @@ Cargo workspace 分为 Foundation → Capability → Domain → Composition 四�
 ### 领域 crate 结构
 
 - `lib.rs`：只导出模块，不放业务逻辑。
-- `routes.rs`：导出 `domain_routes(state) -> Router`，Handler 只做请求与响应转换。
+- `routes.rs`：导出 `domain_routes(state) -> Router`，处理器只做请求与响应转换。
 - `service.rs`：业务逻辑唯一归属，不得导入 `axum`。
 - `state.rs`：定义 `#[derive(Clone)]` 的 RouterState，并用 `Arc` 持有依赖。
 
@@ -79,12 +79,12 @@ Cargo workspace 分为 Foundation → Capability → Domain → Composition 四�
 
 ### 数据层
 
-- Repository trait 位于 `tjuaeui-db`，以 `I` 开头。
+- 仓储 trait 位于 `tjuaeui-db`，以 `I` 开头。
 - SQLite 实现以 `Sqlite` 开头。
-- Row model 放在 `tjuaeui-db/src/models/`。
-- 参数对象与对应 repository 同文件。
-- Migration 命名为 `NNN_descriptive_name.sql`，不得手工修改数据库。
-- Service 依赖 trait，不直接依赖具体实现。
+- 行模型放在 `tjuaeui-db/src/models/`。
+- 参数对象与对应仓储同文件。
+- 数据库迁移命名为 `NNN_descriptive_name.sql`，不得手工修改数据库。
+- 服务依赖 trait，不直接依赖具体实现。
 
 ### 依赖注入
 
@@ -102,7 +102,7 @@ Cargo workspace 分为 Foundation → Capability → Domain → Composition 四�
 
 ## 代码风格
 
-- 使用 Rust 2024 edition 和 `rust-toolchain.toml` 固定的稳定工具链。
+- 使用 Rust 2024 版本和 `rust-toolchain.toml` 固定的稳定工具链。
 - 代码注释、提交说明和面向维护者的文档使用中文；协议字段、类型名和命令保持原样。
 - 每个 `.rs` 文件遵守单一职责。
 - 单个 `.rs` 文件建议少于 1000 行；超出时优先拆分模块，测试文件除外。
@@ -117,18 +117,18 @@ Cargo workspace 分为 Foundation → Capability → Domain → Composition 四�
 
 ### 推送
 
-必须使用 `just push`，不得直接执行 `git push`。该命令会先执行 Migration、
-Lint、格式和测试门禁，并透传普通 push 参数。
+必须使用 `just push`，不得直接执行 `git push`。该命令会先执行数据库迁移、
+代码检查、格式和测试门禁，并透传普通推送参数。
 
 ### 在现有领域新增接口
 
 1. 在 `tjuaeui-api-types/src/{domain}.rs` 定义请求和响应。
-2. 在 `crates/tjuaeui-{domain}/src/routes.rs` 添加 Handler。
+2. 在 `crates/tjuaeui-{domain}/src/routes.rs` 添加处理器。
 3. 在 `crates/tjuaeui-{domain}/src/service.rs` 实现业务逻辑。
 4. 在 `domain_routes()` 注册路由。
 5. 在领域 crate 或 `tjuaeui-app/tests/` 添加测试。
 
-### 新增 Migration
+### 新增数据库迁移
 
 1. 查看 `crates/tjuaeui-db/migrations/` 的最大编号。
 2. 创建 `NNN_descriptive_name.sql`。
@@ -137,7 +137,7 @@ Lint、格式和测试门禁，并透传普通 push 参数。
 ### 新增 WebSocket 事件
 
 1. 在 `tjuaeui-api-types` 定义事件类型。
-2. 在 Service 中通过 `event_bus.broadcast()` 发送。
+2. 在服务中通过 `event_bus.broadcast()` 发送。
 3. 名称遵守 `domain.camelCaseAction`。
 
 ## 测试
@@ -148,12 +148,12 @@ Lint、格式和测试门禁，并透传普通 push 参数。
 | `crates/<crate>/tests/` | 该 crate 的集成或端到端测试 |
 
 - 数据库测试使用 `init_database_memory()`。
-- 优先使用真实内存数据库；只有隔离无关依赖时才使用 Mock。
+- 优先使用真实内存数据库；只有隔离无关依赖时才使用模拟对象。
 - 新功能必须包含测试。
 
 ### 覆盖要求
 
-正常路径必须覆盖被修改功能的完整流程。认证、消息收发、Agent 会话、文件上传
+正常路径必须覆盖被修改功能的完整流程。认证、消息收发、智能体会话、文件上传
 下载和 WebSocket 事件属于必须覆盖的关键路径。
 
 错误路径至少包括：
@@ -201,7 +201,7 @@ cargo clippy -p tjuaeui-<crate1> -p tjuaeui-<crate2> -- -D warnings
 cargo test -p tjuaeui-<crate1> -p tjuaeui-<crate2>
 ```
 
-实现全部完成后再执行 `cargo test --workspace`。完整 workspace 的 Clippy 和测试
+实现全部完成后再执行 `cargo test --workspace`。完整工作区的 Clippy 和测试
 耗时较长，应在后台运行。推送前执行：
 
 ```bash

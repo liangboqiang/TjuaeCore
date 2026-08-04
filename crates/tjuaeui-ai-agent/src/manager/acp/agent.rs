@@ -13,6 +13,7 @@ use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::npx_cache_repair::CorruptNpxCacheRepair;
 use crate::protocol::send_error::AgentSendError;
 use crate::registry::CatalogSender;
+use crate::runtime_assets::RuntimeAssetLoadReceipt;
 use crate::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, SessionId as DomainSessionId};
 use crate::types::SendMessageData;
 use agent_client_protocol::schema::{
@@ -21,7 +22,7 @@ use agent_client_protocol::schema::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tjuaeui_api_types::{
     AgentHandshake, ConfigOptionConfirmation, GetConfigOptionsResponse, SetConfigOptionResponse,
@@ -508,6 +509,7 @@ pub struct AcpAgentManager {
 
     /// Mutex for serializing session operations (new/load/send).
     session_lock: Mutex<()>,
+    runtime_asset_receipt: OnceLock<RuntimeAssetLoadReceipt>,
 }
 
 impl AcpAgentManager {
@@ -596,12 +598,23 @@ impl AcpAgentManager {
             process,
             protocol,
             session_lock: Mutex::new(()),
+            runtime_asset_receipt: OnceLock::new(),
             permission_router,
             skill_manager,
             domain_event_tx,
             pipeline,
         };
         Ok((manager, domain_event_rx, notification_rx))
+    }
+
+    pub(crate) fn set_runtime_asset_receipt(&self, receipt: RuntimeAssetLoadReceipt) -> Result<(), AgentError> {
+        self.runtime_asset_receipt
+            .set(receipt)
+            .map_err(|_| AgentError::conflict("ACP 运行资产回执已设置"))
+    }
+
+    pub(crate) fn runtime_asset_receipt(&self) -> Option<RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.get().cloned()
     }
 
     async fn init(&self, catalog_tx: &CatalogSender) {

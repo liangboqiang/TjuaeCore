@@ -13,7 +13,7 @@
 //! without grepping logs. We deliberately skip `init_environment` to
 //! avoid installing a tracing subscriber that would redirect
 //! diagnostic output to a log file, and skip `init_data_layer` to
-//! avoid materializing the builtin-skills tree as a side effect of a
+//! avoid materializing the managed-skills tree as a side effect of a
 //! read-only diagnostic run.
 
 use std::path::Path;

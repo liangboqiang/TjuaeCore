@@ -20,11 +20,12 @@ weixin = ["tjuaeui-channel/weixin"]
 
 [dependencies]
 tjuaeui-common.workspace = true
-tjuaeui-assets.workspace = true
+tjuaeui-logo-catalog.workspace = true
 tjuaeui-db.workspace = true
 tjuaeui-api-types.workspace = true
 tjuaeui-realtime.workspace = true
 tjuaeui-auth.workspace = true
+tjuaeui-asset.workspace = true
 tjuaeui-system.workspace = true
 tjuaeui-file.workspace = true
 tjuaeui-office.workspace = true
@@ -40,6 +41,7 @@ tjuaeui-cron.workspace = true
 tjuaeui-project.workspace = true
 tjuaeui-assistant.workspace = true
 tjuaeui-runtime.workspace = true
+sqlx = { workspace = true, features = ["migrate"] }
 tjuaeui-process.workspace = true
 tjuae-config.workspace = true
 axum.workspace = true
@@ -55,7 +57,9 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
@@ -80,7 +84,6 @@ base64.workspace = true
 git2.workspace = true
 http-body-util.workspace = true
 rust_xlsxwriter.workspace = true
-sqlx = { workspace = true, features = ["migrate"] }
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true

@@ -7,39 +7,48 @@ use tjuaeui_ai_agent::session_context::{AgentSessionContext, AgentSessionKind};
 use tjuaeui_ai_agent::types::BuildTaskOptions;
 use tjuaeui_ai_agent::{
     ActiveLeaseRegistry, AgentAvailabilityFeedbackPort, AgentError, AgentInstance, AgentSendError, IWorkerTaskManager,
-    RuntimeTokenScope, RuntimeTokenService, TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+    RuntimeAssetLoadReceipt, RuntimeAssetLoadRequest, RuntimeAssetRef, RuntimeBoundaryEvent, RuntimeBoundaryPhase,
+    RuntimeBoundaryReporter, RuntimeBoundaryStatus, RuntimeManagedMcpRef, RuntimeManagedSkillRef, RuntimeTokenScope,
+    RuntimeTokenService, TEAM_RUNTIME_TOKEN_SESSION_GENERATION, digest_runtime_definition, digest_runtime_skill_tree,
 };
 
+use crate::managed_skill_roots::{managed_codex_skill_root, uses_managed_codex_skills};
 use crate::message_cursor::{decode_message_cursor, encode_message_cursor};
 use crate::runtime_completion::RuntimeCompletionPublisher;
 use crate::runtime_persistence::{RuntimePersistenceCoordinator, RuntimeWriteKind};
 use crate::runtime_state::ConversationRuntimeStateService;
 use chrono::Datelike;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 use tjuaeui_api_types::{
-    ApprovalCheckResponse, AssistantConversationOverridesRequest, CancelConversationResponse, CloneConversationRequest,
-    ConfirmRequest, ConfirmationListResponse, ConversationArtifactKind, ConversationArtifactListResponse,
-    ConversationArtifactResponse, ConversationArtifactStatus, ConversationListResponse, ConversationMcpStatus,
-    ConversationMcpStatusKind, ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest,
-    EnsureConversationRuntimeResponse, ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse,
-    MessageSearchResponse, SearchMessagesQuery, SendMessageRequest, SendMessageResponse, SessionMcpServer,
-    SessionMcpTransport, TeamSessionBinding, UpdateConversationArtifactRequest, UpdateConversationRequest,
-    WebSocketMessage, assistant_avatar_response_value, assistant_avatar_response_value_with_version,
+    ApprovalCheckResponse, AssetKind, AssistantConversationOverridesRequest, CancelConversationResponse,
+    CloneConversationRequest, ConfirmRequest, ConfirmationListResponse, ConversationArtifactKind,
+    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
+    ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind, ConversationResponse,
+    ConversationRuntimeSummary, ConversationTraceDetailResponse, ConversationTraceListResponse,
+    CreateConversationRequest, EnsureConversationRuntimeResponse, ListConversationsQuery, ListMessagesQuery,
+    MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery, SendMessageRequest,
+    SendMessageResponse, SessionMcpServer, SessionMcpTransport, TeamSessionBinding, UpdateConversationArtifactRequest,
+    UpdateConversationRequest, WebSocketMessage, assistant_avatar_response_value,
+    assistant_avatar_response_value_with_version,
+};
+use tjuaeui_asset::{
+    AssetCatalogService, AssetError, AssistantRuleDispatcher, BoundRuntimeAsset, RuntimeAssetProvenance,
+    is_projection_runtime_id, scan_definition,
 };
 use tjuaeui_common::{
     AgentKillReason, AgentType, ConversationSource, ConversationStatus, ErrorChain, MessageType, OnConversationDelete,
-    PaginatedResult, WorkspacePathValidationError, generate_short_id, now_ms, validate_workspace_path_availability,
+    PaginatedResult, WorkspacePathValidationError, generate_prefixed_id, generate_short_id, now_ms,
+    validate_workspace_path_availability,
 };
 use tjuaeui_db::models::{AssistantDefinitionRow, ConversationAssistantSnapshotRow, ConversationRow, MessageRow};
 use tjuaeui_db::{
     AgentBindingResolution, ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
     IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-    IAssistantPreferenceRepository, IConversationRepository, IMcpServerRepository, MessagePageCursor,
-    MessagePageDirection, MessagePageParams, SaveRuntimeStateParams, UpsertConversationAssistantSnapshotParams,
-    resolve_agent_binding_from_rows,
+    IAssistantPreferenceRepository, IConversationRepository, IConversationTraceRepository, IMcpServerRepository,
+    MessagePageCursor, MessagePageDirection, MessagePageParams, SaveRuntimeStateParams,
+    UpsertConversationAssistantSnapshotParams, resolve_agent_binding_from_rows,
 };
-use tjuaeui_extension::AssistantRuleDispatcher;
 use tjuaeui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
 use tjuaeui_project::{ProjectService, canonical};
 use tjuaeui_realtime::EventBroadcaster;
@@ -53,7 +62,12 @@ use crate::convert::{
 use crate::error::ConversationError;
 use crate::session_context::{SessionContextBuilder, TjuaeCliRuntimePermissionSeed};
 use crate::skill_resolver::SkillResolver;
-use crate::skill_snapshot::{backfill_skills_if_missing, compute_initial_skills};
+use crate::stream_relay::StreamRelay;
+use crate::trace::{
+    ConversationTraceCompletion, ConversationTraceStartContext, ConversationTraceWriter, RecordedSpanStatus,
+    RuntimeSpan, trace_row_to_api_with_runtime_snapshot, trace_runtime_asset_snapshot_row_to_api,
+    trace_span_row_to_api,
+};
 use crate::turn_orchestrator::{ConversationTurnOrchestrator, ConversationTurnStatus, TurnStartInput};
 use std::sync::RwLock;
 
@@ -73,8 +87,6 @@ struct AssistantConversationOverrides {
     #[serde(default)]
     skill_ids: Option<Vec<String>>,
     #[serde(default)]
-    disabled_builtin_skill_ids: Option<Vec<String>>,
-    #[serde(default)]
     mcp_ids: Option<Vec<String>>,
 }
 
@@ -85,7 +97,6 @@ impl From<AssistantConversationOverridesRequest> for AssistantConversationOverri
             permission: value.permission,
             thought_level: value.thought_level,
             skill_ids: value.skill_ids,
-            disabled_builtin_skill_ids: value.disabled_builtin_skill_ids,
             mcp_ids: value.mcp_ids,
         }
     }
@@ -101,8 +112,6 @@ struct AssistantSnapshotResolvedDefaults {
     thought_level: Option<String>,
     #[serde(default)]
     skill_ids: Vec<String>,
-    #[serde(default)]
-    disabled_builtin_skill_ids: Vec<String>,
     #[serde(default)]
     mcp_ids: Vec<String>,
 }
@@ -301,6 +310,28 @@ fn reject_deprecated_runtime_row(row: &ConversationRow) -> Result<(), Conversati
     Ok(())
 }
 
+fn runtime_asset_ref_from_provenance(
+    provenance: RuntimeAssetProvenance,
+    runtime_content_digest: String,
+) -> RuntimeAssetRef {
+    RuntimeAssetRef {
+        local_asset_id: provenance.local_asset_id,
+        kind: match provenance.kind {
+            AssetKind::Assistant => "assistant",
+            AssetKind::EngineAdapter => "engineAdapter",
+            AssetKind::Skill => "skill",
+            AssetKind::Mcp => "mcp",
+        }
+        .into(),
+        local_definition_digest: provenance.local_definition_digest,
+        runtime_content_digest,
+        upstream_package: provenance.upstream_package,
+        upstream_asset_id: provenance.upstream_asset_id,
+        upstream_version: provenance.upstream_version,
+        upstream_revision: provenance.upstream_revision,
+    }
+}
+
 #[derive(Clone)]
 pub struct ConversationService {
     workspace_root: PathBuf,
@@ -317,10 +348,13 @@ pub struct ConversationService {
     assistant_state_repo: Arc<RwLock<Option<Arc<dyn IAssistantOverlayRepository>>>>,
     assistant_preference_repo: Arc<RwLock<Option<Arc<dyn IAssistantPreferenceRepository>>>>,
     assistant_dispatcher: Arc<RwLock<Option<Arc<dyn AssistantRuleDispatcher>>>>,
+    runtime_asset_catalog: Arc<RwLock<Option<Arc<AssetCatalogService>>>>,
     agent_availability_feedback: Arc<RwLock<Option<Arc<dyn AgentAvailabilityFeedbackPort>>>>,
     /// Project-bind side branch (optional). `None` → binding is a no-op, so
     /// conversation create/read behaves exactly as before.
     project_service: Arc<RwLock<Option<Arc<ProjectService>>>>,
+    trace_repository: Arc<RwLock<Option<Arc<dyn IConversationTraceRepository>>>>,
+    trace_writer: Arc<RwLock<Option<Arc<ConversationTraceWriter>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     runtime_helper_bin: Option<String>,
     runtime_base_url: Option<String>,
@@ -393,8 +427,11 @@ impl ConversationService {
             assistant_state_repo: Arc::new(RwLock::new(None)),
             assistant_preference_repo: Arc::new(RwLock::new(None)),
             assistant_dispatcher: Arc::new(RwLock::new(None)),
+            runtime_asset_catalog: Arc::new(RwLock::new(None)),
             agent_availability_feedback: Arc::new(RwLock::new(None)),
             project_service: Arc::new(RwLock::new(None)),
+            trace_repository: Arc::new(RwLock::new(None)),
+            trace_writer: Arc::new(RwLock::new(None)),
             runtime_state: Arc::new(ConversationRuntimeStateService::default()),
             runtime_helper_bin: None,
             runtime_base_url: None,
@@ -435,12 +472,174 @@ impl ConversationService {
         }
     }
 
+    pub fn with_runtime_asset_catalog(&self, catalog: Arc<AssetCatalogService>) {
+        if let Ok(mut guard) = self.runtime_asset_catalog.write() {
+            *guard = Some(catalog);
+        }
+    }
+
+    fn runtime_asset_catalog(&self) -> Option<Arc<AssetCatalogService>> {
+        self.runtime_asset_catalog.read().ok().and_then(|guard| guard.clone())
+    }
+
     /// Inject the project-bind service (project-bind side branch). When unset,
     /// [`Self::bind_project_best_effort`] is a no-op.
     pub fn with_project_service(&self, project_service: Arc<ProjectService>) {
         if let Ok(mut guard) = self.project_service.write() {
             *guard = Some(project_service);
         }
+    }
+
+    pub fn with_trace_repository(&self, repository: Arc<dyn IConversationTraceRepository>) {
+        let writer = ConversationTraceWriter::spawn(repository.clone(), self.broadcaster.clone());
+        if let Ok(mut guard) = self.trace_repository.write() {
+            *guard = Some(repository);
+        }
+        if let Ok(mut guard) = self.trace_writer.write() {
+            *guard = Some(writer);
+        }
+    }
+
+    pub(crate) fn trace_repository(&self) -> Option<Arc<dyn IConversationTraceRepository>> {
+        self.trace_repository.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub(crate) fn trace_writer(&self) -> Option<Arc<ConversationTraceWriter>> {
+        self.trace_writer.read().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Recover process-abandoned traces. Startup callers should log failures
+    /// and continue because tracing is never allowed to block the runtime.
+    pub async fn recover_interrupted_traces(&self) -> Result<u64, ConversationError> {
+        let Some(repository) = self.trace_repository() else {
+            return Ok(0);
+        };
+        let now = now_ms();
+        let interrupted = repository.interrupt_running_traces(now).await?;
+        repository.prune_expired_traces(now).await?;
+        Ok(interrupted)
+    }
+
+    pub(crate) async fn start_trace_best_effort(
+        &self,
+        owner_user_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        context: ConversationTraceStartContext,
+    ) {
+        let Some(writer) = self.trace_writer() else {
+            return;
+        };
+        writer.start(
+            owner_user_id.to_owned(),
+            conversation_id.to_owned(),
+            turn_id.to_owned(),
+            now_ms(),
+            context,
+        );
+    }
+
+    pub(crate) async fn complete_trace_best_effort(
+        &self,
+        conversation_id: &str,
+        turn_id: &str,
+        status: &'static str,
+        error_code: Option<&str>,
+        retryable: Option<bool>,
+        incomplete: bool,
+    ) {
+        let Some(writer) = self.trace_writer() else {
+            return;
+        };
+        writer.complete(
+            conversation_id.to_owned(),
+            turn_id.to_owned(),
+            ConversationTraceCompletion {
+                status,
+                ended_at: now_ms(),
+                output_size: 0,
+                error_code: error_code.map(str::to_owned),
+                retryable,
+                incomplete,
+                dropped_span_count: 0,
+            },
+        );
+    }
+
+    pub(crate) fn record_runtime_span_best_effort(&self, conversation_id: &str, turn_id: &str, span: RuntimeSpan<'_>) {
+        let Some(writer) = self.trace_writer() else {
+            return;
+        };
+        writer.record_runtime_span(conversation_id, turn_id, span);
+    }
+
+    fn runtime_boundary_reporter(&self, conversation_id: &str, turn_id: &str) -> RuntimeBoundaryReporter {
+        let service = self.clone();
+        let conversation_id = conversation_id.to_owned();
+        let turn_id = turn_id.to_owned();
+        RuntimeBoundaryReporter::new(move |event: RuntimeBoundaryEvent| {
+            service.record_runtime_span_best_effort(
+                &conversation_id,
+                &turn_id,
+                RuntimeSpan {
+                    phase: event.phase.as_str(),
+                    status: match event.status {
+                        RuntimeBoundaryStatus::Succeeded => RecordedSpanStatus::Succeeded,
+                        RuntimeBoundaryStatus::Failed => RecordedSpanStatus::Failed,
+                    },
+                    started_at: event.started_at,
+                    ended_at: event.ended_at,
+                    asset_kind: event.asset_kind.as_deref(),
+                    local_asset_id: event.local_asset_id.as_deref(),
+                    error_code: event.error_code.as_deref(),
+                },
+            );
+        })
+    }
+
+    pub(crate) async fn record_runtime_asset_snapshot(
+        &self,
+        owner_user_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        receipt: RuntimeAssetLoadReceipt,
+    ) -> Result<(), AgentError> {
+        let writer = self.trace_writer().ok_or_else(|| {
+            AgentError::runtime_asset_contract(
+                tjuaeui_ai_agent::RuntimeAssetFailureReason::ReceiptPersistFailed,
+                "Trace 写入器不可用，无法保存已经校验的实际资产加载回执",
+            )
+        })?;
+        let persisted = writer
+            .runtime_assets_loaded(tjuaeui_db::ConversationTraceRuntimeAssetSnapshotRow {
+                user_id: owner_user_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                trace_id: turn_id.to_owned(),
+                runtime_snapshot_id: receipt.runtime_snapshot_id,
+                assets: receipt
+                    .assets
+                    .into_iter()
+                    .map(|asset| tjuaeui_db::ConversationTraceRuntimeAssetRefRow {
+                        local_asset_id: asset.local_asset_id,
+                        kind: asset.kind,
+                        local_definition_digest: asset.local_definition_digest,
+                        runtime_content_digest: asset.runtime_content_digest,
+                        upstream_package: asset.upstream_package,
+                        upstream_asset_id: asset.upstream_asset_id,
+                        upstream_version: asset.upstream_version,
+                        upstream_revision: asset.upstream_revision,
+                    })
+                    .collect(),
+                created_at: now_ms(),
+            })
+            .await;
+        if !persisted {
+            return Err(AgentError::runtime_asset_contract(
+                tjuaeui_ai_agent::RuntimeAssetFailureReason::ReceiptPersistFailed,
+                "Trace 拒绝或未能持久化已经校验的实际资产加载回执",
+            ));
+        }
+        Ok(())
     }
 
     /// Project-bind side branch: resolve the owner's workspace into a
@@ -535,7 +734,7 @@ impl ConversationService {
     }
 
     pub fn mint_turn_id() -> String {
-        format!("turn_{}", generate_short_id())
+        generate_prefixed_id("turn")
     }
 
     pub fn conversation_repo(&self) -> &Arc<dyn IConversationRepository> {
@@ -688,7 +887,9 @@ impl ConversationService {
             .await?
             .map(|binding| binding.runtime_backend)
             .unwrap_or_else(|| snapshot.agent_id.clone());
-        let current_definition = self.current_assistant_definition(&snapshot.assistant_id).await?;
+        let current_definition = self
+            .current_assistant_definition(&snapshot.assistant_definition_id)
+            .await?;
         let (source, name, avatar) = match current_definition {
             Some(definition) => (
                 definition.source,
@@ -696,7 +897,7 @@ impl ConversationService {
                 assistant_avatar_response_value_with_version(
                     definition.avatar_type.as_str(),
                     definition.avatar_value.as_deref(),
-                    definition.assistant_id.as_str(),
+                    snapshot.assistant_id.as_str(),
                     definition.updated_at,
                 )
                 .unwrap_or_default(),
@@ -719,13 +920,13 @@ impl ConversationService {
 
     async fn current_assistant_definition(
         &self,
-        assistant_id: &str,
+        assistant_definition_id: &str,
     ) -> Result<Option<AssistantDefinitionRow>, ConversationError> {
         let Some(definition_repo) = self.assistant_definition_repo() else {
             return Ok(None);
         };
         definition_repo
-            .get_by_assistant_id(assistant_id)
+            .get_by_id(assistant_definition_id)
             .await
             .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))
     }
@@ -765,7 +966,7 @@ impl ConversationService {
             .unwrap_or_default();
         let assistant_snapshot = match assistant_id.as_deref() {
             Some(id) => {
-                self.resolve_assistant_snapshot(id, assistant_locale.as_deref(), &assistant_overrides, &extra)
+                self.resolve_assistant_snapshot(user_id, id, assistant_locale.as_deref(), &assistant_overrides, &extra)
                     .await?
             }
             None => None,
@@ -934,6 +1135,13 @@ impl ConversationService {
                         );
                         obj.remove("preset_context");
                     }
+                    AgentType::A2a => {
+                        obj.insert(
+                            "preset_context".to_owned(),
+                            serde_json::Value::String(snapshot.rules.content.clone()),
+                        );
+                        obj.remove("preset_rules");
+                    }
                     AgentType::Gemini
                     | AgentType::Codex
                     | AgentType::OpenclawGateway
@@ -943,20 +1151,12 @@ impl ConversationService {
             }
         }
 
-        // Consume transient skill-shaping inputs and freeze the initial
-        // `skills` snapshot into `extra.skills`. These request-only fields
-        // must not land in the stored row. Legacy names (`enabled_skills`,
-        // `exclude_builtin_skills`) are accepted as aliases for compatibility
-        // with older frontend builds and pre-snapshot presets (§7.1).
-        fn take_string_array(obj: &mut serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Vec<String> {
-            for key in keys {
-                if let Some(v) = obj.remove(*key)
-                    && let Ok(arr) = serde_json::from_value::<Vec<String>>(v)
-                {
-                    return arr;
-                }
-            }
-            Vec::new()
+        // Consume the positive, request-only skill selection and freeze the
+        // initial `skills` snapshot into `extra.skills`.
+        fn take_string_array(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
+            obj.remove(key)
+                .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+                .unwrap_or_default()
         }
 
         fn merge_string_lists(primary: &[String], secondary: &[String]) -> Vec<String> {
@@ -969,59 +1169,74 @@ impl ConversationService {
             merged
         }
 
-        let (preset_enabled, exclude_auto_inject) = match extra.as_object_mut() {
+        let preset_enabled = match extra.as_object_mut() {
             Some(obj) => {
-                let extra_preset = take_string_array(obj, &["preset_enabled_skills", "enabled_skills"]);
-                let extra_exclude = take_string_array(obj, &["exclude_auto_inject_skills", "exclude_builtin_skills"]);
-                // Strip the stale cache field if a clone copied it in.
+                let extra_preset = take_string_array(obj, "preset_enabled_skills");
                 obj.remove("loaded_skills");
 
                 match assistant_snapshot.as_ref() {
-                    Some(snapshot) => (
-                        merge_string_lists(&snapshot.resolved_defaults.skill_ids, &extra_preset),
-                        merge_string_lists(&snapshot.resolved_defaults.disabled_builtin_skill_ids, &extra_exclude),
-                    ),
-                    None => (extra_preset, extra_exclude),
+                    Some(snapshot) => merge_string_lists(&snapshot.resolved_defaults.skill_ids, &extra_preset),
+                    None => extra_preset,
                 }
             }
-            None => (Vec::new(), Vec::new()),
+            None => Vec::new(),
         };
 
-        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
-        let initial_skills = compute_initial_skills(&auto_inject_names, &preset_enabled, &exclude_auto_inject);
+        let initial_skills = preset_enabled
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
 
-        // Wire skill links into the runtime workspace so the agent CLI picks
-        // them up via its native skills dir (e.g. `.claude/skills/`). This
-        // applies to both temp and user-selected workspaces.
+        // 用户工作区继续使用各 Agent 的原生技能目录。Codex 的自动临时
+        // 工作区则使用服务托管目录，并在握手阶段通过 extraRoots 注入，
+        // 避免为了加载技能而在临时工作区创建 `.codex`，从而触发信任告警。
         let skill_link_workspace = user_supplied_workspace
             .as_ref()
             .map(PathBuf::from)
             .or_else(|| auto_provisioned_workspace.clone());
         if let Some(ws_path) = skill_link_workspace.as_ref()
             && !initial_skills.is_empty()
-            && let Some(rel_dirs) = native_skills_dirs(
-                &self.agent_metadata_repo,
-                &effective_type,
-                effective_backend
-                    .as_ref()
-                    .map(|backend| serde_json::Value::String(backend.clone()))
-                    .as_ref(),
-            )
-            .await
         {
-            let resolved = self.skill_resolver.resolve_skills(&initial_skills).await;
-            if !resolved.is_empty() {
-                let rel_dirs_refs: Vec<&str> = rel_dirs.iter().map(String::as_str).collect();
-                let n = self
-                    .skill_resolver
-                    .link_workspace_skills(ws_path, &rel_dirs_refs, &resolved)
-                    .await;
-                debug!(
-                    conversation_id = %id,
-                    workspace = %ws_path.display(),
-                    links = n,
-                    "wired skill symlinks into workspace"
-                );
+            let uses_managed_root = uses_managed_codex_skills(
+                &effective_type,
+                effective_backend.as_deref(),
+                user_supplied_workspace.is_some(),
+            );
+            let skill_destination = if uses_managed_root {
+                cleanup_legacy_codex_workspace_skills(ws_path).await;
+                Some((
+                    managed_codex_skill_root(&self.workspace_root, &id),
+                    vec![".".to_owned()],
+                ))
+            } else {
+                native_skills_dirs(
+                    &self.agent_metadata_repo,
+                    &effective_type,
+                    effective_backend
+                        .as_ref()
+                        .map(|backend| serde_json::Value::String(backend.clone()))
+                        .as_ref(),
+                )
+                .await
+                .map(|rel_dirs| (ws_path.clone(), rel_dirs))
+            };
+            if let Some((skill_target, rel_dirs)) = skill_destination {
+                let resolved = self.skill_resolver.resolve_skills(&initial_skills).await;
+                if !resolved.is_empty() {
+                    let rel_dirs_refs: Vec<&str> = rel_dirs.iter().map(String::as_str).collect();
+                    let n = self
+                        .skill_resolver
+                        .link_workspace_skills(&skill_target, &rel_dirs_refs, &resolved)
+                        .await;
+                    debug!(
+                        conversation_id = %id,
+                        skill_target = %skill_target.display(),
+                        managed = uses_managed_root,
+                        links = n,
+                        "wired skill links for conversation"
+                    );
+                }
             }
         }
 
@@ -1035,7 +1250,7 @@ impl ConversationService {
         let selected_mcp_server_ids = match extra.as_object_mut() {
             Some(obj) => {
                 let has_selection = obj.contains_key("selected_mcp_server_ids");
-                let ids = take_string_array(obj, &["selected_mcp_server_ids"]);
+                let ids = take_string_array(obj, "selected_mcp_server_ids");
                 if has_selection {
                     Some(ids)
                 } else {
@@ -1071,34 +1286,82 @@ impl ConversationService {
             .ok()
             .and_then(|guard| guard.as_ref().cloned());
         if let Some(repo) = repo {
-            let rows = match selected_mcp_server_ids.as_ref() {
-                Some(ids) => repo
-                    .list_by_ids_any(ids)
+            if let Some(catalog) = self.runtime_asset_catalog() {
+                let bindings = catalog
+                    .list_active_runtime_bindings(user_id, AssetKind::Mcp)
                     .await
-                    .map_err(|e| ConversationError::internal(format!("Failed to load selected MCP servers: {e}")))?,
-                None => repo
-                    .list()
-                    .await
-                    .map_err(|e| ConversationError::internal(format!("Failed to list MCP servers: {e}")))?,
-            };
-            let selected_rows = rows
-                .into_iter()
-                .filter(|row| !row.builtin)
-                .filter(|row| match selected_mcp_server_ids.as_ref() {
-                    Some(ids) => ids.iter().any(|id| id == &row.id),
-                    None => row.enabled,
-                })
-                .collect::<Vec<_>>();
-            selected_row_ids = selected_rows.iter().map(|row| row.id.clone()).collect();
-            for row in &selected_rows {
-                if seen_mcp_names.insert(row.name.clone()) {
-                    selected_mcp_names.push(row.name.clone());
+                    .map_err(|error| ConversationError::internal(format!("MCP active Binding 查询失败：{error}")))?;
+                let requested = selected_mcp_server_ids
+                    .as_ref()
+                    .map(|ids| ids.iter().cloned().collect::<HashSet<_>>());
+                let mut resolved_requested = HashSet::new();
+                for binding in bindings {
+                    let local_id = binding.provenance.local_asset_id;
+                    if requested.as_ref().is_some_and(|ids| !ids.contains(&local_id)) {
+                        continue;
+                    }
+                    let row = repo
+                        .find_by_name_any(&binding.projection_runtime_id)
+                        .await
+                        .map_err(|error| ConversationError::internal(format!("MCP 投影精确查询失败：{error}")))?
+                        .ok_or_else(|| {
+                            ConversationError::internal("MCP active Binding 缺少运行投影，已拒绝创建对话")
+                        })?;
+                    if !row.enabled || row.deleted_at.is_some() {
+                        return Err(ConversationError::internal(
+                            "MCP active Binding 指向不可用投影，已拒绝创建对话",
+                        ));
+                    }
+                    let display_name = catalog
+                        .get(user_id, &local_id)
+                        .await
+                        .map_err(|error| ConversationError::internal(format!("MCP 资产详情解析失败：{error}")))?
+                        .asset
+                        .display_name;
+                    resolved_requested.insert(local_id.clone());
+                    selected_row_ids.push(local_id.clone());
+                    if seen_mcp_names.insert(local_id.clone()) {
+                        selected_mcp_names.push(display_name.clone());
+                    }
+                    let mut status = classify_repo_mcp_status(&row, mcp_support);
+                    status.id = local_id;
+                    status.name = display_name;
+                    upsert_conversation_mcp_status(&mut selected_mcp_statuses, &mut status_index_by_name, status);
                 }
-                upsert_conversation_mcp_status(
-                    &mut selected_mcp_statuses,
-                    &mut status_index_by_name,
-                    classify_repo_mcp_status(row, mcp_support),
-                );
+                if requested.as_ref().is_some_and(|ids| ids != &resolved_requested) {
+                    return Err(ConversationError::BadRequest {
+                        reason: "MCP 选择必须全部属于当前用户的 active 资产 Binding".into(),
+                    });
+                }
+            } else {
+                let rows = match selected_mcp_server_ids.as_ref() {
+                    Some(ids) => repo.list_by_ids_any(ids).await.map_err(|e| {
+                        ConversationError::internal(format!("Failed to load selected MCP servers: {e}"))
+                    })?,
+                    None => repo
+                        .list()
+                        .await
+                        .map_err(|e| ConversationError::internal(format!("Failed to list MCP servers: {e}")))?,
+                };
+                let selected_rows = rows
+                    .into_iter()
+                    .filter(|row| !row.builtin)
+                    .filter(|row| match selected_mcp_server_ids.as_ref() {
+                        Some(ids) => ids.iter().any(|id| id == &row.id),
+                        None => row.enabled,
+                    })
+                    .collect::<Vec<_>>();
+                selected_row_ids = selected_rows.iter().map(|row| row.id.clone()).collect();
+                for row in &selected_rows {
+                    if seen_mcp_names.insert(row.name.clone()) {
+                        selected_mcp_names.push(row.name.clone());
+                    }
+                    upsert_conversation_mcp_status(
+                        &mut selected_mcp_statuses,
+                        &mut status_index_by_name,
+                        classify_repo_mcp_status(row, mcp_support),
+                    );
+                }
             }
         }
 
@@ -1180,12 +1443,6 @@ impl ConversationService {
             let resolved_skill_ids = serde_json::to_string(&snapshot.resolved_defaults.skill_ids).map_err(|e| {
                 ConversationError::internal(format!("Failed to serialize assistant skill snapshot: {e}"))
             })?;
-            let resolved_disabled_builtin_skill_ids =
-                serde_json::to_string(&snapshot.resolved_defaults.disabled_builtin_skill_ids).map_err(|e| {
-                    ConversationError::internal(format!(
-                        "Failed to serialize assistant disabled builtin skill snapshot: {e}"
-                    ))
-                })?;
             let resolved_mcp_ids = serde_json::to_string(&snapshot.resolved_defaults.mcp_ids)
                 .map_err(|e| ConversationError::internal(format!("Failed to serialize assistant MCP snapshot: {e}")))?;
 
@@ -1205,7 +1462,6 @@ impl ConversationService {
                     resolved_thought_level_value: snapshot.resolved_defaults.thought_level.as_deref(),
                     default_skills_mode: &snapshot.default_modes.skills,
                     resolved_skill_ids: &resolved_skill_ids,
-                    resolved_disabled_builtin_skill_ids: &resolved_disabled_builtin_skill_ids,
                     default_mcps_mode: &snapshot.default_modes.mcps,
                     resolved_mcp_ids: &resolved_mcp_ids,
                 })
@@ -1352,6 +1608,7 @@ impl ConversationService {
 
     async fn resolve_assistant_snapshot(
         &self,
+        user_id: &str,
         assistant_id: &str,
         locale: Option<&str>,
         overrides: &AssistantConversationOverrides,
@@ -1365,12 +1622,38 @@ impl ConversationService {
             return Ok(None);
         };
 
-        let Some(definition) = definition_repo
-            .get_by_assistant_id(assistant_id)
-            .await
-            .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))?
-        else {
-            return Ok(None);
+        let (definition, canonical_assistant_id, rule_runtime_id) = match self.runtime_asset_catalog() {
+            Some(catalog) => {
+                let bound = match catalog
+                    .resolve_bound_runtime_asset(user_id, AssetKind::Assistant, assistant_id)
+                    .await
+                {
+                    Ok(bound) => bound,
+                    Err(AssetError::NotFound(_)) => return Ok(None),
+                    Err(error) => {
+                        return Err(ConversationError::internal(format!(
+                            "助手 active Binding 解析失败：{error}"
+                        )));
+                    }
+                };
+                let rule_runtime_id = bound.projection_runtime_id.clone();
+                let definition = definition_repo
+                    .get_by_assistant_id(&bound.projection_runtime_id)
+                    .await
+                    .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))?
+                    .ok_or_else(|| ConversationError::internal("助手 active Binding 缺少内部运行投影"))?;
+                (definition, bound.provenance.local_asset_id, rule_runtime_id)
+            }
+            None => {
+                let Some(definition) = definition_repo
+                    .get_by_assistant_id(assistant_id)
+                    .await
+                    .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))?
+                else {
+                    return Ok(None);
+                };
+                (definition, assistant_id.to_owned(), assistant_id.to_owned())
+            }
         };
 
         let state = state_repo
@@ -1390,23 +1673,6 @@ impl ConversationService {
             None => preference
                 .as_ref()
                 .map(|row| parse_json_string_list(Some(row.last_skill_ids.as_str()), "last_skill_ids"))
-                .transpose()?
-                .unwrap_or_default(),
-        };
-        let disabled_builtin_skill_ids = match overrides.disabled_builtin_skill_ids.as_ref() {
-            Some(value) => value.clone(),
-            None if definition.default_skills_mode == "fixed" => parse_json_string_list(
-                Some(definition.default_disabled_builtin_skill_ids.as_str()),
-                "default_disabled_builtin_skill_ids",
-            )?,
-            None => preference
-                .as_ref()
-                .map(|row| {
-                    parse_json_string_list(
-                        Some(row.last_disabled_builtin_skill_ids.as_str()),
-                        "last_disabled_builtin_skill_ids",
-                    )
-                })
                 .transpose()?
                 .unwrap_or_default(),
         };
@@ -1450,7 +1716,7 @@ impl ConversationService {
 
         let rules_content = if let Some(dispatcher) = self.assistant_dispatcher() {
             dispatcher
-                .read_rule(assistant_id, locale)
+                .read_rule(user_id, &rule_runtime_id, locale)
                 .await
                 .map_err(|e| ConversationError::internal(format!("assistant rule lookup failed: {e}")))?
         } else {
@@ -1475,7 +1741,7 @@ impl ConversationService {
 
         Ok(Some(AssistantSnapshot {
             assistant_definition_id: definition.id,
-            assistant_id: assistant_id.to_owned(),
+            assistant_id: canonical_assistant_id,
             assistant_source: definition.source,
             name: definition.name,
             avatar_type: definition.avatar_type,
@@ -1503,7 +1769,6 @@ impl ConversationService {
                 permission,
                 thought_level,
                 skill_ids,
-                disabled_builtin_skill_ids,
                 mcp_ids,
             },
             created_at: now_ms(),
@@ -1550,15 +1815,6 @@ impl ConversationService {
                 .map(|row| row.last_skill_ids.clone())
                 .unwrap_or_else(|| "[]".to_string())
         };
-        let last_disabled_builtin_skill_ids = if snapshot.default_modes.skills == "auto" {
-            serde_json::to_string(&snapshot.resolved_defaults.disabled_builtin_skill_ids)
-                .map_err(|e| ConversationError::internal(format!("encode assistant disabled builtin skills: {e}")))?
-        } else {
-            existing_preference
-                .as_ref()
-                .map(|row| row.last_disabled_builtin_skill_ids.clone())
-                .unwrap_or_else(|| "[]".to_string())
-        };
         let last_mcp_ids = if snapshot.default_modes.mcps == "auto" {
             serde_json::to_string(&snapshot.resolved_defaults.mcp_ids)
                 .map_err(|e| ConversationError::internal(format!("encode assistant mcps: {e}")))?
@@ -1576,7 +1832,6 @@ impl ConversationService {
                 last_permission_value: last_permission_value.as_deref(),
                 last_thought_level_value: last_thought_level_value.as_deref(),
                 last_skill_ids: &last_skill_ids,
-                last_disabled_builtin_skill_ids: &last_disabled_builtin_skill_ids,
                 last_mcp_ids: &last_mcp_ids,
             })
             .await
@@ -1621,7 +1876,6 @@ impl ConversationService {
                     .or(snapshot.resolved_thought_level_value.as_deref()),
                 default_skills_mode: &snapshot.default_skills_mode,
                 resolved_skill_ids: &snapshot.resolved_skill_ids,
-                resolved_disabled_builtin_skill_ids: &snapshot.resolved_disabled_builtin_skill_ids,
                 default_mcps_mode: &snapshot.default_mcps_mode,
                 resolved_mcp_ids: &snapshot.resolved_mcp_ids,
             })
@@ -1774,10 +2028,6 @@ impl ConversationService {
                     .as_ref()
                     .map(|row| row.last_skill_ids.as_str())
                     .unwrap_or("[]"),
-                last_disabled_builtin_skill_ids: existing_preference
-                    .as_ref()
-                    .map(|row| row.last_disabled_builtin_skill_ids.as_str())
-                    .unwrap_or("[]"),
                 last_mcp_ids: existing_preference
                     .as_ref()
                     .map(|row| row.last_mcp_ids.as_str())
@@ -1818,6 +2068,84 @@ impl ConversationService {
         self.attach_assistant_identity(&mut response).await?;
         response.runtime = Some(self.runtime_summary_for(id).await);
         Ok(response)
+    }
+
+    pub async fn list_traces(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        limit: Option<u32>,
+    ) -> Result<ConversationTraceListResponse, ConversationError> {
+        if let Some(limit) = limit
+            && !(1..=tjuaeui_db::CONVERSATION_TRACE_MAX_PER_CONVERSATION).contains(&limit)
+        {
+            return Err(ConversationError::bad_request("Trace limit 必须在 1 到 100 之间"));
+        }
+        self.conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+        let repository = self
+            .trace_repository()
+            .ok_or_else(|| ConversationError::internal("Trace 存储尚未配置"))?;
+        let snapshot_ids = repository
+            .list_runtime_asset_snapshot_summaries(user_id, conversation_id)
+            .await?
+            .into_iter()
+            .map(|snapshot| (snapshot.trace_id, snapshot.runtime_snapshot_id))
+            .collect::<HashMap<_, _>>();
+        let items = repository
+            .list_traces(conversation_id, limit.unwrap_or(100))
+            .await?
+            .into_iter()
+            .map(|trace| {
+                let runtime_snapshot_id = snapshot_ids.get(&trace.trace_id).map(String::as_str);
+                trace_row_to_api_with_runtime_snapshot(trace, runtime_snapshot_id)
+            })
+            .collect();
+        Ok(ConversationTraceListResponse { items })
+    }
+
+    pub async fn get_trace(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+    ) -> Result<ConversationTraceDetailResponse, ConversationError> {
+        self.conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+        let repository = self
+            .trace_repository()
+            .ok_or_else(|| ConversationError::internal("Trace 存储尚未配置"))?;
+        let trace = repository
+            .get_trace(conversation_id, turn_id)
+            .await?
+            .ok_or_else(|| ConversationError::not_found_reason(format!("找不到 Trace：{turn_id}")))?;
+        let runtime_asset_snapshot = repository
+            .get_runtime_asset_snapshot(user_id, conversation_id, turn_id)
+            .await?;
+        let runtime_snapshot_id = runtime_asset_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.runtime_snapshot_id.as_str());
+        let spans = repository
+            .list_spans(conversation_id, turn_id)
+            .await?
+            .into_iter()
+            .map(trace_span_row_to_api)
+            .collect();
+        Ok(ConversationTraceDetailResponse {
+            trace: trace_row_to_api_with_runtime_snapshot(trace, runtime_snapshot_id),
+            spans,
+            runtime_asset_snapshot: runtime_asset_snapshot.map(trace_runtime_asset_snapshot_row_to_api),
+        })
     }
 
     /// List conversations with cursor-based pagination and optional filters.
@@ -2171,6 +2499,7 @@ impl ConversationService {
                 cleanup_empty_date_workspace_parents(&self.workspace_root, &workspace).await;
             }
         }
+        cleanup_managed_codex_skill_root(&self.workspace_root, id).await;
 
         info!("Conversation deleted");
         self.broadcast_list_changed(id, "deleted", source.as_ref());
@@ -2681,6 +3010,16 @@ impl ConversationService {
 
         let turn_id = Self::mint_turn_id();
         let turn_claim = self.runtime_state.try_claim_turn(conversation_id, &turn_id)?;
+        self.start_trace_best_effort(
+            user_id,
+            conversation_id,
+            &turn_id,
+            ConversationTraceStartContext {
+                input_size: i64::try_from(req.content.len()).unwrap_or(i64::MAX),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Store user message. `msg_id` is server-generated so the WebSocket
         // stream, DB row, and client-side message index all agree on the same
@@ -2702,6 +3041,15 @@ impl ConversationService {
             .runtime_persistence()
             .allows(conversation_id, RuntimeWriteKind::UserMessage)
         {
+            self.complete_trace_best_effort(
+                conversation_id,
+                &turn_id,
+                "failed",
+                Some("TURN_NOT_SCHEDULED"),
+                None,
+                true,
+            )
+            .await;
             let mut turn_claim = turn_claim;
             let was_deleting = turn_claim.release();
             self.complete_released_turn(conversation_id, &turn_id, was_deleting)
@@ -2710,6 +3058,15 @@ impl ConversationService {
         }
         if let Err(e) = self.conversation_repo.insert_message(&user_msg).await {
             warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
+            self.complete_trace_best_effort(
+                conversation_id,
+                &turn_id,
+                "failed",
+                Some("MESSAGE_PERSIST_FAILED"),
+                None,
+                true,
+            )
+            .await;
             return Err(e.into());
         }
 
@@ -2729,7 +3086,7 @@ impl ConversationService {
         ));
 
         // Build task options from conversation row
-        let mut build_opts = match self.build_task_options(&row).await {
+        let mut build_opts = match self.build_task_options_for_turn(&row, &turn_id).await {
             Ok(opts) => opts,
             Err(err) => {
                 error!(
@@ -2746,6 +3103,8 @@ impl ConversationService {
                     Some(top_level_code),
                 )
                 .await;
+                self.complete_trace_best_effort(conversation_id, &turn_id, "failed", Some(top_level_code), None, true)
+                    .await;
                 let mut turn_claim = turn_claim;
                 let was_deleting = turn_claim.release();
                 self.complete_released_turn(conversation_id, &turn_id, was_deleting)
@@ -2808,6 +3167,16 @@ impl ConversationService {
 
         let turn_id = Self::mint_turn_id();
         let turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        self.start_trace_best_effort(
+            &request.user_id,
+            &request.conversation_id,
+            &turn_id,
+            ConversationTraceStartContext {
+                input_size: i64::try_from(request.content.len()).unwrap_or(i64::MAX),
+                ..Default::default()
+            },
+        )
+        .await;
         if request.persist_user_message {
             let user_msg_id = Self::mint_msg_id();
             let user_msg = tjuaeui_db::models::MessageRow {
@@ -2831,6 +3200,15 @@ impl ConversationService {
                     error = %ErrorChain(&e),
                     "Failed to insert agent turn user message"
                 );
+                self.complete_trace_best_effort(
+                    &request.conversation_id,
+                    &turn_id,
+                    "failed",
+                    Some("MESSAGE_PERSIST_FAILED"),
+                    None,
+                    true,
+                )
+                .await;
                 let mut turn_claim = turn_claim;
                 let was_deleting = turn_claim.release();
                 self.complete_released_turn(&request.conversation_id, &turn_id, was_deleting)
@@ -2846,7 +3224,7 @@ impl ConversationService {
             .await;
         }
 
-        let mut build_opts = match self.build_task_options(&row).await {
+        let mut build_opts = match self.build_task_options_for_turn(&row, &turn_id).await {
             Ok(opts) => opts,
             Err(err) => {
                 let top_level_code = err.error_code();
@@ -2856,6 +3234,15 @@ impl ConversationService {
                     &turn_id,
                     &send_error,
                     Some(top_level_code),
+                )
+                .await;
+                self.complete_trace_best_effort(
+                    &request.conversation_id,
+                    &turn_id,
+                    "failed",
+                    Some(top_level_code),
+                    None,
+                    true,
                 )
                 .await;
                 let mut turn_claim = turn_claim;
@@ -3150,6 +3537,9 @@ impl ConversationService {
         let (agent, recovered) = self
             .ensure_runtime_agent(user_id, conversation_id, task_manager, "runtime_ensure")
             .await?;
+        if recovered {
+            self.spawn_pending_a2a_recovery(user_id, conversation_id, &agent).await;
+        }
         let config_options = agent
             .get_config_options()
             .await
@@ -3161,6 +3551,101 @@ impl ConversationService {
             config_options,
             runtime: self.runtime_summary_for(conversation_id).await,
         })
+    }
+
+    async fn spawn_pending_a2a_recovery(&self, user_id: &str, conversation_id: &str, agent: &AgentInstance) {
+        if agent.agent_type() != AgentType::A2a || !agent.claim_pending_a2a_recovery().await {
+            return;
+        }
+
+        let turn_id = generate_prefixed_id("turn_recovery");
+        let runtime_state = self.runtime_state();
+        let mut claim = match runtime_state.try_claim_turn(conversation_id, &turn_id) {
+            Ok(claim) => claim,
+            Err(error) => {
+                agent.abandon_pending_a2a_recovery();
+                warn!(
+                    conversation_id,
+                    turn_id,
+                    error = %ErrorChain(&error),
+                    "A2A pending task recovery could not claim the conversation"
+                );
+                return;
+            }
+        };
+        let msg_id = Self::mint_msg_id();
+        let relay = StreamRelay::new(
+            conversation_id.to_owned(),
+            msg_id,
+            turn_id.clone(),
+            user_id.to_owned(),
+            self.conversation_repo().clone(),
+            self.broadcaster().clone(),
+        )
+        .with_runtime_state(Arc::clone(&runtime_state))
+        .with_persistence(self.runtime_persistence())
+        .with_turn_completion(false);
+        let relay = if let Some(writer) = self.trace_writer() {
+            relay
+                .with_trace_writer(writer)
+                .with_trace_context(ConversationTraceStartContext {
+                    backend: Some("a2a".to_owned()),
+                    model: None,
+                    mode: Some("recovery".to_owned()),
+                    input_size: 0,
+                })
+        } else {
+            relay
+        };
+        let rx = agent.subscribe();
+        let resume_agent = agent.clone();
+        let service = self.clone();
+        let conv_id = conversation_id.to_owned();
+
+        tokio::spawn(async move {
+            info!(
+                conversation_id = %conv_id,
+                turn_id = %turn_id,
+                "A2A interrupted task recovery started"
+            );
+            let (send_error_tx, send_error_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                if let Err(error) = resume_agent.resume_pending_a2a_task().await {
+                    let _ = send_error_tx.send(error);
+                }
+            });
+            let outcome = relay.consume_with_send_error(rx, send_error_rx).await;
+            let cancelled = service.runtime_state().is_cancelling(&conv_id);
+            let failed = outcome.terminal.is_error();
+            service
+                .complete_trace_best_effort(
+                    &conv_id,
+                    &turn_id,
+                    if cancelled {
+                        "cancelled"
+                    } else if failed {
+                        "failed"
+                    } else if matches!(&outcome.terminal, crate::stream_relay::RelayTerminal::ChannelClosed) {
+                        "interrupted"
+                    } else {
+                        "succeeded"
+                    },
+                    failed.then_some("TURN_FAILED"),
+                    outcome.terminal.retryable(),
+                    cancelled
+                        || failed
+                        || matches!(&outcome.terminal, crate::stream_relay::RelayTerminal::ChannelClosed),
+                )
+                .await;
+            let was_deleting = claim.release();
+            service.complete_released_turn(&conv_id, &turn_id, was_deleting).await;
+            info!(
+                conversation_id = %conv_id,
+                turn_id = %turn_id,
+                terminal = ?outcome.terminal,
+                "A2A interrupted task recovery finished"
+            );
+        });
     }
 
     async fn ensure_runtime_agent(
@@ -3281,6 +3766,7 @@ pub(crate) fn agent_error_top_level_code(error: &AgentError) -> &'static str {
         AgentError::RateLimited => "RATE_LIMITED",
         AgentError::ConversationArchived(_) => "CONVERSATION_ARCHIVED",
         AgentError::WorkspacePathRuntimeUnavailable(_) => "WORKSPACE_PATH_RUNTIME_UNAVAILABLE",
+        AgentError::RuntimeAssetContract { reason, .. } => reason.as_code(),
         AgentError::Internal(_) => "INTERNAL_ERROR",
         _ => "INTERNAL_ERROR",
     }
@@ -3320,15 +3806,84 @@ impl ConversationService {
     /// Raw `conversation.extra` parsing lives in [`SessionContextBuilder`]
     /// so the task manager and concrete agent factories consume typed
     /// session context instead of the DB envelope.
+    async fn build_task_options_for_turn(
+        &self,
+        row: &tjuaeui_db::models::ConversationRow,
+        turn_id: &str,
+    ) -> Result<BuildTaskOptions, ConversationError> {
+        let reporter = self.runtime_boundary_reporter(&row.id, turn_id);
+        let resolve_started_at = now_ms();
+        let resolved = async {
+            reject_deprecated_runtime_row(row)?;
+            let seed = self.load_tjuae_cli_permission_seed(row).await?;
+            SessionContextBuilder::new(&self.workspace_root, &self.agent_metadata_repo, &self.acp_session_repo)
+                .build_options(row, seed)
+                .await
+        }
+        .await;
+        let mut options = match resolved {
+            Ok(options) => {
+                reporter.succeeded(RuntimeBoundaryPhase::Resolve, resolve_started_at, now_ms(), None);
+                options
+            }
+            Err(error) => {
+                reporter.failed(
+                    RuntimeBoundaryPhase::Resolve,
+                    resolve_started_at,
+                    now_ms(),
+                    None,
+                    "TJUAE_RUNTIME_RESOLVE_FAILED",
+                );
+                return Err(error);
+            }
+        };
+
+        let project_started_at = now_ms();
+        if let Err(error) = self.attach_runtime_asset_request(row, &mut options).await {
+            reporter.failed(
+                RuntimeBoundaryPhase::Project,
+                project_started_at,
+                now_ms(),
+                None,
+                "TJUAE_RUNTIME_PROJECT_FAILED",
+            );
+            return Err(error);
+        }
+        let project_ended_at = now_ms();
+        match options.runtime_asset_request.as_ref() {
+            Some(request) => {
+                for asset in request.requested_assets() {
+                    reporter.succeeded(
+                        RuntimeBoundaryPhase::Project,
+                        project_started_at,
+                        project_ended_at,
+                        Some(&asset),
+                    );
+                }
+            }
+            None => reporter.succeeded(
+                RuntimeBoundaryPhase::Project,
+                project_started_at,
+                project_ended_at,
+                None,
+            ),
+        }
+        options.runtime_boundary_reporter = Some(reporter);
+        Ok(options)
+    }
+
     pub(crate) async fn build_task_options(
         &self,
         row: &tjuaeui_db::models::ConversationRow,
     ) -> Result<BuildTaskOptions, ConversationError> {
         reject_deprecated_runtime_row(row)?;
         let seed = self.load_tjuae_cli_permission_seed(row).await?;
-        SessionContextBuilder::new(&self.workspace_root, &self.agent_metadata_repo, &self.acp_session_repo)
-            .build_options(row, seed)
-            .await
+        let mut options =
+            SessionContextBuilder::new(&self.workspace_root, &self.agent_metadata_repo, &self.acp_session_repo)
+                .build_options(row, seed)
+                .await?;
+        self.attach_runtime_asset_request(row, &mut options).await?;
+        Ok(options)
     }
 
     pub async fn build_task_options_for_runtime(
@@ -3338,9 +3893,337 @@ impl ConversationService {
     ) -> Result<BuildTaskOptions, ConversationError> {
         reject_deprecated_runtime_row(row)?;
         let seed = self.load_tjuae_cli_permission_seed(row).await?;
-        SessionContextBuilder::new(&self.workspace_root, &self.agent_metadata_repo, &self.acp_session_repo)
-            .build_options_with_workspace_override(row, workspace_override, seed)
+        let mut options =
+            SessionContextBuilder::new(&self.workspace_root, &self.agent_metadata_repo, &self.acp_session_repo)
+                .build_options_with_workspace_override(row, workspace_override, seed)
+                .await?;
+        self.attach_runtime_asset_request(row, &mut options).await?;
+        Ok(options)
+    }
+
+    async fn attach_runtime_asset_request(
+        &self,
+        row: &tjuaeui_db::models::ConversationRow,
+        options: &mut BuildTaskOptions,
+    ) -> Result<(), ConversationError> {
+        let (actual_rules, engine_runtime_id, tjuae_cli) = match &options.context.kind {
+            AgentSessionKind::TjuaeCli(context) => (
+                context.config.preset_rules.as_deref().unwrap_or_default(),
+                None,
+                Some(context.as_ref()),
+            ),
+            AgentSessionKind::Acp(context) => (
+                context.config.preset_context.as_deref().unwrap_or_default(),
+                context.config.agent_id.as_deref(),
+                None,
+            ),
+            AgentSessionKind::A2a(context) => (
+                context.preset_context.as_deref().unwrap_or_default(),
+                Some(context.agent_id.as_str()),
+                None,
+            ),
+        };
+
+        let mut core_assets = Vec::new();
+        if let Some(snapshot) = self.conversation_repo.get_assistant_snapshot(&row.id).await? {
+            let provenance = self
+                .resolve_assistant_runtime_provenance(&row.user_id, &snapshot)
+                .await?;
+            if actual_rules != snapshot.rules_content {
+                return Err(ConversationError::internal(
+                    "助手运行定义与会话冻结快照不一致，已拒绝启动",
+                ));
+            }
+            let runtime_content_digest = digest_runtime_definition(
+                b"tjuae-runtime-assistant-v1\0",
+                &[
+                    snapshot.assistant_definition_id.as_bytes(),
+                    snapshot.assistant_id.as_bytes(),
+                    snapshot.assistant_source.as_bytes(),
+                    snapshot.agent_id.as_bytes(),
+                    snapshot.rules_content.as_bytes(),
+                    snapshot.default_model_mode.as_bytes(),
+                    snapshot.resolved_model_id.as_deref().unwrap_or_default().as_bytes(),
+                    snapshot.default_permission_mode.as_bytes(),
+                    snapshot
+                        .resolved_permission_value
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    snapshot.default_thought_level_mode.as_bytes(),
+                    snapshot
+                        .resolved_thought_level_value
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    snapshot.default_skills_mode.as_bytes(),
+                    snapshot.resolved_skill_ids.as_bytes(),
+                    snapshot.default_mcps_mode.as_bytes(),
+                    snapshot.resolved_mcp_ids.as_bytes(),
+                ],
+            );
+            core_assets.push(runtime_asset_ref_from_provenance(provenance, runtime_content_digest));
+        }
+
+        let mut runtime_assets = Vec::new();
+        if let Some(runtime_id) = engine_runtime_id.filter(|value| !value.is_empty()) {
+            // 只有 Core 生成的用户级 projectionRuntimeId 才属于托管资产。
+            // 内置/临时引擎使用可移植 ID，不应因资产目录未挂载而被误拒绝；
+            // 也不能拿可移植 ID 去全局扫描并猜测某个用户 Binding 的归属。
+            if is_projection_runtime_id(runtime_id) {
+                let catalog = self
+                    .runtime_asset_catalog()
+                    .ok_or_else(|| ConversationError::internal("资产目录不可用，无法验证引擎运行来源"))?;
+                match self
+                    .bound_runtime_asset_by_projection(&catalog, &row.user_id, AssetKind::EngineAdapter, runtime_id)
+                    .await?
+                {
+                    Some(bound) => {
+                        let provenance = bound.provenance;
+                        let runtime_content_digest = digest_runtime_definition(
+                            b"tjuae-runtime-engine-adapter-v1\0",
+                            &[
+                                provenance.local_definition_digest.as_bytes(),
+                                provenance.runtime_id.as_bytes(),
+                            ],
+                        );
+                        runtime_assets.push(runtime_asset_ref_from_provenance(provenance, runtime_content_digest));
+                    }
+                    None => {
+                        return Err(ConversationError::internal(
+                            "引擎内部投影不属于当前用户的 active Binding，已拒绝启动",
+                        ));
+                    }
+                }
+            }
+        }
+
+        let Some(tjuae_cli) = tjuae_cli else {
+            options.runtime_asset_request =
+                RuntimeAssetLoadRequest::new_with_runtime_assets(core_assets, runtime_assets, Vec::new(), Vec::new())
+                    .map_err(|error| ConversationError::internal(format!("运行资产快照无效：{error}")))?;
+            options.runtime_capabilities.runtime_asset_snapshot_id = options
+                .runtime_asset_request
+                .as_ref()
+                .map(|request| request.runtime_snapshot_id.clone());
+            return Ok(());
+        };
+
+        let requested_skill_names = options
+            .context
+            .skills
+            .iter()
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let requested_skill_list = requested_skill_names.iter().cloned().collect::<Vec<_>>();
+        let resolved_skills = self
+            .skill_resolver
+            .resolve_runtime_skills(&row.user_id, &requested_skill_list)
             .await
+            .map_err(|error| ConversationError::internal(format!("技能资产来源解析失败，已拒绝启动：{error}")))?;
+        if resolved_skills.len() != requested_skill_names.len() {
+            return Err(ConversationError::internal("技能资产来源集合不完整，已拒绝启动"));
+        }
+
+        let mut managed_skills = Vec::with_capacity(resolved_skills.len());
+        for skill in resolved_skills {
+            if skill.name != skill.provenance.runtime_id {
+                return Err(ConversationError::internal(
+                    "技能运行时投影与资产目录身份不一致，已拒绝启动",
+                ));
+            }
+            let projected_definition = scan_definition(&skill.source_path).map_err(|error| {
+                ConversationError::internal(format!("技能运行时投影 Definition 校验失败，已拒绝启动：{error}"))
+            })?;
+            if projected_definition.digest != skill.provenance.local_definition_digest {
+                return Err(ConversationError::internal(
+                    "技能运行时投影与资产目录 Definition 摘要不一致，已拒绝启动",
+                ));
+            }
+            let runtime_content_digest = digest_runtime_skill_tree(&skill.source_path)
+                .await
+                .map_err(|error| ConversationError::internal(format!("技能运行定义预检失败，已拒绝启动：{error}")))?;
+            managed_skills.push(RuntimeManagedSkillRef {
+                asset: runtime_asset_ref_from_provenance(skill.provenance, runtime_content_digest),
+                root: skill.source_path,
+            });
+        }
+
+        let (managed_mcps, _resolved_mcp_row_ids) = self
+            .resolve_runtime_mcps(&row.user_id, tjuae_cli.config.mcp_server_ids.as_deref())
+            .await?;
+
+        options.runtime_asset_request =
+            RuntimeAssetLoadRequest::new_with_runtime_assets(core_assets, runtime_assets, managed_skills, managed_mcps)
+                .map_err(|error| ConversationError::internal(format!("运行资产快照无效：{error}")))?;
+        options.runtime_capabilities.runtime_asset_snapshot_id = options
+            .runtime_asset_request
+            .as_ref()
+            .map(|request| request.runtime_snapshot_id.clone());
+        Ok(())
+    }
+
+    async fn bound_runtime_asset_by_projection(
+        &self,
+        catalog: &AssetCatalogService,
+        user_id: &str,
+        kind: AssetKind,
+        projection_runtime_id: &str,
+    ) -> Result<Option<BoundRuntimeAsset>, ConversationError> {
+        let bindings = catalog
+            .list_active_runtime_bindings(user_id, kind)
+            .await
+            .map_err(|error| {
+                ConversationError::internal(format!("运行资产 active Binding 查询失败，已拒绝启动：{error}"))
+            })?;
+        Ok(bindings
+            .into_iter()
+            .find(|binding| binding.projection_runtime_id == projection_runtime_id))
+    }
+
+    async fn resolve_runtime_mcps(
+        &self,
+        user_id: &str,
+        selected_ids: Option<&[String]>,
+    ) -> Result<(Vec<RuntimeManagedMcpRef>, Vec<String>), ConversationError> {
+        let repo = self.mcp_server_repo.read().ok().and_then(|guard| guard.clone());
+        let Some(repo) = repo else {
+            if selected_ids.is_none_or(|ids| ids.is_empty()) {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            return Err(ConversationError::internal(
+                "MCP 仓库不可用，无法确认冻结选择中的实际运行资产集合",
+            ));
+        };
+        let catalog = self
+            .runtime_asset_catalog()
+            .ok_or_else(|| ConversationError::internal("资产目录不可用，无法验证 MCP 运行来源"))?;
+        let active = catalog
+            .list_active_runtime_bindings(user_id, AssetKind::Mcp)
+            .await
+            .map_err(|error| ConversationError::internal(format!("MCP active Binding 查询失败：{error}")))?;
+        let mut by_projection = active
+            .iter()
+            .cloned()
+            .map(|binding| (binding.projection_runtime_id.clone(), binding))
+            .collect::<HashMap<_, _>>();
+
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        match selected_ids {
+            Some(ids) => {
+                for reference in ids {
+                    let bound = match catalog
+                        .resolve_bound_runtime_asset(user_id, AssetKind::Mcp, reference)
+                        .await
+                    {
+                        Ok(bound) => bound,
+                        Err(AssetError::NotFound(_)) => {
+                            let row = repo
+                                .find_by_id_any(reference)
+                                .await
+                                .map_err(|error| ConversationError::internal(format!("MCP 精确查询失败：{error}")))?
+                                .ok_or_else(|| ConversationError::internal("MCP 冻结选择中存在缺失配置，已拒绝启动"))?;
+                            by_projection.remove(row.name.as_str()).ok_or_else(|| {
+                                ConversationError::internal("MCP 冻结选择不属于当前用户的 active Binding，已拒绝启动")
+                            })?
+                        }
+                        Err(error) => {
+                            return Err(ConversationError::internal(format!(
+                                "MCP 资产来源验证失败，已拒绝启动：{error}"
+                            )));
+                        }
+                    };
+                    if seen.insert(bound.projection_runtime_id.clone()) {
+                        selected.push(bound);
+                    }
+                }
+            }
+            None => selected.extend(active),
+        }
+        selected.sort_by(|left, right| left.projection_runtime_id.cmp(&right.projection_runtime_id));
+
+        let mut managed = Vec::with_capacity(selected.len());
+        let mut resolved_row_ids = Vec::with_capacity(selected.len());
+        for bound in selected {
+            let row = repo
+                .find_by_name(&bound.projection_runtime_id)
+                .await
+                .map_err(|error| ConversationError::internal(format!("MCP 内部投影查询失败：{error}")))?
+                .ok_or_else(|| ConversationError::internal("MCP active Binding 缺少内部运行投影，已拒绝启动"))?;
+            if row.builtin || row.name != bound.projection_runtime_id || (selected_ids.is_none() && !row.enabled) {
+                return Err(ConversationError::internal(
+                    "MCP 运行时身份与资产目录记录不一致，已拒绝启动",
+                ));
+            }
+            let provenance = bound.provenance;
+            let runtime_content_digest = digest_runtime_definition(
+                b"tjuae-runtime-mcp-v1\0",
+                &[
+                    provenance.local_definition_digest.as_bytes(),
+                    provenance.runtime_id.as_bytes(),
+                ],
+            );
+            managed.push(RuntimeManagedMcpRef {
+                server_name: row.name,
+                asset: runtime_asset_ref_from_provenance(provenance, runtime_content_digest),
+            });
+            resolved_row_ids.push(row.id);
+        }
+        Ok((managed, resolved_row_ids))
+    }
+
+    async fn resolve_assistant_runtime_provenance(
+        &self,
+        user_id: &str,
+        snapshot: &ConversationAssistantSnapshotRow,
+    ) -> Result<RuntimeAssetProvenance, ConversationError> {
+        let definition_repo = self
+            .assistant_definition_repo()
+            .ok_or_else(|| ConversationError::internal("助手 Definition 仓库不可用，无法验证运行资产来源"))?;
+        let definition = definition_repo
+            .get_by_id(&snapshot.assistant_definition_id)
+            .await
+            .map_err(|error| ConversationError::internal(format!("助手 Definition 来源查询失败：{error}")))?
+            .ok_or_else(|| ConversationError::internal("助手 Definition 来源缺失，已拒绝启动"))?;
+        if definition.id != snapshot.assistant_definition_id {
+            return Err(ConversationError::internal(
+                "助手冻结快照与运行时 Definition 身份不一致，已拒绝启动",
+            ));
+        }
+
+        let source_ref = definition
+            .source_ref
+            .as_deref()
+            .ok_or_else(|| ConversationError::internal("助手 Definition 缺少资产来源，已拒绝启动"))?;
+        let source_projection = source_ref
+            .strip_prefix("asset:")
+            .or_else(|| source_ref.strip_prefix("market:"))
+            .filter(|value| is_projection_runtime_id(value))
+            .ok_or_else(|| ConversationError::internal("助手 Definition 资产来源不合法，已拒绝启动"))?;
+        if source_projection != definition.assistant_id {
+            return Err(ConversationError::internal(
+                "助手 Definition 的内部投影与所有权标记不一致，已拒绝启动",
+            ));
+        }
+
+        let catalog = self
+            .runtime_asset_catalog()
+            .ok_or_else(|| ConversationError::internal("资产目录不可用，无法验证助手运行来源"))?;
+        let bound = self
+            .bound_runtime_asset_by_projection(&catalog, user_id, AssetKind::Assistant, source_projection)
+            .await?
+            .ok_or_else(|| ConversationError::internal("助手投影不属于当前用户的 active Binding，已拒绝启动"))?;
+        if bound.projection_runtime_id != definition.assistant_id
+            || bound.provenance.local_asset_id != snapshot.assistant_id
+            || bound.provenance.kind != AssetKind::Assistant
+        {
+            return Err(ConversationError::internal(
+                "助手运行时身份与资产目录记录不一致，已拒绝启动",
+            ));
+        }
+        Ok(bound.provenance)
     }
 
     /// Re-read the persisted resume anchor into a turn's `BuildTaskOptions`
@@ -3392,9 +4275,8 @@ impl ConversationService {
         Some(issue.token)
     }
 
-    /// Ensure native skill links exist in the runtime workspace. Auto
-    /// workspaces are constrained to TjuaeUI's generated path; custom
-    /// workspaces were validated when the session context was built.
+    /// 确保会话所需技能已就绪。用户工作区使用 Agent 原生目录；
+    /// 自动创建的 Codex 工作区使用会话级托管根目录。
     pub(crate) async fn ensure_workspace_skill_links(&self, row: &ConversationRow, build_opts: &BuildTaskOptions) {
         let context = &build_opts.context;
         let backend = context_backend_value(context);
@@ -3418,20 +4300,35 @@ impl ConversationService {
             return;
         }
 
-        let Some(rel_dirs) = native_skills_dirs(
-            &self.agent_metadata_repo,
-            &context.conversation.agent_type,
-            backend.as_ref(),
-        )
-        .await
-        else {
-            return;
+        let uses_managed_root = !context.skill_roots.is_empty()
+            && uses_managed_codex_skills(
+                &context.conversation.agent_type,
+                backend.as_ref().and_then(serde_json::Value::as_str),
+                context.workspace.is_custom,
+            );
+        let (skill_target, rel_dirs) = if uses_managed_root {
+            cleanup_legacy_codex_workspace_skills(&workspace).await;
+            (PathBuf::from(&context.skill_roots[0]), vec![".".to_owned()])
+        } else {
+            let Some(rel_dirs) = native_skills_dirs(
+                &self.agent_metadata_repo,
+                &context.conversation.agent_type,
+                backend.as_ref(),
+            )
+            .await
+            else {
+                return;
+            };
+            (workspace.clone(), rel_dirs)
         };
         if rel_dirs.is_empty() {
             return;
         }
 
-        let resolved = self.skill_resolver.resolve_skills(&skill_names).await;
+        let resolved = self
+            .skill_resolver
+            .resolve_skills_for_user(&row.user_id, &skill_names)
+            .await;
         if resolved.is_empty() {
             return;
         }
@@ -3439,13 +4336,14 @@ impl ConversationService {
         let rel_dirs_refs: Vec<&str> = rel_dirs.iter().map(String::as_str).collect();
         let n = self
             .skill_resolver
-            .link_workspace_skills(&workspace, &rel_dirs_refs, &resolved)
+            .link_workspace_skills(&skill_target, &rel_dirs_refs, &resolved)
             .await;
         debug!(
             conversation_id = %row.id,
-            workspace = %workspace.display(),
+            skill_target = %skill_target.display(),
+            managed = uses_managed_root,
             links = n,
-            "ensured skill symlinks in auto workspace"
+            "ensured conversation skill links"
         );
     }
 
@@ -3519,14 +4417,11 @@ impl ConversationService {
         Arc::clone(&self.skill_resolver)
     }
 
-    /// Backfill `extra.skills` if the row predates the snapshot model.
+    /// Normalize the cron job id alias used by older conversation rows.
     /// Persists the mutation asynchronously; failures are logged and
-    /// swallowed so a read path never 500s because of a backfill write
-    /// failure.
+    /// swallowed so a read path never 500s because of a normalization write.
     async fn backfill_extra_inplace(&self, conversation_id: &str, extra: &mut serde_json::Value) {
-        let auto_inject = self.skill_resolver.auto_inject_names().await;
-        let mut mutated = backfill_skills_if_missing(extra, &auto_inject);
-        mutated |= backfill_cron_job_id_alias(extra);
+        let mutated = backfill_cron_job_id_alias(extra);
         if !mutated {
             return;
         }
@@ -3746,6 +4641,102 @@ async fn cleanup_empty_date_workspace_parents(workspace_root: &Path, workspace_p
     }
 }
 
+/// 清理由旧版接入方式写入自动工作区的服务托管技能目录。
+///
+/// 只处理精确的 `.codex/skills` 目录；若 `.codex` 中还有用户或其他组件
+/// 创建的配置、钩子或策略，则保留整个目录，避免误删。
+async fn cleanup_legacy_codex_workspace_skills(workspace: &Path) {
+    let codex_dir = workspace.join(".codex");
+    let legacy_skills = codex_dir.join("skills");
+    match tokio::fs::remove_dir_all(&legacy_skills).await {
+        Ok(()) => {
+            debug!(
+                workspace = %workspace.display(),
+                "removed legacy Codex skills directory from auto workspace"
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            warn!(
+                workspace = %workspace.display(),
+                error = %err,
+                "failed to remove legacy Codex skills directory"
+            );
+            return;
+        }
+    }
+
+    match tokio::fs::remove_dir(&codex_dir).await {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(err) => {
+            warn!(
+                codex_dir = %codex_dir.display(),
+                error = %err,
+                "failed to remove empty legacy Codex directory"
+            );
+        }
+    }
+}
+
+async fn cleanup_managed_codex_skill_root(workspace_root: &Path, conversation_id: &str) {
+    let managed_root = managed_codex_skill_root(workspace_root, conversation_id);
+    match tokio::fs::remove_dir_all(&managed_root).await {
+        Ok(()) => {
+            debug!(
+                conversation_id,
+                skill_root = %managed_root.display(),
+                "removed managed Codex skill root"
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            warn!(
+                conversation_id,
+                skill_root = %managed_root.display(),
+                error = %err,
+                "failed to remove managed Codex skill root"
+            );
+            return;
+        }
+    }
+
+    let Some(codex_dir) = managed_root.parent() else {
+        return;
+    };
+    let Some(skills_dir) = codex_dir.parent() else {
+        return;
+    };
+    let Some(runtime_dir) = skills_dir.parent() else {
+        return;
+    };
+    for dir in [codex_dir, skills_dir, runtime_dir] {
+        match tokio::fs::remove_dir(dir).await {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                break;
+            }
+            Err(err) => {
+                warn!(
+                    directory = %dir.display(),
+                    error = %err,
+                    "failed to remove empty managed skill parent"
+                );
+                break;
+            }
+        }
+    }
+}
+
 fn date_workspace_parent_dirs(workspace_root: &Path, workspace_path: &Path) -> Option<[PathBuf; 3]> {
     let conversations_root = std::fs::canonicalize(workspace_root.join("conversations")).ok()?;
     let relative = workspace_path.strip_prefix(&conversations_root).ok()?;
@@ -3792,6 +4783,7 @@ fn context_backend_value(context: &AgentSessionContext) -> Option<serde_json::Va
 fn build_options_backend(options: &BuildTaskOptions) -> Option<&str> {
     match &options.context.kind {
         AgentSessionKind::Acp(ctx) => ctx.config.backend.as_deref(),
+        AgentSessionKind::A2a(_) => None,
         AgentSessionKind::TjuaeCli(_) => None,
     }
 }

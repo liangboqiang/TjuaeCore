@@ -1,7 +1,7 @@
 //! E2E integration tests for ACP management routes.
 //!
-//! Tests cover: agents list, legacy agents/refresh removal, agents/test,
-//! and session-bound routes (mode/model).
+//! Tests cover: agent management/diagnostics, legacy route removal, custom
+//! connection probing, and session-bound routes (mode/model).
 
 mod common;
 
@@ -23,7 +23,7 @@ async fn management_list_returns_array() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    let req = get_with_token("/api/agents/management", &token);
+    let req = get_with_token("/api/engines/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -35,36 +35,80 @@ async fn management_list_returns_array() {
 }
 
 #[tokio::test]
-async fn legacy_refresh_agents_endpoint_is_not_found() {
+async fn removed_agent_management_route_is_not_aliased() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    let req = json_with_token("POST", "/api/agents/refresh", json!({}), &token, &csrf);
+    let req = get_with_token("/api/agents/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn test_custom_agent_nonexistent_command() {
+async fn batch_diagnostics_start_and_current_routes_share_the_same_run() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    // Endpoint was renamed from /api/agents/test to /api/agents/custom/try-connect
-    // when the custom-agent CRUD routes were introduced.  The new endpoint always
-    // returns HTTP 200 and encodes failure in the JSON body (step = "fail_cli" or
-    // "fail_acp"), so we assert on the body rather than the HTTP status.
+    let start = json_with_token(
+        "POST",
+        "/api/engines/diagnostics/run",
+        json!({ "agent_ids": [], "trigger": "manual" }),
+        &token,
+        &csrf,
+    );
+    let start_response = app.clone().oneshot(start).await.unwrap();
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let started = body_json(start_response).await;
+    assert_eq!(started["data"]["total"], 0);
+    let run_id = started["data"]["run_id"].as_str().unwrap();
+
+    let current = get_with_token("/api/engines/diagnostics/current", &token);
+    let current_response = app.oneshot(current).await.unwrap();
+    assert_eq!(current_response.status(), StatusCode::OK);
+    let current = body_json(current_response).await;
+    assert_eq!(current["data"]["run_id"], run_id);
+}
+
+#[tokio::test]
+async fn legacy_refresh_agents_endpoint_is_not_found() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+
+    let req = json_with_token("POST", "/api/engines/refresh", json!({}), &token, &csrf);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn legacy_health_check_endpoint_is_not_found() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+
     let req = json_with_token(
         "POST",
-        "/api/agents/custom/try-connect",
+        "/api/engines/legacy-agent/health-check",
+        json!({}),
+        &token,
+        &csrf,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn removed_custom_agent_try_connect_route_is_not_found() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+
+    let req = json_with_token(
+        "POST",
+        "/api/engines/custom/try-connect",
         json!({ "command": "/nonexistent/path/to/agent" }),
         &token,
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = common::body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["step"], "fail_cli");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -105,7 +149,7 @@ async fn management_list_includes_missing_custom_agents() {
     services.agent_registry.hydrate().await.unwrap();
     services.agent_registry.refresh_availability().await;
 
-    let req = get_with_token("/api/agents/management", &token);
+    let req = get_with_token("/api/engines/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -171,7 +215,7 @@ async fn management_list_marks_rows_with_unavailable_snapshot() {
     .unwrap();
     services.agent_registry.hydrate().await.unwrap();
 
-    let req = get_with_token("/api/agents/management", &token);
+    let req = get_with_token("/api/engines/management", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -189,13 +233,13 @@ async fn legacy_agents_endpoint_is_not_found() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    let req = get_with_token("/api/agents", &token);
+    let req = get_with_token("/api/engines", &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn health_check_by_id_returns_missing_status_for_uninstalled_agent() {
+async fn diagnostics_by_id_returns_missing_status_for_uninstalled_agent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
@@ -234,7 +278,7 @@ async fn health_check_by_id_returns_missing_status_for_uninstalled_agent() {
 
     let req = json_with_token(
         "POST",
-        "/api/agents/custom-missing-agent/health-check",
+        "/api/engines/custom-missing-agent/diagnostics",
         json!({}),
         &token,
         &csrf,

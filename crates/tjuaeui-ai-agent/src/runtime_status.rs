@@ -20,19 +20,6 @@ pub(crate) fn conversation_runtime_reporter(
     )
 }
 
-pub(crate) fn custom_agent_runtime_reporter(
-    broadcaster: Arc<dyn EventBroadcaster>,
-    scope_id: impl Into<String>,
-) -> SharedNodeRuntimeProgressReporter {
-    node_runtime_reporter(
-        broadcaster,
-        RuntimeStatusScope {
-            kind: RuntimeStatusScopeKind::CustomAgent,
-            id: scope_id.into(),
-        },
-    )
-}
-
 fn node_runtime_reporter(
     broadcaster: Arc<dyn EventBroadcaster>,
     scope: RuntimeStatusScope,

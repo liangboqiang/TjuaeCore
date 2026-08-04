@@ -4,16 +4,13 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Json, Path, Query, State};
+use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
-use axum::routing::{get, patch, post};
+use axum::routing::get;
 
-use tjuaeui_api_types::{
-    ApiResponse, AssistantDetailResponse, AssistantResponse, CreateAssistantRequest, ImportAssistantsRequest,
-    ImportAssistantsResult, SetAssistantStateRequest, UpdateAssistantRequest,
-};
+use tjuaeui_api_types::{ApiResponse, AssistantDetailResponse, AssistantResponse};
+use tjuaeui_auth::CurrentUser;
 use tjuaeui_common::ApiError;
 
 use crate::error::AssistantError;
@@ -22,11 +19,9 @@ pub use crate::state::AssistantRouterState;
 /// Build the router for `/api/assistants/*`.
 pub fn assistant_routes(state: AssistantRouterState) -> Router {
     Router::new()
-        .route("/api/assistants", get(list).post(create))
-        .route("/api/assistants/{id}", get(get_one).put(update).delete(delete_one))
-        .route("/api/assistants/{id}/state", patch(set_state))
+        .route("/api/assistants", get(list))
+        .route("/api/assistants/{id}", get(get_one))
         .route("/api/assistants/{id}/avatar", get(get_avatar))
-        .route("/api/assistants/import", post(import))
         .with_state(state)
 }
 
@@ -53,74 +48,37 @@ impl From<AssistantError> for ApiError {
 
 async fn list(
     State(state): State<AssistantRouterState>,
+    Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Vec<AssistantResponse>>>, ApiError> {
-    let items = state.service.list().await?;
+    let items = state.service.list_for_user(&user.id).await?;
     Ok(Json(ApiResponse::ok(items)))
-}
-
-async fn create(
-    State(state): State<AssistantRouterState>,
-    body: Result<Json<CreateAssistantRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<ApiResponse<AssistantResponse>>), ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    let created = state.service.create(req).await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(created))))
 }
 
 async fn get_one(
     State(state): State<AssistantRouterState>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     Query(query): Query<GetAssistantDetailQuery>,
 ) -> Result<Json<ApiResponse<AssistantDetailResponse>>, ApiError> {
-    let detail = state.service.get_detail(&id, query.locale.as_deref()).await?;
+    let detail = state
+        .service
+        .get_detail_for_user(&user.id, &id, query.locale.as_deref())
+        .await?;
     Ok(Json(ApiResponse::ok(detail)))
-}
-
-async fn update(
-    State(state): State<AssistantRouterState>,
-    Path(id): Path<String>,
-    body: Result<Json<UpdateAssistantRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AssistantResponse>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    let updated = state.service.update(&id, req).await?;
-    Ok(Json(ApiResponse::ok(updated)))
-}
-
-async fn delete_one(
-    State(state): State<AssistantRouterState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    state.service.delete(&id).await?;
-    Ok(Json(ApiResponse::success()))
-}
-
-async fn set_state(
-    State(state): State<AssistantRouterState>,
-    Path(id): Path<String>,
-    body: Result<Json<SetAssistantStateRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AssistantResponse>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    let resp = state.service.set_state(&id, req).await?;
-    Ok(Json(ApiResponse::ok(resp)))
-}
-
-async fn import(
-    State(state): State<AssistantRouterState>,
-    body: Result<Json<ImportAssistantsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ImportAssistantsResult>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    let result = state.service.import(req).await?;
-    Ok(Json(ApiResponse::ok(result)))
 }
 
 /// Serve the raw avatar bytes for an assistant. Content-Type inferred from the
 /// file extension (png/jpg/svg default). Extensions return 404 — the frontend
 /// serves those via `tjuae-asset://`.
-async fn get_avatar(State(state): State<AssistantRouterState>, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn get_avatar(
+    State(state): State<AssistantRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
     let asset = state
         .service
-        .avatar_asset(&id)
-        .await
+        .avatar_asset_for_user(&user.id, &id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("找不到头像“{id}”")))?;
 
     let content_type = content_type_for_extension(asset.extension.as_deref());

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tjuae_config::compat::OpenAiApiMode;
 use tjuae_types::message::ImageInputCapability;
 
+use crate::runtime_assets::RuntimeAssetLoadRequest;
 use crate::session_context::AgentSessionContext;
 
 /// Data payload for sending a user message to an Agent.
@@ -30,6 +31,8 @@ pub struct SendMessageData {
 pub struct BuildTaskOptions {
     pub context: AgentSessionContext,
     pub runtime_capabilities: RuntimeCapabilities,
+    pub runtime_asset_request: Option<RuntimeAssetLoadRequest>,
+    pub runtime_boundary_reporter: Option<crate::runtime_assets::RuntimeBoundaryReporter>,
 }
 
 impl BuildTaskOptions {
@@ -37,6 +40,8 @@ impl BuildTaskOptions {
         Self {
             context,
             runtime_capabilities: RuntimeCapabilities::default(),
+            runtime_asset_request: None,
+            runtime_boundary_reporter: None,
         }
     }
 
@@ -97,16 +102,25 @@ pub const CONVERSATION_RUNTIME_CONTEXT_VERSION: u32 = 2;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
     pub conversation_runtime_context_version: Option<u32>,
+    /// Exact managed asset generation required by the caller. A task created
+    /// for a different snapshot must be rebuilt rather than silently reused.
+    pub runtime_asset_snapshot_id: Option<String>,
 }
 
 impl RuntimeCapabilities {
     pub fn satisfies(&self, requested: &Self) -> bool {
-        match requested.conversation_runtime_context_version {
+        let context_satisfied = match requested.conversation_runtime_context_version {
             Some(version) => self
                 .conversation_runtime_context_version
                 .is_some_and(|actual| actual >= version),
             None => true,
-        }
+        };
+        // Unlike a minimum capability version, the asset generation is
+        // state, not an optional feature request. Exact equality is required
+        // so removing every asset also rebuilds a task that still has an old
+        // assistant or skill loaded.
+        let assets_satisfied = self.runtime_asset_snapshot_id == requested.runtime_asset_snapshot_id;
+        context_satisfied && assets_satisfied
     }
 }
 
@@ -197,6 +211,7 @@ mod tests {
                 use_model: None,
             },
             skills: vec![],
+            skill_roots: vec![],
             runtime_env: vec![
                 (TJUAE_USER_ID_ENV.into(), "old-user".into()),
                 (TJUAE_CONVERSATION_ID_ENV.into(), "old-conv".into()),

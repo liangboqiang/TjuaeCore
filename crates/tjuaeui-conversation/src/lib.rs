@@ -5,6 +5,7 @@ mod acp_error_recovery;
 mod agent_health_policy;
 mod convert;
 pub mod error;
+mod managed_skill_roots;
 pub(crate) mod message_cursor;
 mod message_persistence;
 pub mod response_middleware;
@@ -17,12 +18,12 @@ pub mod service;
 mod service_ops;
 pub(crate) mod session_context;
 pub mod skill_resolver;
-pub mod skill_snapshot;
 mod startup_recovery;
 pub mod state;
 mod stream_persistence;
 pub mod stream_relay;
 pub mod task_options;
+mod trace;
 mod turn_continuation_policy;
 mod turn_orchestrator;
 mod turn_recovery_policy;
@@ -36,6 +37,7 @@ pub use service::{
     ConversationAgentTurnStartedCallback, ConversationAgentTurnStatus, ConversationService,
 };
 pub use state::ConversationRouterState;
+pub use trace::ConversationTraceStartContext;
 
 #[cfg(test)]
 #[path = "service_test.rs"]

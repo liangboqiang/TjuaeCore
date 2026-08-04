@@ -309,7 +309,6 @@ fn make_extension(name: &str, version: &str, deps: &[(&str, &str)]) -> LoadedExt
             entry_point: None,
             permissions: None,
             contributes: None,
-            lifecycle: None,
             i18n: None,
         },
         directory: format!("/extensions/{name}"),

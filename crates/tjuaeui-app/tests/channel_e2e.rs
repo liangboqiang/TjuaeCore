@@ -317,7 +317,7 @@ async fn get_sessions_empty() {
 // ===========================================================================
 
 #[tokio::test]
-async fn get_channel_settings_defaults_to_generated_tjuae_cli_assistant() {
+async fn get_channel_settings_has_no_implicit_assistant_without_an_active_asset_binding() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -328,18 +328,10 @@ async fn get_channel_settings_defaults_to_generated_tjuae_cli_assistant() {
     let json = body_json(resp).await;
     assert!(json["success"].as_bool().unwrap());
     assert_eq!(json["data"]["platform"], "telegram");
-    // With no explicit binding the platform now falls back to the generated
-    // tjuae_cli bare assistant (see channel "default to bare assistant bindings");
-    // only the assistant_id is canonical, legacy fields are omitted.
-    let assistant_id = json["data"]["assistant"]["assistant_id"]
-        .as_str()
-        .expect("default channel assistant should be the generated tjuaecli bare assistant");
-    assert!(
-        assistant_id.starts_with("bare:"),
-        "expected bare assistant id, got {assistant_id}"
-    );
-    assert!(json["data"]["assistant"]["backend"].is_null());
-    assert!(json["data"]["assistant"]["agent_type"].is_null());
+    // A channel may only select an assistant that has an active AssetCatalog
+    // binding for the current user. Do not silently fall back to a generated
+    // global assistant when the local library has no active assistant.
+    assert!(json["data"]["assistant"].is_null());
     assert!(json["data"]["default_model"].is_null());
 }
 

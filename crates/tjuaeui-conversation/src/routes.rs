@@ -10,7 +10,8 @@ use tjuaeui_api_types::{
     ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CancelConversationRequest,
     CancelConversationResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse, ConversationResponse,
-    CreateConversationRequest, EnsureConversationRuntimeResponse, ListConversationsQuery, ListMessagesQuery,
+    ConversationTraceDetailResponse, ConversationTraceListResponse, CreateConversationRequest,
+    EnsureConversationRuntimeResponse, ListConversationTracesQuery, ListConversationsQuery, ListMessagesQuery,
     MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery, SendMessageRequest,
     SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
@@ -111,6 +112,8 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/associated", get(associated))
         .route("/api/conversations/{id}/messages", get(list_msg).post(send_msg))
         .route("/api/conversations/{id}/messages/{messageId}", get(get_msg))
+        .route("/api/conversations/{id}/traces", get(list_traces))
+        .route("/api/conversations/{id}/traces/{turnId}", get(get_trace))
         .route("/api/conversations/{id}/artifacts", get(list_artifacts))
         .route("/api/conversations/{id}/artifacts/{artifactId}", patch(update_artifact))
         .route("/api/conversations/{id}/cancel", post(cancel))
@@ -245,6 +248,40 @@ async fn get_msg(
     let result = state
         .service
         .get_message(&user.id, &params.id, &params.message_id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn list_traces(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<ListConversationTracesQuery>,
+) -> Result<Json<ApiResponse<ConversationTraceListResponse>>, ApiError> {
+    let result = state
+        .service
+        .list_traces(&user.id, &id, query.limit)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+#[derive(serde::Deserialize)]
+struct TracePathParams {
+    id: String,
+    #[serde(rename = "turnId")]
+    turn_id: String,
+}
+
+async fn get_trace(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(params): Path<TracePathParams>,
+) -> Result<Json<ApiResponse<ConversationTraceDetailResponse>>, ApiError> {
+    let result = state
+        .service
+        .get_trace(&user.id, &params.id, &params.turn_id)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(result)))

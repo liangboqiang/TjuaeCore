@@ -9,54 +9,53 @@
 //! slash-commands/side-question/workspace/openclaw-runtime) now live in
 //! `tjuaeui-conversation::ConversationService`, which dispatches through
 //! `AgentInstance`. This service retains only agent-catalog and
-//! ACP health-check responsibilities, plus support for the custom-agent
-//! CRUD endpoints (see `services::custom`).
+//! active-diagnostics responsibilities. Engine Adapter mutation belongs to
+//! the typed Core asset lifecycle rather than this read-only catalog service.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tjuaeui_api_types::{AgentLogoEntry, AgentManagementRow, ProviderHealthCheckRequest, ProviderHealthCheckResponse};
+use tjuaeui_api_types::{
+    AgentDiagnosticRun, AgentLogoEntry, AgentManagementRow, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
+    StartAgentDiagnosticsRequest,
+};
 use tjuaeui_db::IProviderRepository;
 use tjuaeui_realtime::EventBroadcaster;
 
+use super::a2a::A2aAgentService;
 use super::availability::{AgentAvailabilityFeedbackPort, AgentAvailabilityService};
+use super::diagnostics::AgentDiagnosticsService;
 use super::provider_health::ProviderHealthCheckService;
 use crate::error::AgentError;
 use crate::registry::AgentRegistry;
 
 pub struct AgentService {
     registry: Arc<AgentRegistry>,
-    broadcaster: Arc<dyn EventBroadcaster>,
     provider_health: ProviderHealthCheckService,
     availability: AgentAvailabilityService,
+    diagnostics: Arc<AgentDiagnosticsService>,
 }
 
 impl AgentService {
     pub fn new(
         registry: Arc<AgentRegistry>,
+        a2a_service: Arc<A2aAgentService>,
         broadcaster: Arc<dyn EventBroadcaster>,
         provider_repo: Arc<dyn IProviderRepository>,
         encryption_key: [u8; 32],
         data_dir: PathBuf,
+        session_spawner: Arc<dyn tjuaeui_process::Spawner>,
     ) -> Arc<Self> {
         let provider_health = ProviderHealthCheckService::new(provider_repo.clone(), encryption_key, data_dir.clone());
-        let availability = AgentAvailabilityService::new(registry.clone(), provider_repo);
+        let availability = AgentAvailabilityService::new(registry.clone(), provider_repo, session_spawner);
+        let diagnostics =
+            AgentDiagnosticsService::new(registry.clone(), availability.clone(), a2a_service, broadcaster.clone());
         Arc::new(Self {
             registry,
-            broadcaster,
             provider_health,
             availability,
+            diagnostics,
         })
-    }
-
-    /// Registry accessor consumed by the `services::custom` submodule
-    /// for direct repository access (upsert / delete / enable toggle).
-    pub(crate) fn registry(&self) -> &Arc<AgentRegistry> {
-        &self.registry
-    }
-
-    pub(crate) fn broadcaster(&self) -> &Arc<dyn EventBroadcaster> {
-        &self.broadcaster
     }
 
     pub fn availability_feedback_port(&self) -> Arc<dyn AgentAvailabilityFeedbackPort> {
@@ -102,8 +101,19 @@ impl AgentService {
         Ok(entries)
     }
 
-    pub async fn health_check_agent_by_id(&self, id: &str) -> Result<AgentManagementRow, AgentError> {
-        self.availability.run_manual_health_check(id).await
+    pub async fn diagnose_agent_by_id(&self, id: &str) -> Result<AgentManagementRow, AgentError> {
+        self.diagnostics.diagnose_one(id).await
+    }
+
+    pub async fn start_agent_diagnostics(
+        self: &Arc<Self>,
+        request: StartAgentDiagnosticsRequest,
+    ) -> Result<AgentDiagnosticRun, AgentError> {
+        self.diagnostics.start(request).await
+    }
+
+    pub async fn current_agent_diagnostics(&self) -> Option<AgentDiagnosticRun> {
+        self.diagnostics.current_run().await
     }
 
     pub async fn provider_health_check(
@@ -111,59 +121,6 @@ impl AgentService {
         req: ProviderHealthCheckRequest,
     ) -> Result<ProviderHealthCheckResponse, AgentError> {
         self.provider_health.health_check(req).await
-    }
-
-    pub async fn set_agent_overrides(
-        &self,
-        id: &str,
-        req: tjuaeui_api_types::SetAgentOverridesRequest,
-    ) -> Result<AgentManagementRow, AgentError> {
-        let repo = self.registry.repo_handle();
-        let row = repo
-            .get(id)
-            .await
-            .map_err(|e| AgentError::internal(format!("读取 Agent 仓储失败：{e}")))?
-            .ok_or_else(|| AgentError::not_found(format!("找不到 Agent“{id}”")))?;
-
-        let command_override = req
-            .command_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        let has_env_override = req
-            .env_override
-            .as_ref()
-            .is_some_and(|entries| entries.iter().any(|entry| !entry.name.trim().is_empty()));
-
-        if (command_override.is_some() || has_env_override) && is_internal_tjuae_cli_row(&row) {
-            return Err(AgentError::bad_request("内置 TjuaeCLI 不支持覆盖配置"));
-        }
-
-        // Launch-path overrides only make sense for direct-CLI rows. Bridge-launched
-        // rows (e.g. `npx`) keep the bridge's own arguments in `args` (such as
-        // `-y <package> acp`); swapping `command` for a launch path would feed those
-        // bridge arguments to the target binary and break startup. Reject the write so
-        // the stored spawn command stays coherent (env overrides remain allowed).
-        if command_override.is_some() && is_bridge_launched_row(&row) {
-            return Err(AgentError::bad_request(
-                "This agent launches through a package runner (npx); its launch path cannot be overridden. Use environment variables instead.",
-            ));
-        }
-
-        let env_json = match req.env_override {
-            Some(entries) if !entries.is_empty() => Some(
-                serde_json::to_string(&entries)
-                    .map_err(|e| AgentError::internal(format!("编码 env_override 失败：{e}")))?,
-            ),
-            _ => None,
-        };
-
-        repo.update_agent_overrides(id, command_override.as_deref(), env_json.as_deref())
-            .await
-            .map_err(|e| AgentError::internal(format!("更新 Agent 覆盖配置失败：{e}")))?;
-
-        self.availability.run_manual_health_check(id).await
     }
 
     pub async fn get_agent_overrides(&self, id: &str) -> Result<tjuaeui_api_types::AgentOverridesResponse, AgentError> {
@@ -189,25 +146,6 @@ impl AgentService {
             },
             env_override,
         })
-    }
-}
-
-/// True when the row is launched through a bridge binary (e.g. `npx`) rather
-/// than a direct CLI. Such rows store the bridge's own arguments in `args`
-/// (e.g. `-y <package> acp`), so replacing `command` with a launch path would
-/// forward those bridge arguments to the target binary. Launch-path overrides
-/// are therefore only valid for direct-CLI rows (`command == binary_name`, no
-/// bridge). Unparseable or absent `agent_source_info` is treated as direct.
-fn is_bridge_launched_row(row: &tjuaeui_db::AgentMetadataRow) -> bool {
-    let Some(raw) = row.agent_source_info.as_deref() else {
-        return false;
-    };
-    let Ok(info) = serde_json::from_str::<tjuaeui_api_types::AgentSourceInfo>(raw) else {
-        return false;
-    };
-    match info.bridge_binary.as_deref() {
-        Some(bridge) => info.binary_name.as_deref() != Some(bridge),
-        None => false,
     }
 }
 

@@ -10,7 +10,7 @@ use tjuaeui_api_types::{
     ModelImageInputCapability, ModelOpenAiApiMode, ModelSettings, SessionMcpServer, SessionMcpTransport,
     TEAM_MCP_SERVER_NAME, TeamMcpStdioConfig, TjuaeCliBuildExtra,
 };
-use tjuaeui_common::ProviderWithModel;
+use tjuaeui_common::{ProviderWithModel, now_ms};
 use tjuaeui_db::IMcpServerRepository;
 use tjuaeui_db::models::McpServerRow;
 use tjuaeui_realtime::EventBroadcaster;
@@ -22,6 +22,9 @@ use crate::error::AgentError;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::tjuae_cli::{TjuaeCliAgentManager, sanitize_session_messages};
+use crate::runtime_assets::{
+    RuntimeAssetFailureReason, RuntimeAssetLoadRequest, RuntimeBoundaryPhase, RuntimeBoundaryReporter,
+};
 use crate::runtime_status::conversation_runtime_reporter;
 use crate::session_context::TjuaeCliSessionBuildContext;
 use crate::types::{TjuaeCliCompatOverrides, TjuaeCliResolvedConfig};
@@ -30,7 +33,10 @@ pub(super) async fn build(
     build_context: TjuaeCliSessionBuildContext,
     model: ProviderWithModel,
     ctx: FactoryContext,
+    runtime_asset_request: Option<RuntimeAssetLoadRequest>,
+    runtime_boundary_reporter: Option<RuntimeBoundaryReporter>,
 ) -> Result<AgentInstance, AgentError> {
+    ensure_runtime_asset_receipt_support(runtime_asset_request.as_ref())?;
     let mut overrides = build_context.config;
     let resolved_skills = overrides.skills.clone();
 
@@ -54,9 +60,11 @@ pub(super) async fn build(
             repo.as_ref(),
             overrides.mcp_server_ids.as_deref(),
             &ctx.conversation_id,
+            &ctx.user_id,
+            deps.runtime_asset_configuration_resolver.as_deref(),
             deps.broadcaster.clone(),
         )
-        .await
+        .await?
         {
             extra_mcp_servers.entry(name).or_insert(config);
         }
@@ -212,8 +220,41 @@ pub(super) async fn build(
         }
     }
 
-    let agent = TjuaeCliAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    let spawn_started_at = now_ms();
+    let agent_result = TjuaeCliAgentManager::new_with_runtime_assets(
+        ctx.conversation_id,
+        ctx.workspace,
+        config,
+        resume_session,
+        runtime_asset_request,
+        runtime_boundary_reporter.clone(),
+    )
+    .await;
+    if let Some(reporter) = runtime_boundary_reporter.as_ref() {
+        match &agent_result {
+            Ok(_) => reporter.succeeded(RuntimeBoundaryPhase::Spawn, spawn_started_at, now_ms(), None),
+            Err(_) => reporter.failed(
+                RuntimeBoundaryPhase::Spawn,
+                spawn_started_at,
+                now_ms(),
+                None,
+                "TJUAE_RUNTIME_SPAWN_FAILED",
+            ),
+        }
+    }
+    let agent = agent_result?;
     Ok(AgentInstance::TjuaeCli(Arc::new(agent)))
+}
+
+fn ensure_runtime_asset_receipt_support(request: Option<&RuntimeAssetLoadRequest>) -> Result<(), AgentError> {
+    let unsupported = request.is_some_and(|request| request.core_assets.iter().any(|asset| asset.kind != "assistant"));
+    if unsupported {
+        return Err(AgentError::runtime_asset_contract(
+            RuntimeAssetFailureReason::ReceiptUnsupported,
+            "Core 只能直接证明助手 Definition；其他 Core 侧资产尚无实际加载回执，已拒绝启动",
+        ));
+    }
+    Ok(())
 }
 
 /// Map TjuaeUI DB platform/protocol settings to the tjuae_cli provider identifier.
@@ -421,8 +462,10 @@ async fn load_user_mcp_servers(
     repo: &dyn IMcpServerRepository,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
+    user_id: &str,
+    runtime_configuration_resolver: Option<&dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>,
     broadcaster: Arc<dyn EventBroadcaster>,
-) -> HashMap<String, McpServerConfig> {
+) -> Result<HashMap<String, McpServerConfig>, AgentError> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
@@ -435,7 +478,7 @@ async fn load_user_mcp_servers(
                 error = %err,
                 "user_mcp: list() failed; skipping injection"
             );
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
     };
 
@@ -448,9 +491,28 @@ async fn load_user_mcp_servers(
             continue;
         }
 
-        match row_to_mcp_server_config(&row, conversation_id, broadcaster.clone()).await {
+        let managed_local_asset_id = crate::runtime_asset_jit::managed_mcp_local_asset_id(&row)?;
+        let jit = match managed_local_asset_id.as_deref() {
+            Some(local_asset_id) => {
+                let configuration = crate::runtime_asset_jit::resolve_mcp_configuration(
+                    runtime_configuration_resolver,
+                    user_id,
+                    local_asset_id,
+                )
+                .await?;
+                crate::runtime_asset_jit::verify_managed_mcp_projection(&row, &configuration)?;
+                Some(configuration)
+            }
+            None => None,
+        };
+        match row_to_mcp_server_config(&row, jit.as_ref(), conversation_id, broadcaster.clone()).await {
             Ok(config) => {
                 servers.insert(row.name.clone(), config);
+            }
+            Err(_) if managed_local_asset_id.is_some() => {
+                return Err(AgentError::bad_request(
+                    "RUNTIME_ASSET_JIT_MCP_PROJECTION_INVALID：托管 MCP 的公开运行投影无效",
+                ));
             }
             Err(err) => {
                 warn!(
@@ -464,11 +526,12 @@ async fn load_user_mcp_servers(
         }
     }
 
-    servers
+    Ok(servers)
 }
 
 async fn row_to_mcp_server_config(
     row: &McpServerRow,
+    jit: Option<&crate::runtime_asset_jit::McpJitConfiguration>,
     conversation_id: &str,
     broadcaster: Arc<dyn EventBroadcaster>,
 ) -> Result<McpServerConfig, String> {
@@ -495,6 +558,14 @@ async fn row_to_mcp_server_config(
                         .collect()
                 })
                 .unwrap_or_default();
+            let mut env_entries = env_entries;
+            if let Some(jit) = jit {
+                env_entries.extend(
+                    jit.environment
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+            }
             let (resolved_command, args, env) =
                 ensure_stdio_launch(command, &args, &env_entries, conversation_id, broadcaster).await?;
 
@@ -514,7 +585,7 @@ async fn row_to_mcp_server_config(
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "http: missing url".to_owned())?;
-            let headers = value
+            let mut headers = value
                 .get("headers")
                 .and_then(|v| v.as_object())
                 .map(|obj| {
@@ -523,6 +594,9 @@ async fn row_to_mcp_server_config(
                         .collect::<HashMap<_, _>>()
                 })
                 .unwrap_or_default();
+            if let Some(jit) = jit {
+                headers.extend(jit.headers.iter().map(|(name, value)| (name.clone(), value.clone())));
+            }
 
             Ok(McpServerConfig {
                 transport: TransportType::StreamableHttp,
@@ -540,7 +614,7 @@ async fn row_to_mcp_server_config(
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "sse: missing url".to_owned())?;
-            let headers = value
+            let mut headers = value
                 .get("headers")
                 .and_then(|v| v.as_object())
                 .map(|obj| {
@@ -549,6 +623,9 @@ async fn row_to_mcp_server_config(
                         .collect::<HashMap<_, _>>()
                 })
                 .unwrap_or_default();
+            if let Some(jit) = jit {
+                headers.extend(jit.headers.iter().map(|(name, value)| (name.clone(), value.clone())));
+            }
 
             Ok(McpServerConfig {
                 transport: TransportType::Sse,
@@ -742,6 +819,31 @@ mod tests {
     #[cfg(unix)]
     use tjuaeui_runtime::{ManagedResourcesMode, init as init_runtime, set_managed_resources_mode};
 
+    #[test]
+    fn managed_skills_are_supported_by_tjuae_cli_runtime_receipts() {
+        let asset = crate::runtime_assets::RuntimeAssetRef {
+            local_asset_id: "skill-a".into(),
+            kind: "skill".into(),
+            local_definition_digest: format!("sha256-{}", "a".repeat(64)),
+            runtime_content_digest: format!("sha256-{}", "b".repeat(64)),
+            upstream_package: None,
+            upstream_asset_id: None,
+            upstream_version: None,
+            upstream_revision: None,
+        };
+        let request = RuntimeAssetLoadRequest::new(
+            Vec::new(),
+            vec![crate::runtime_assets::RuntimeManagedSkillRef {
+                asset,
+                root: std::path::PathBuf::from("not-observed"),
+            }],
+        )
+        .unwrap()
+        .unwrap();
+
+        ensure_runtime_asset_receipt_support(Some(&request)).unwrap();
+    }
+
     #[cfg(unix)]
     fn path_test_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -933,8 +1035,16 @@ mod tests {
         let repo = MockMcpRepo { rows: vec![row] };
         let selected = vec!["mcp-docs".to_owned()];
 
-        let extra_mcp_servers =
-            load_user_mcp_servers(&repo, Some(&selected), "conv-frozen-mcp", test_broadcaster()).await;
+        let extra_mcp_servers = load_user_mcp_servers(
+            &repo,
+            Some(&selected),
+            "conv-frozen-mcp",
+            "user-1",
+            None,
+            test_broadcaster(),
+        )
+        .await
+        .unwrap();
 
         assert!(extra_mcp_servers.contains_key("mcp-docs"));
         assert_eq!(extra_mcp_servers["mcp-docs"].transport, TransportType::StreamableHttp);
@@ -956,7 +1066,7 @@ mod tests {
             false,
         );
 
-        let config = row_to_mcp_server_config(&row, "conv-row", test_broadcaster())
+        let config = row_to_mcp_server_config(&row, None, "conv-row", test_broadcaster())
             .await
             .expect("convert");
         let command = config.command.as_deref().expect("resolved command");

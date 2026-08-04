@@ -5,15 +5,10 @@
 //! [`resolve_all_contributions`] orchestrates resolution across all
 //! enabled extensions.
 
-pub mod acp_adapter;
-pub mod agent;
-pub mod assistant;
 pub mod channel_plugin;
 pub mod i18n;
-pub mod mcp_server;
 pub mod model_provider;
 pub mod settings_tab;
-pub mod skill;
 pub mod theme;
 pub mod webui;
 
@@ -35,11 +30,6 @@ pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContrib
     };
 
     ResolvedContributions {
-        acp_adapters: acp_adapter::resolve_acp_adapters(&contributes.acp_adapters, ext_name, ext_dir),
-        mcp_servers: mcp_server::resolve_mcp_servers(&contributes.mcp_servers, ext_name),
-        assistants: assistant::resolve_assistants(&contributes.assistants, ext_name, ext_dir),
-        agents: agent::resolve_agents(&contributes.agents, ext_name, ext_dir),
-        skills: skill::resolve_skills(&contributes.skills, ext_name, ext_dir),
         themes: theme::resolve_themes(&contributes.themes, ext_name, ext_dir),
         channel_plugins: channel_plugin::resolve_channel_plugins(&contributes.channel_plugins, ext_name, ext_dir),
         webui: webui::resolve_webui_contributions(&contributes.webui, ext_name, ext_dir),
@@ -76,19 +66,7 @@ pub fn resolve_all_contributions(extensions: &[LoadedExtension]) -> ResolvedCont
 
 /// Merge `source` contributions into `target`.
 fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContributions, extension_name: &str) {
-    if !source.acp_adapters.is_empty() {
-        tracing::debug!(
-            extension = extension_name,
-            count = source.acp_adapters.len(),
-            "Merged ACP adapters"
-        );
-    }
-
-    target.acp_adapters.extend(source.acp_adapters);
-    target.mcp_servers.extend(source.mcp_servers);
-    target.assistants.extend(source.assistants);
-    target.agents.extend(source.agents);
-    target.skills.extend(source.skills);
+    tracing::trace!(extension = extension_name, "合并应用扩展贡献");
     target.themes.extend(source.themes);
     target.channel_plugins.extend(source.channel_plugins);
     target.webui.extend(source.webui);
@@ -140,7 +118,6 @@ mod tests {
                 entry_point: None,
                 permissions: None,
                 contributes,
-                lifecycle: None,
                 i18n: None,
             },
             directory: "/tmp/ext".to_owned(),
@@ -159,9 +136,8 @@ mod tests {
     fn test_resolve_extension_no_contributes() {
         let ext = make_extension("empty-ext", true, None);
         let result = resolve_extension_contributions(&ext);
-        assert!(result.acp_adapters.is_empty());
-        assert!(result.mcp_servers.is_empty());
-        assert!(result.assistants.is_empty());
+        assert!(result.themes.is_empty());
+        assert!(result.settings_tabs.is_empty());
     }
 
     #[test]
@@ -185,86 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_all_skips_disabled() {
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join("skills")).unwrap();
-        std::fs::write(dir.path().join("skills/my-skill.md"), "# skill").unwrap();
-
-        let enabled = make_extension(
-            "enabled-ext",
-            true,
-            Some(ExtContributes {
-                skills: vec![ExtSkill {
-                    name: "my-skill".into(),
-                    description: None,
-                    path: Some("skills/my-skill.md".into()),
-                }],
-                ..Default::default()
-            }),
-        );
-        let enabled = LoadedExtension {
-            directory: dir.path().to_string_lossy().into_owned(),
-            ..enabled
-        };
-        let disabled = make_extension(
-            "disabled-ext",
-            false,
-            Some(ExtContributes {
-                skills: vec![ExtSkill {
-                    name: "hidden-skill".into(),
-                    description: None,
-                    path: Some("skills/hidden-skill.md".into()),
-                }],
-                ..Default::default()
-            }),
-        );
-        let disabled = LoadedExtension {
-            directory: dir.path().to_string_lossy().into_owned(),
-            ..disabled
-        };
-
-        let result = resolve_all_contributions(&[enabled, disabled]);
-        assert_eq!(result.skills.len(), 1);
-        assert_eq!(result.skills[0].name, "my-skill");
-    }
-
-    #[test]
-    fn test_resolve_all_merges_multiple_extensions() {
-        let ext_a = make_extension(
-            "ext-a",
-            true,
-            Some(ExtContributes {
-                mcp_servers: vec![ExtMcpServer {
-                    id: "mcp-a".into(),
-                    name: "MCP A".into(),
-                    description: None,
-                    config: serde_json::json!({}),
-                }],
-                ..Default::default()
-            }),
-        );
-        let ext_b = make_extension(
-            "ext-b",
-            true,
-            Some(ExtContributes {
-                mcp_servers: vec![ExtMcpServer {
-                    id: "mcp-b".into(),
-                    name: "MCP B".into(),
-                    description: None,
-                    config: serde_json::json!({}),
-                }],
-                ..Default::default()
-            }),
-        );
-
-        let result = resolve_all_contributions(&[ext_a, ext_b]);
-        assert_eq!(result.mcp_servers.len(), 2);
-    }
-
-    #[test]
     fn test_resolve_all_empty_extensions() {
         let result = resolve_all_contributions(&[]);
-        assert!(result.acp_adapters.is_empty());
+        assert!(result.themes.is_empty());
         assert!(result.i18n.is_empty());
     }
 

@@ -95,14 +95,14 @@ pub enum ProviderHealthCheckErrorKind {
     Unknown,
 }
 
-/// Request body for `POST /api/agents/provider-health-check`.
+/// Request body for `POST /api/engines/provider-health-check`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderHealthCheckRequest {
     pub provider_id: String,
     pub model: String,
 }
 
-/// Response body for `POST /api/agents/provider-health-check`.
+/// Response body for `POST /api/engines/provider-health-check`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderHealthCheckResponse {
     pub provider_id: String,

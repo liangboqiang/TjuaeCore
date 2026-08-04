@@ -5,9 +5,9 @@
 mod agent_env;
 mod cache;
 mod http_client;
-pub mod managed_cli;
 pub mod managed_resources;
 pub mod managed_resources_contract;
+mod network_proxy;
 pub mod node_runtime;
 mod registry_npx_lock;
 mod resolver;
@@ -15,8 +15,13 @@ mod shell_env;
 
 pub use agent_env::agent_process_env;
 pub use cache::init;
-pub use managed_cli::{CLAUDE_CLI_VERSION, CODEX_CLI_VERSION, cli_version, resolve_bundled_cli};
+pub use http_client::{build_http_client, build_streaming_http_client};
 pub use managed_resources::{ManagedResourcesMode, managed_resources_mode, set_managed_resources_mode};
+pub use network_proxy::{
+    NetworkProxyConfig, NetworkProxyMode, NetworkProxySource, NetworkProxyState, NetworkProxyStatus,
+    NetworkProxyWarning, apply_network_proxy_to_http_client, network_proxy_status, network_proxy_url_for,
+    set_network_proxy_config, validate_network_proxy_config,
+};
 pub use node_runtime::{
     DoctorRow, NodeRuntimeError, NodeRuntimeFailureKind, NodeRuntimeProgress, NodeRuntimeProgressPhase,
     NodeRuntimeProgressReporter, NodeRuntimeSupport, NodeTool, ResolvedCommand, ResolvedNodeRuntime,

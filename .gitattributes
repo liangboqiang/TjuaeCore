@@ -1,2 +1,5 @@
 *.sh text eol=lf
+crates/tjuaeui-logo-catalog/assets/logos/*.svg text eol=lf
+crates/tjuaeui-logo-catalog/assets/logos/**/*.svg text eol=lf
 *.ps1 text eol=crlf
+crates/tjuaeui-db/migrations/*.sql text eol=crlf

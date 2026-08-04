@@ -11,7 +11,7 @@
 //! `SessionBackend::dispatch`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use futures_util::stream::BoxStream;
 use tjuaeui_common::{AgentKillReason, ConversationStatus, TimestampMs, now_ms};
@@ -35,6 +35,105 @@ use tjuaeui_api_types::AcpBuildExtra;
 use tjuaeui_common::AgentType;
 use tjuaeui_db::{IAcpSessionRepository, IMcpServerRepository, SaveRuntimeStateParams};
 use tjuaeui_realtime::EventBroadcaster;
+
+use crate::runtime_assets::{RuntimeBoundaryPhase, RuntimeBoundaryReporter};
+
+struct InitialSpawnTracingSpawner {
+    inner: Arc<dyn tjuaeui_process::Spawner>,
+    reporter: RuntimeBoundaryReporter,
+    pending: AtomicBool,
+}
+
+#[cfg(test)]
+mod runtime_boundary_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tjuaeui_process::{ProcessError, Spawner};
+
+    use super::InitialSpawnTracingSpawner;
+    use crate::runtime_assets::{RuntimeBoundaryPhase, RuntimeBoundaryReporter, RuntimeBoundaryStatus};
+
+    struct AlwaysFailSpawner;
+
+    #[async_trait::async_trait]
+    impl Spawner for AlwaysFailSpawner {
+        async fn spawn(
+            &self,
+            _spec: tjuaeui_common::CommandSpec,
+            _extra_env: &[(String, String)],
+            _opaque_owner_tag: &str,
+        ) -> Result<Arc<tjuaeui_process::ManagedProcess>, ProcessError> {
+            Err(ProcessError::internal("expected test failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_spawn_reporter_observes_the_real_call_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let reporter = RuntimeBoundaryReporter::new(move |event| captured.lock().unwrap().push(event));
+        let spawner = InitialSpawnTracingSpawner::new(Arc::new(AlwaysFailSpawner), reporter);
+        let spec = tjuaeui_common::CommandSpec {
+            command: "missing-test-command".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+        };
+
+        assert!(spawner.spawn(spec.clone(), &[], "test-owner").await.is_err());
+        assert!(spawner.spawn(spec, &[], "test-owner").await.is_err());
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "wake respawns must not rewrite the original turn boundary"
+        );
+        assert_eq!(events[0].phase, RuntimeBoundaryPhase::Spawn);
+        assert_eq!(events[0].status, RuntimeBoundaryStatus::Failed);
+        assert_eq!(events[0].error_code.as_deref(), Some("TJUAE_RUNTIME_SPAWN_FAILED"));
+        assert!(events[0].ended_at >= events[0].started_at);
+    }
+}
+
+impl InitialSpawnTracingSpawner {
+    fn new(inner: Arc<dyn tjuaeui_process::Spawner>, reporter: RuntimeBoundaryReporter) -> Self {
+        Self {
+            inner,
+            reporter,
+            pending: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl tjuaeui_process::Spawner for InitialSpawnTracingSpawner {
+    async fn spawn(
+        &self,
+        spec: tjuaeui_common::CommandSpec,
+        extra_env: &[(String, String)],
+        opaque_owner_tag: &str,
+    ) -> Result<Arc<tjuaeui_process::ManagedProcess>, tjuaeui_process::ProcessError> {
+        let report = self.pending.swap(false, Ordering::AcqRel);
+        let started_at = now_ms();
+        let result = self.inner.spawn(spec, extra_env, opaque_owner_tag).await;
+        if report {
+            match &result {
+                Ok(_) => self
+                    .reporter
+                    .succeeded(RuntimeBoundaryPhase::Spawn, started_at, now_ms(), None),
+                Err(_) => self.reporter.failed(
+                    RuntimeBoundaryPhase::Spawn,
+                    started_at,
+                    now_ms(),
+                    None,
+                    "TJUAE_RUNTIME_SPAWN_FAILED",
+                ),
+            }
+        }
+        result
+    }
+}
 
 const EVENT_CHANNEL_CAPACITY: usize = 512;
 
@@ -282,7 +381,7 @@ pub struct SessionAgentTask {
     /// handshake (what a PRIOR session discovered and `spawn_catalog_writeback`
     /// stored). The backend's live `capabilities()` is empty until the initialize
     /// round-trip lands (~seconds on resume); the mode/model getters serve this in
-    /// the meantime so the `/api/agents` picker is populated immediately instead of
+    /// the meantime so the `/api/engines` picker is populated immediately instead of
     /// blank, then the live catalog overwrites it the moment it arrives. Empty on
     /// paths with no persisted catalog (fresh agent, tests). Mirrors the ACP path's
     /// `preload_advertised_catalogs` "fill-when-empty, live-overwrites" semantics.
@@ -292,6 +391,7 @@ pub struct SessionAgentTask {
     /// Resolved prompt-dump target (see [`SessionPromptDump`]). `None` when
     /// `--dump-prompts` is off. Read only by `send_message`.
     prompt_dump: Option<SessionPromptDump>,
+    runtime_asset_receipt: Option<crate::runtime_assets::RuntimeAssetLoadReceipt>,
 }
 
 impl SessionAgentTask {
@@ -320,6 +420,7 @@ impl SessionAgentTask {
             session_repo,
             CatalogPreload::default(),
             None,
+            None,
         )
     }
 
@@ -346,9 +447,11 @@ impl SessionAgentTask {
             session_repo,
             CatalogPreload::from_handshake(handshake),
             prompt_dump,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         agent_type: AgentType,
         conversation_id: String,
@@ -357,6 +460,7 @@ impl SessionAgentTask {
         session_repo: Option<Arc<dyn IAcpSessionRepository>>,
         catalog_preload: CatalogPreload,
         prompt_dump: Option<SessionPromptDump>,
+        runtime_asset_receipt: Option<crate::runtime_assets::RuntimeAssetLoadReceipt>,
     ) -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let runtime = Arc::new(SessionRuntime {
@@ -383,7 +487,12 @@ impl SessionAgentTask {
             catalog_preload,
             command_seq: AtomicI64::new(0),
             prompt_dump,
+            runtime_asset_receipt,
         })
+    }
+
+    pub fn runtime_asset_receipt(&self) -> Option<crate::runtime_assets::RuntimeAssetLoadReceipt> {
+        self.runtime_asset_receipt.clone()
     }
 
     fn next_command_id(&self) -> u64 {
@@ -1021,8 +1130,17 @@ impl IAgentTask for SessionAgentTask {
 pub struct SessionBuildInputs<'a> {
     /// The conversation this session belongs to (the clean-slate `session_id`).
     pub conversation_id: String,
+    /// Authenticated owner of the conversation. Used for managed runtime-asset
+    /// JIT configuration resolution; it must never be inferred from environment.
+    pub user_id: String,
     /// The resolved workspace path (`SessionConfig.cwd`).
     pub workspace: String,
+    /// Whether the workspace was explicitly supplied by the user. Managed
+    /// Tjuae workspaces may receive a process-local Codex trust override;
+    /// custom workspaces must never be trusted implicitly.
+    pub is_custom_workspace: bool,
+    /// Session-scoped skill roots managed outside the writable workspace.
+    pub skill_roots: Vec<String>,
     /// The conversation's persisted build `extra` (mode/model/mcp/preset/skills).
     pub config: &'a AcpBuildExtra,
     /// The resolved catalog row. Used to normalize the persisted/requested mode
@@ -1043,6 +1161,7 @@ pub struct SessionBuildInputs<'a> {
     /// User-configured MCP server repository (feature ELECTRON-1JG). `None` on
     /// paths that never inject MCP (tests) ⇒ no injection.
     pub mcp_server_repo: Option<&'a Arc<dyn IMcpServerRepository>>,
+    pub runtime_asset_configuration_resolver: Option<&'a Arc<dyn tjuaeui_asset::RuntimeAssetConfigurationResolver>>,
     /// The conversation runtime context env (`TJUAE_USER_ID` /
     /// `TJUAE_CONVERSATION_ID` / `TJUAE_HELPER_BIN` / `TJUAE_BASE_URL` /
     /// `TJUAE_RUNTIME_TOKEN`, filled by `apply_conversation_runtime_context`).
@@ -1056,7 +1175,7 @@ pub struct SessionBuildInputs<'a> {
     pub broadcaster: Arc<dyn EventBroadcaster>,
     /// The resolved catalog row id + the registry's catalog sender, used to write
     /// the backend's discovered modes/models/commands back into `agent_metadata`
-    /// (GAP #7 / G5) so the `/api/agents` picker stays fresh. `None` on paths that
+    /// (GAP #7 / G5) so the `/api/engines` picker stays fresh. `None` on paths that
     /// have no catalog row to refresh.
     pub catalog_writeback: Option<(String, crate::registry::CatalogSender)>,
     /// The `acp_session` persistence sink. The event pump writes the resume anchor
@@ -1069,6 +1188,8 @@ pub struct SessionBuildInputs<'a> {
     /// spawn-time `session-cli-config` dump AND threads it (with the vendor
     /// label) into the `SessionAgentTask` for the send-time dump.
     pub prompt_dump_dir: Option<std::path::PathBuf>,
+    pub runtime_asset_request: Option<crate::runtime_assets::RuntimeAssetLoadRequest>,
+    pub runtime_boundary_reporter: Option<RuntimeBoundaryReporter>,
 }
 
 /// The pure spec + mode/model mapping — the sibling of clean-slate's
@@ -1137,26 +1258,36 @@ pub async fn build_session_instance(
         BackendConnection, ClaudeConnection, CodexConnection, McpServerSpec, SessionConfig, SessionInit, SessionSpec,
     };
 
-    let connection: Box<dyn BackendConnection> = match backend_label {
-        "claude" => Box::new(ClaudeConnection::new(spawner)),
-        "codex" => Box::new(CodexConnection::new(spawner)),
-        _ => return Ok(None),
-    };
-
     let SessionBuildInputs {
         conversation_id,
+        user_id,
         workspace,
+        is_custom_workspace,
+        skill_roots,
         config,
         metadata,
         session_snapshot,
         backend_session_id,
         mcp_server_repo,
+        runtime_asset_configuration_resolver,
         runtime_env,
         broadcaster,
         catalog_writeback,
         acp_session_repo,
         prompt_dump_dir,
+        runtime_asset_request,
+        runtime_boundary_reporter,
     } = inputs;
+
+    let spawner: Arc<dyn tjuaeui_process::Spawner> = match runtime_boundary_reporter.clone() {
+        Some(reporter) => Arc::new(InitialSpawnTracingSpawner::new(spawner, reporter)),
+        None => spawner,
+    };
+    let connection: Box<dyn BackendConnection> = match backend_label {
+        "claude" => Box::new(ClaudeConnection::new(spawner)),
+        "codex" => Box::new(CodexConnection::new(spawner)),
+        _ => return Ok(None),
+    };
 
     // GAP #1/#2 — the pure spec + mode/model mapping (resume anchor → Resume/Fresh,
     // snapshot-wins precedence). Extracted so it is unit-testable in isolation, the
@@ -1172,9 +1303,11 @@ pub async fn build_session_instance(
                 repo.as_ref(),
                 config.mcp_server_ids.as_deref(),
                 &conversation_id,
+                &user_id,
+                runtime_asset_configuration_resolver.map(Arc::as_ref),
                 broadcaster,
             )
-            .await
+            .await?
         }
         None => Vec::new(),
     };
@@ -1189,33 +1322,50 @@ pub async fn build_session_instance(
     }
 
     // GAP #4 — preset_context + skills carried into the init surface.
+    let inject_started_at = now_ms();
     let init = SessionInit {
         mcp_servers,
         skills: config.skills.clone(),
+        skill_roots,
         preset_context: config.preset_context.clone(),
         // acp/codex resume via SessionSpec::Resume; no in-band snapshot needed.
         session_snapshot: None,
         resume: matches!(spec, SessionSpec::Resume { .. }),
     };
+    if let Some(reporter) = runtime_boundary_reporter.as_ref()
+        && let Some(request) = runtime_asset_request.as_ref()
+    {
+        let ended_at = now_ms();
+        for asset in &request.core_assets {
+            reporter.succeeded(RuntimeBoundaryPhase::Inject, inject_started_at, ended_at, Some(asset));
+        }
+    }
 
     let mut session_config = SessionConfig {
         cwd: Some(workspace.clone()),
         model,
         mode,
         init,
-        // Packaged app: resolve the bundled claude/codex binary and forward its
-        // absolute path so the backend spawns OUR CLI, not the user's PATH one.
-        // Bundled-missing / dev falls back to a PATH lookup via
-        // `resolve_command_path` (NOT the bare name): on Windows, npm installs
+        // Third-party CLIs are user-managed external dependencies. Resolve the
+        // executable from PATH only; Tjuae never downloads or bundles it.
+        // Use an absolute resolved path because on Windows npm installs
         // ship `claude.cmd`/`codex.cmd` shims which `CreateProcess` does not
         // find from a bare name (#299 parity; Rust std runs `.cmd` via
         // `cmd.exe` since the BatBadBut fix). `None` (nothing on PATH either)
-        // keeps the bare name so the spawn error stays diagnosable. Detection
-        // (cli_probe) stays PATH-only and is unaffected.
-        cli_program: tjuaeui_runtime::resolve_bundled_cli(backend_label)
-            .or_else(|| tjuaeui_runtime::resolve_command_path(backend_label)),
+        // keeps the bare name so the spawn error remains diagnosable.
+        cli_program: tjuaeui_runtime::resolve_command_path(backend_label),
         ..Default::default()
     };
+
+    // Tjuae creates a fresh managed workspace for each automatic Codex
+    // conversation. Codex cannot infer that those directories are owned by the
+    // application, so without a process-local override every session emits the
+    // same untrusted-project warning. Scope the override to the exact managed
+    // path and this one app-server process; never mutate the user's config.toml
+    // and never extend trust to a user-selected workspace.
+    if backend_label == "codex" {
+        session_config.extra_args = codex_managed_workspace_trust_args(&workspace, is_custom_workspace);
+    }
 
     // Spawn env (legacy spawn-surface parity, claude AND codex).
     session_config.spawn_env = assemble_spawn_env(&metadata.env, runtime_env);
@@ -1312,20 +1462,33 @@ pub async fn build_session_instance(
         }
     }
 
-    let backend = connection
-        .open_session(spec, session_config)
-        .await
-        .map_err(|e| match e {
-            // #410 parity: a missing/non-directory workspace keeps its dedicated
-            // error class end-to-end (ProcessError::WorkspaceUnavailable →
-            // BackendError::WorkspaceUnavailable → here), so the frontend gets
-            // WORKSPACE_PATH_RUNTIME_UNAVAILABLE exactly like the legacy spawn
-            // path — not an opaque 502.
-            tjuaeui_session::BackendError::WorkspaceUnavailable(path) => {
-                AgentError::workspace_path_runtime_unavailable(path)
-            }
-            e => AgentError::bad_gateway(format!("打开 {backend_label} 会话失败：{e}")),
-        })?;
+    let handshake_started_at = now_ms();
+    let backend_result = connection.open_session(spec, session_config).await;
+    if backend_label == "codex"
+        && let Some(reporter) = runtime_boundary_reporter.as_ref()
+    {
+        match &backend_result {
+            Ok(_) => reporter.succeeded(RuntimeBoundaryPhase::Handshake, handshake_started_at, now_ms(), None),
+            Err(_) => reporter.failed(
+                RuntimeBoundaryPhase::Handshake,
+                handshake_started_at,
+                now_ms(),
+                None,
+                "TJUAE_RUNTIME_HANDSHAKE_FAILED",
+            ),
+        }
+    }
+    let backend = backend_result.map_err(|e| match e {
+        // #410 parity: a missing/non-directory workspace keeps its dedicated
+        // error class end-to-end (ProcessError::WorkspaceUnavailable →
+        // BackendError::WorkspaceUnavailable → here), so the frontend gets
+        // WORKSPACE_PATH_RUNTIME_UNAVAILABLE exactly like the legacy spawn
+        // path — not an opaque 502.
+        tjuaeui_session::BackendError::WorkspaceUnavailable(path) => {
+            AgentError::workspace_path_runtime_unavailable(path)
+        }
+        e => AgentError::bad_gateway(format!("打开 {backend_label} 会话失败：{e}")),
+    })?;
 
     // Re-apply the persisted effort now that the session is open. The backend validates
     // it against the current model's advertised catalog (permissive until the catalog
@@ -1359,14 +1522,20 @@ pub async fn build_session_instance(
         backend: if backend_label == "claude" { "claude" } else { "codex" },
     });
 
-    let task = SessionAgentTask::new_with_preload(
+    let runtime_asset_receipt = runtime_asset_request
+        .as_ref()
+        .map(crate::runtime_assets::handshake_runtime_asset_receipt)
+        .transpose()
+        .map_err(|error| AgentError::conflict(format!("Session 运行资产回执无法确认：{error}")))?;
+    let task = SessionAgentTask::build(
         AgentType::Acp,
         conversation_id,
         workspace,
         backend,
         acp_session_repo,
-        &metadata.handshake,
+        CatalogPreload::from_handshake(&metadata.handshake),
         prompt_dump,
+        runtime_asset_receipt,
     );
     Ok(Some(crate::agent_task::AgentInstance::Session(task)))
 }
@@ -1518,7 +1687,7 @@ fn team_mcp_server_spec(cfg: &tjuaeui_api_types::TeamMcpStdioConfig) -> tjuaeui_
 /// asynchronously by the reader), so this waits for a discovery (bounded to ~5s),
 /// then forwards the projected partial via the registry's `CatalogSender`
 /// (best-effort — re-discovery on the next open is the idempotent fallback). Off
-/// the open hot path. Without this the `/api/agents` model/mode picker never
+/// the open hot path. Without this the `/api/engines` model/mode picker never
 /// refreshes for claude/codex sessions (the exact "codex 无法选择模型" regression).
 ///
 /// Verbatim port of clean-slate `session_runtime::spawn_catalog_writeback`: wait
@@ -1533,7 +1702,7 @@ pub fn spawn_catalog_writeback(
         let mut best_partial = None;
         for _ in 0..100 {
             let caps = backend.capabilities();
-            if let Some(partial) = catalog_partial_from_caps(&caps) {
+            if let Some(partial) = crate::catalog::handshake_from_session_capabilities(&caps) {
                 if !caps.available_models.is_empty() {
                     // Complete enough — models present → commit the full catalog.
                     catalog_tx.send_partial(agent_id, partial);
@@ -1548,85 +1717,6 @@ pub fn spawn_catalog_writeback(
             catalog_tx.send_partial(agent_id, partial);
         }
     });
-}
-
-/// Project a backend's discovered `Capabilities` (modes / models / slash commands)
-/// into an `AgentHandshake` partial for the `agent_metadata` catalog. Verbatim port
-/// of clean-slate `session_runtime::catalog_partial_from_caps`: emits both the ACP
-/// `config_options[]` wire shape AND the top-level `available_modes`/`available_models`
-/// columns directly (the shape-stable path that keeps the codex model picker from
-/// going empty).
-fn catalog_partial_from_caps(caps: &tjuaeui_session::Capabilities) -> Option<tjuaeui_api_types::AgentHandshake> {
-    let mut config_options = Vec::new();
-    if !caps.available_modes.is_empty() {
-        config_options.push(serde_json::json!({
-            "id": "mode",
-            "category": "mode",
-            "type": "select",
-            "currentValue": caps.current_mode,
-            "options": caps.available_modes.iter().map(|m| serde_json::json!({
-                "value": m.id, "name": m.name, "description": m.description,
-            })).collect::<Vec<_>>(),
-        }));
-    }
-    if !caps.available_models.is_empty() {
-        config_options.push(serde_json::json!({
-            "id": "model",
-            "category": "model",
-            "type": "select",
-            "currentValue": caps.current_model,
-            "options": caps.available_models.iter().map(|m| serde_json::json!({
-                "value": m.id, "name": m.name, "description": m.description,
-            })).collect::<Vec<_>>(),
-        }));
-    }
-    let available_commands = if caps.slash_commands.is_empty() {
-        None
-    } else {
-        Some(serde_json::json!(
-            caps.slash_commands
-                .iter()
-                .map(|c| serde_json::json!({
-                    "name": c.name, "description": c.description,
-                }))
-                .collect::<Vec<_>>()
-        ))
-    };
-    if config_options.is_empty() && available_commands.is_none() {
-        return None;
-    }
-    let config_options = if config_options.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Array(config_options))
-    };
-    // Also project the top-level `available_modes`/`available_models` fields directly
-    // (shape: `{available_models:[{id,label}]}`), which `apply_handshake` persists to
-    // the catalog columns VERBATIM — the authoritative, shape-stable path (matches what
-    // a live claude handshake stores), so the codex model picker never goes empty.
-    let available_modes = (!caps.available_modes.is_empty()).then(|| {
-        serde_json::json!({
-            "available_modes": caps.available_modes.iter().map(|m| serde_json::json!({
-                "id": m.id, "name": m.name, "description": m.description,
-            })).collect::<Vec<_>>(),
-            "current_mode_id": caps.current_mode,
-        })
-    });
-    let available_models = (!caps.available_models.is_empty()).then(|| {
-        serde_json::json!({
-            "available_models": caps.available_models.iter().map(|m| serde_json::json!({
-                "id": m.id, "label": m.name,
-            })).collect::<Vec<_>>(),
-            "current_model_id": caps.current_model,
-        })
-    });
-    Some(tjuaeui_api_types::AgentHandshake {
-        config_options,
-        available_modes,
-        available_models,
-        available_commands,
-        ..Default::default()
-    })
 }
 
 /// Map a conversation's requested mode → the codex `thread/start.sandbox` string
@@ -1652,6 +1742,43 @@ fn catalog_partial_from_caps(caps: &tjuaeui_session::Capabilities) -> Option<tju
 /// skipped bare-mapping) stays recognized. Kept in lockstep with
 /// `codex_conn::codex_perm::{normalize_to_profile_id,
 /// profile_id_to_legacy_value}`.
+fn codex_managed_workspace_trust_args(workspace: &str, is_custom_workspace: bool) -> Vec<String> {
+    if is_custom_workspace || workspace.is_empty() {
+        return Vec::new();
+    }
+
+    // JSON string escaping is a strict subset of TOML basic-string escaping
+    // for filesystem paths: it quotes `"`/`\\` and control characters while
+    // preserving the exact Unicode path. This produces a quoted TOML dotted
+    // key, so dots inside the path are data rather than key separators.
+    let quoted_workspace = serde_json::to_string(workspace).expect("serializing a Rust string cannot fail");
+    vec![
+        "-c".into(),
+        format!("projects.{quoted_workspace}.trust_level=\"trusted\""),
+    ]
+}
+
+#[cfg(test)]
+mod managed_workspace_trust_tests {
+    use super::codex_managed_workspace_trust_args;
+
+    #[test]
+    fn managed_workspace_gets_one_exact_process_local_override() {
+        let args = codex_managed_workspace_trust_args(r#"C:\Users\Alice\Tjuae\conversation.1"#, false);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        assert_eq!(
+            args[1],
+            r#"projects."C:\\Users\\Alice\\Tjuae\\conversation.1".trust_level="trusted""#
+        );
+    }
+
+    #[test]
+    fn custom_workspace_is_never_implicitly_trusted() {
+        assert!(codex_managed_workspace_trust_args(r#"D:\customer\repo"#, true).is_empty());
+    }
+}
+
 fn codex_sandbox_for_mode(mode: Option<&str>) -> Option<&'static str> {
     match mode.map(str::trim) {
         // `agent-full-access` is the canonical codex full-access mode id since #608
@@ -2626,12 +2753,11 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
         }
         // Out-of-turn advisory (codex `warning`/`guardianWarning`/`configWarning`/
         // `deprecationNotice`; claude a rejected mode/model/effort set surfaced by
-        // `sniff_set_config_reject`). Both backends emit `Notice` *specifically so a
-        // failed/advisory event is VISIBLE instead of silently dropped* — re-dropping it
-        // here would re-introduce exactly the silent-degradation the backends were coded
-        // to avoid (e.g. a rejected effort switch would look like it succeeded). Surface
-        // it as a `Tips` frame — the one advisory frame the origin frontend already
-        // renders (`MessageTips`, warning/info styling). NOTE: origin's `useAcpMessage`
+        // `sniff_set_config_reject`). It remains visible through a stable localization
+        // code, but the untrusted upstream message never enters visible content or a
+        // persisted trace: notices may contain filesystem paths, endpoints or reflected
+        // credentials. A controlled debug record keeps only an allowlisted summary or
+        // an opaque digest. NOTE: origin's `useAcpMessage`
         // has no explicit `tips` case, so a `tips` frame lands in its `default:` arm,
         // which is benign for display (it renders via `mergeLiveMessage`) but also calls
         // `setRunning(true)`. That is acceptable here: a Notice only arrives mid/around a
@@ -2643,10 +2769,16 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
                 tjuaeui_session::NoticeLevel::Info => TipType::Info,
                 tjuaeui_session::NoticeLevel::Warning => TipType::Warning,
             };
+            let code = classify_codex_notice(&message);
+            tracing::debug!(
+                notice_code = code,
+                upstream_notice = %redacted_notice_for_dev_log(&message, code),
+                "received redacted out-of-turn upstream notice"
+            );
             vec![AgentStreamEvent::Tips(TipsEventData {
-                content: message,
+                content: localized_notice_fallback(code).into(),
                 tip_type,
-                code: None,
+                code: Some(code.into()),
                 params: None,
             })]
         }
@@ -2657,6 +2789,47 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
         // TurnDiffUpdated / SubagentUpdate are also dropped for now — separate
         // follow-ups (each needs its own origin frame + renderer verification).
         _ => Vec::new(),
+    }
+}
+
+fn classify_codex_notice(message: &str) -> &'static str {
+    let normalized = message.trim();
+    if normalized.starts_with(
+        "Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted",
+    ) {
+        return "CODEX_PROJECT_TRUST_REQUIRED";
+    }
+    if normalized.starts_with("Skill descriptions were shortened to fit the 2% skills context budget") {
+        return "CODEX_SKILL_DESCRIPTIONS_TRUNCATED";
+    }
+    if normalized.starts_with("Falling back from WebSockets to HTTPS transport") {
+        return "CODEX_WEBSOCKET_FALLBACK";
+    }
+    "AGENT_UPSTREAM_NOTICE"
+}
+
+fn localized_notice_fallback(code: &str) -> &'static str {
+    match code {
+        "CODEX_PROJECT_TRUST_REQUIRED" => "当前项目尚未受信任，部分项目级配置已停用。",
+        "CODEX_SKILL_DESCRIPTIONS_TRUNCATED" => "技能描述因上下文预算限制已自动精简。",
+        "CODEX_WEBSOCKET_FALLBACK" => "实时连接不可用，已切换到兼容传输方式。",
+        _ => "上游智能体返回了一条提示，请查看本地化说明。",
+    }
+}
+
+fn redacted_notice_for_dev_log(message: &str, code: &str) -> String {
+    match code {
+        "CODEX_PROJECT_TRUST_REQUIRED" => "project trust required (path redacted)".into(),
+        "CODEX_SKILL_DESCRIPTIONS_TRUNCATED" => "skill descriptions truncated".into(),
+        "CODEX_WEBSOCKET_FALLBACK" => "websocket transport fallback (endpoint/details redacted)".into(),
+        _ => {
+            use sha2::{Digest, Sha256};
+            let digest = hex::encode(Sha256::digest(message.as_bytes()));
+            format!(
+                "unclassified upstream notice (content redacted, bytes={}, sha256={digest})",
+                message.len()
+            )
+        }
     }
 }
 
@@ -2942,7 +3115,8 @@ mod build_mapping_tests {
             ..Default::default()
         };
 
-        let partial = catalog_partial_from_caps(&caps).expect("a discovered catalog projects a partial");
+        let partial = crate::catalog::handshake_from_session_capabilities(&caps)
+            .expect("a discovered catalog projects a partial");
         let cfg = partial.config_options.expect("config_options present");
         let opts = cfg.as_array().unwrap();
         assert_eq!(opts[0]["id"], "mode");
@@ -2955,7 +3129,7 @@ mod build_mapping_tests {
 
         let empty = tjuaeui_session::Capabilities::default();
         assert!(
-            catalog_partial_from_caps(&empty).is_none(),
+            crate::catalog::handshake_from_session_capabilities(&empty).is_none(),
             "empty catalog projects nothing"
         );
     }
@@ -3260,8 +3434,8 @@ mod translate_tests {
 
     // A backend Notice (a rejected mode/model/effort set, or a codex out-of-turn
     // warning/deprecation) must NOT be silently dropped at the seam — the backends emit
-    // it precisely so the failure is visible. It surfaces as a `Tips` frame the frontend
-    // already renders, carrying the notice level → TipType and the message verbatim.
+    // it precisely so the failure is visible. It surfaces as a localized `Tips` frame;
+    // untrusted upstream text is never copied into visible or persisted content.
     #[test]
     fn notice_surfaces_as_tips() {
         for (level, expected) in [
@@ -3280,10 +3454,52 @@ mod translate_tests {
             let crate::protocol::events::AgentStreamEvent::Tips(tip) = &events[0] else {
                 panic!("expected Tips, got {:?}", events[0]);
             };
-            assert_eq!(tip.content, "set effort: rejected by agent");
+            assert_eq!(tip.content, "上游智能体返回了一条提示，请查看本地化说明。");
             assert_eq!(tip.tip_type, expected, "notice level maps to tip severity");
-            assert!(tip.code.is_none(), "ad-hoc notice carries no i18n code");
+            assert_eq!(tip.code.as_deref(), Some("AGENT_UPSTREAM_NOTICE"));
         }
+    }
+
+    #[test]
+    fn known_codex_notices_carry_stable_i18n_codes() {
+        for (message, expected_code) in [
+            (
+                "Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.",
+                "CODEX_PROJECT_TRUST_REQUIRED",
+            ),
+            (
+                "Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill.",
+                "CODEX_SKILL_DESCRIPTIONS_TRUNCATED",
+            ),
+            (
+                "Falling back from WebSockets to HTTPS transport. request timed out",
+                "CODEX_WEBSOCKET_FALLBACK",
+            ),
+        ] {
+            let events = translate_event(
+                SessionEvent::Notice {
+                    level: tjuaeui_session::NoticeLevel::Warning,
+                    message: message.to_owned(),
+                },
+                "conv-1",
+                false,
+            );
+            let crate::protocol::events::AgentStreamEvent::Tips(tip) = &events[0] else {
+                panic!("expected Tips, got {:?}", events[0]);
+            };
+            assert_eq!(tip.code.as_deref(), Some(expected_code));
+            assert_eq!(tip.content, localized_notice_fallback(expected_code));
+            assert_ne!(tip.content, message, "raw upstream content must not be visible");
+        }
+    }
+
+    #[test]
+    fn unknown_notice_development_log_summary_redacts_content() {
+        let raw = r#"token=secret-value path=C:\Users\Alice\private"#;
+        let summary = redacted_notice_for_dev_log(raw, "AGENT_UPSTREAM_NOTICE");
+        assert!(!summary.contains("secret-value"));
+        assert!(!summary.contains("Alice"));
+        assert!(summary.contains("sha256="));
     }
 
     // A ConfigChanged must NOT produce any stream frame: the origin frontend's mode/
@@ -4516,6 +4732,7 @@ mod pump_tests {
                 dir: tmp.path().to_path_buf(),
                 backend: "claude",
             }),
+            None,
         );
         crate::agent_task::IAgentTask::send_message(
             task.as_ref(),
@@ -4557,6 +4774,7 @@ mod pump_tests {
                 dir: tmp.path().to_path_buf(),
                 backend: "codex",
             }),
+            None,
         );
         // Inject an image directly onto the task's dump path via a content slice
         // containing an Image block.
@@ -4590,6 +4808,7 @@ mod pump_tests {
             backend,
             None,
             CatalogPreload::default(),
+            None,
             None,
         );
         crate::agent_task::IAgentTask::send_message(

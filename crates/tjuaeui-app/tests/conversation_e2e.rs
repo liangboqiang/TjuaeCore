@@ -4,11 +4,11 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::json;
+use tjuaeui_api_types::{AssetKind, AssetRuntimeCommandRequest, CreateAssetRequest};
 use tjuaeui_db::{
-    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantPreferenceRepository,
-    IConversationRepository, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
-    SqliteAssistantPreferenceRepository, SqliteConversationRepository, UpsertAssistantDefinitionParams,
-    UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams,
+    IAssistantDefinitionRepository, IAssistantPreferenceRepository, IConversationRepository,
+    SqliteAssistantDefinitionRepository, SqliteAssistantPreferenceRepository, SqliteConversationRepository,
+    UpsertAssistantPreferenceParams,
 };
 use tower::ServiceExt;
 
@@ -116,89 +116,76 @@ async fn t1_3_create_with_optional_fields() {
 async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snapshot() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let user_id = "system_default_user";
     let assistant_id = "locale-fallback-u1";
 
-    let create_assistant_req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": assistant_id,
-            "name": "Snapshot Assistant",
-            "agent_id": "8e1acf31"
-        }),
-        &token,
-        &csrf,
-    );
-    let create_assistant_resp = app.clone().oneshot(create_assistant_req).await.unwrap();
-    assert_eq!(create_assistant_resp.status(), StatusCode::CREATED);
-
-    let write_rule_req = json_with_token(
-        "POST",
-        "/api/skills/assistant-rule/write",
-        json!({
-            "assistant_id": assistant_id,
-            "content": "zh-TW fallback snapshot rule",
-            "locale": "zh-TW"
-        }),
-        &token,
-        &csrf,
-    );
-    let write_rule_resp = app.clone().oneshot(write_rule_req).await.unwrap();
-    assert_eq!(write_rule_resp.status(), StatusCode::OK);
+    let created = services
+        .asset_catalog
+        .create(
+            user_id,
+            CreateAssetRequest {
+                id: assistant_id.into(),
+                kind: AssetKind::Assistant,
+                display_name: "Snapshot Assistant".into(),
+                description: None,
+                runtime_id: Some(assistant_id.into()),
+            },
+        )
+        .await
+        .unwrap();
+    let rule = created
+        .files
+        .iter()
+        .find(|file| file.path == "rules/zh-CN.md")
+        .expect("local assistant template contains a simplified Chinese rule");
+    let updated = services
+        .asset_catalog
+        .write_file(
+            user_id,
+            assistant_id,
+            &rule.path,
+            "zh-CN fallback snapshot rule",
+            &rule.digest,
+        )
+        .await
+        .unwrap();
+    let command = |idempotency_key: &str| AssetRuntimeCommandRequest {
+        idempotency_key: idempotency_key.into(),
+        expected_definition_digest: updated.asset.definition_digest.clone(),
+        expected_overlay_version: None,
+    };
+    services
+        .asset_catalog
+        .validate_runtime(user_id, assistant_id, command("snapshot-validate"))
+        .await
+        .unwrap();
+    services
+        .asset_catalog
+        .try_run(user_id, assistant_id, command("snapshot-try-run"))
+        .await
+        .unwrap();
+    services
+        .asset_catalog
+        .activate(user_id, assistant_id, command("snapshot-activate"))
+        .await
+        .unwrap();
 
     let pool = services.database.pool().clone();
     let definition_repo = SqliteAssistantDefinitionRepository::new(pool.clone());
-    let state_repo = SqliteAssistantOverlayRepository::new(pool.clone());
     let preference_repo = SqliteAssistantPreferenceRepository::new(pool);
     let conversation_repo = SqliteConversationRepository::new(services.database.pool().clone());
-    let definition = definition_repo
-        .get_by_assistant_id(assistant_id)
+    let binding = services
+        .asset_catalog
+        .list_active_runtime_bindings(user_id, AssetKind::Assistant)
         .await
         .unwrap()
-        .unwrap();
-
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: &definition.id,
-            assistant_id: &definition.assistant_id,
-            source: &definition.source,
-            owner_type: &definition.owner_type,
-            source_ref: definition.source_ref.as_deref(),
-            name: &definition.name,
-            name_i18n: &definition.name_i18n,
-            description: definition.description.as_deref(),
-            description_i18n: &definition.description_i18n,
-            avatar_type: &definition.avatar_type,
-            avatar_value: definition.avatar_value.as_deref(),
-            agent_id: &definition.agent_id,
-            rule_resource_type: &definition.rule_resource_type,
-            rule_resource_ref: definition.rule_resource_ref.as_deref(),
-            recommended_prompts: &definition.recommended_prompts,
-            recommended_prompts_i18n: &definition.recommended_prompts_i18n,
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: r#"[]"#,
-            custom_skill_names: &definition.custom_skill_names,
-            default_disabled_builtin_skill_ids: r#"[]"#,
-            default_mcps_mode: "auto",
-            default_mcp_ids: r#"[]"#,
-        })
+        .into_iter()
+        .find(|binding| binding.provenance.local_asset_id == assistant_id)
+        .expect("activated assistant has a current-user runtime binding");
+    let definition = definition_repo
+        .get_by_assistant_id(&binding.projection_runtime_id)
         .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: &definition.id,
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: Some("8e1acf31"),
-            last_used_at: None,
-        })
-        .await
+        .unwrap()
         .unwrap();
     preference_repo
         .upsert(&UpsertAssistantPreferenceParams {
@@ -207,7 +194,6 @@ async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snaps
             last_permission_value: Some("workspace-write"),
             last_thought_level_value: None,
             last_skill_ids: r#"["pref-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["pref-disabled"]"#,
             last_mcp_ids: r#"["pref-mcp"]"#,
         })
         .await
@@ -224,9 +210,8 @@ async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snaps
                 "locale": "en-US",
                 "conversation_overrides": {
                     "model": "override-model",
-                    "skill_ids": ["override-skill"],
-                    "disabled_builtin_skill_ids": ["override-disabled"],
-                    "mcp_ids": ["override-mcp"]
+                    "skill_ids": [],
+                    "mcp_ids": []
                 }
             },
             "extra": {}
@@ -235,27 +220,21 @@ async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snaps
         &csrf,
     );
     let resp = app.clone().oneshot(create_req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "response={json}");
     let data = &json["data"];
     assert_eq!(data["assistant"]["id"], assistant_id);
-    assert_eq!(data["assistant"]["backend"], "codex");
+    assert_eq!(data["assistant"]["backend"], "tjuaecli");
     assert!(data["extra"].get("assistant_id").is_none());
     assert!(data["extra"].get("preset_assistant_id").is_none());
     assert!(data["extra"].get("preset_context").is_none());
     assert!(data["extra"].get("preset_rules").is_none());
     assert_eq!(data["extra"]["session_mode"], "workspace-write");
-    assert_eq!(data["extra"]["current_mode_id"], "workspace-write");
+    assert!(data["extra"]["current_mode_id"].is_null());
     assert_eq!(data["extra"]["current_model_id"], "override-model");
     assert!(data["extra"].get("assistant_snapshot").is_none());
-    assert!(
-        data["extra"]["skills"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|skill| skill == "override-skill")
-    );
+    assert_eq!(data["extra"]["skills"], json!([]));
 
     let snapshot = conversation_repo
         .get_assistant_snapshot(data["id"].as_str().unwrap())
@@ -263,11 +242,11 @@ async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snaps
         .unwrap()
         .unwrap();
     assert_eq!(snapshot.assistant_id, assistant_id);
-    assert_eq!(snapshot.agent_id, "8e1acf31");
-    assert_eq!(snapshot.rules_content, "zh-TW fallback snapshot rule");
+    assert_eq!(snapshot.agent_id, "632f31d2");
+    assert_eq!(snapshot.rules_content, "zh-CN fallback snapshot rule");
     assert_eq!(snapshot.resolved_permission_value.as_deref(), Some("workspace-write"));
-    assert_eq!(snapshot.resolved_skill_ids, r#"["override-skill"]"#);
-    assert_eq!(snapshot.resolved_mcp_ids, r#"["override-mcp"]"#);
+    assert_eq!(snapshot.resolved_skill_ids, "[]");
+    assert_eq!(snapshot.resolved_mcp_ids, "[]");
 
     let updated_preference = preference_repo.get(&definition.id).await.unwrap().unwrap();
     assert_eq!(updated_preference.last_model_id.as_deref(), Some("override-model"));
@@ -275,12 +254,8 @@ async fn t1_3b_create_persists_available_locale_fallback_rule_in_assistant_snaps
         updated_preference.last_permission_value.as_deref(),
         Some("workspace-write")
     );
-    assert_eq!(updated_preference.last_skill_ids, r#"["override-skill"]"#);
-    assert_eq!(
-        updated_preference.last_disabled_builtin_skill_ids,
-        r#"["override-disabled"]"#
-    );
-    assert_eq!(updated_preference.last_mcp_ids, r#"["override-mcp"]"#);
+    assert_eq!(updated_preference.last_skill_ids, r#"["pref-skill"]"#);
+    assert_eq!(updated_preference.last_mcp_ids, "[]");
 }
 
 #[tokio::test]

@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::dependency::{DependencyValidationResult, validate_dependencies};
-use crate::lifecycle::{HookKind, execute_hook, resolve_hook_path};
 use crate::loader::{ScanPath, filter_by_engine_compatibility, load_all};
 use crate::types::{ExtensionSource, ExtensionState, LoadedExtension};
 
@@ -119,37 +117,6 @@ pub(crate) fn build_state_map(extensions: &[LoadedExtension]) -> HashMap<String,
 }
 
 // ---------------------------------------------------------------------------
-// Deactivation hooks
-// ---------------------------------------------------------------------------
-
-/// Run `onDeactivate` hooks for all enabled extensions.
-///
-/// Errors are logged but do not propagate.
-pub(crate) async fn run_deactivation_hooks(extensions: &[LoadedExtension]) {
-    for ext in extensions {
-        if !ext.state.enabled {
-            continue;
-        }
-
-        let Some(hooks) = &ext.manifest.lifecycle else {
-            continue;
-        };
-        let Some(hook_path) = resolve_hook_path(hooks, HookKind::OnDeactivate) else {
-            continue;
-        };
-
-        let ext_dir = Path::new(&ext.directory);
-        if let Err(e) = execute_hook(ext_dir, hook_path, HookKind::OnDeactivate, &ext.manifest.name).await {
-            warn!(
-                extension = %ext.manifest.name,
-                error = %e,
-                "onDeactivate hook failed during hot reload"
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -175,7 +142,6 @@ mod tests {
                 entry_point: None,
                 permissions: None,
                 contributes: None,
-                lifecycle: None,
                 i18n: None,
             },
             directory: format!("/tmp/ext/{name}"),

@@ -7,9 +7,9 @@ pub mod manager;
 pub mod router;
 pub mod types;
 
-pub use broadcaster::{BroadcastEventBus, EventBroadcaster};
+pub use broadcaster::{BroadcastEventBus, EventBroadcaster, UserTargetedEvent};
 pub use handler::{TokenExtractor, WsHandlerState, ws_upgrade_handler};
-pub use manager::{TokenValidator, WebSocketManager};
+pub use manager::{TokenValidator, UserIdResolver, WebSocketManager};
 pub use router::{MessageRouter, NoopMessageRouter};
 pub use types::{
     ClientInfo, ConnectionId, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, PER_CONNECTION_BUFFER, WebSocketCloseCode,

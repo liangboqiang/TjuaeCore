@@ -152,7 +152,7 @@ async fn tjuae_cli_agent_metadata() {
 fn agent_session_kind_is_limited_to_runnable_runtimes() {
     fn assert_runnable(kind: AgentSessionKind) {
         match kind {
-            AgentSessionKind::Acp(_) | AgentSessionKind::TjuaeCli(_) => {}
+            AgentSessionKind::Acp(_) | AgentSessionKind::A2a(_) | AgentSessionKind::TjuaeCli(_) => {}
         }
     }
 
@@ -186,6 +186,10 @@ async fn collect_idle_ignores_tjuae_cli_agent_type() {
                 session_id: None,
                 session_snapshot: None,
             })),
+            AgentType::A2a => AgentSessionKind::A2a(Box::new(A2aSessionBuildContext {
+                agent_id: "a2a-test".into(),
+                preset_context: None,
+            })),
             AgentType::TjuaeCli => AgentSessionKind::TjuaeCli(Box::new(TjuaeCliSessionBuildContext {
                 config: Default::default(),
                 team: None,
@@ -217,6 +221,7 @@ async fn collect_idle_ignores_tjuae_cli_agent_type() {
                 use_model: None,
             },
             skills: vec![],
+            skill_roots: vec![],
             runtime_env: vec![],
             team: None,
             kind,
