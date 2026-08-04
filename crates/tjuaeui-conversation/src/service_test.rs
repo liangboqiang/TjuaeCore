@@ -1081,12 +1081,45 @@ fn make_service_with_resolver_and_acp_session_repo(
     Arc<MockRepo>,
     Arc<dyn IWorkerTaskManager>,
 ) {
+    make_service_with_workspace_root_resolver_and_acp_session_repo(
+        std::env::temp_dir(),
+        skill_resolver,
+        acp_session_repo,
+    )
+}
+
+fn make_service_with_workspace_root_and_resolver(
+    workspace_root: PathBuf,
+    skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
+) -> (
+    ConversationService,
+    Arc<MockBroadcaster>,
+    Arc<MockRepo>,
+    Arc<dyn IWorkerTaskManager>,
+) {
+    make_service_with_workspace_root_resolver_and_acp_session_repo(
+        workspace_root,
+        skill_resolver,
+        Arc::new(StubAcpSessionRepo::default()),
+    )
+}
+
+fn make_service_with_workspace_root_resolver_and_acp_session_repo(
+    workspace_root: PathBuf,
+    skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
+    acp_session_repo: Arc<dyn IAcpSessionRepository>,
+) -> (
+    ConversationService,
+    Arc<MockBroadcaster>,
+    Arc<MockRepo>,
+    Arc<dyn IWorkerTaskManager>,
+) {
     let repo = Arc::new(MockRepo::new());
     let broadcaster = Arc::new(MockBroadcaster::new());
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(StubAgentMetadataRepo);
     let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
     let svc = ConversationService::new(
-        std::env::temp_dir(),
+        workspace_root,
         broadcaster.clone(),
         skill_resolver,
         task_mgr.clone(),
@@ -7355,7 +7388,9 @@ async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversat
     let resolver = Arc::new(RecordingSkillResolver::new());
     resolver.register_local_runtime_skill("cron", "skill-local-cron");
     let links = resolver.links.clone();
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+    let workspace_root = unique_test_workspace_path("managed-codex-skills");
+    let (svc, _broadcaster, _repo, _task_mgr) =
+        make_service_with_workspace_root_and_resolver(workspace_root.clone(), resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -7367,7 +7402,7 @@ async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversat
     .unwrap();
     let resp = svc.create("user-1", req).await.unwrap();
     let workspace = PathBuf::from(resp.extra["workspace"].as_str().unwrap());
-    let managed_root = crate::managed_skill_roots::managed_codex_skill_root(&std::env::temp_dir(), &resp.id);
+    let managed_root = crate::managed_skill_roots::managed_codex_skill_root(&workspace_root, &resp.id);
 
     assert!(managed_root.join("cron").is_dir());
     assert!(!workspace.join(".codex").exists());
@@ -7380,6 +7415,7 @@ async fn auto_codex_skills_live_outside_workspace_and_are_deleted_with_conversat
 
     svc.delete("user-1", &resp.id).await.unwrap();
     assert!(!managed_root.exists());
+    std::fs::remove_dir_all(workspace_root).unwrap();
 }
 
 #[tokio::test]
