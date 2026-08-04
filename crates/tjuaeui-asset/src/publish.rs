@@ -120,6 +120,7 @@ impl HubAssetService {
                 account: None,
                 user_code: None,
                 verification_uri: None,
+                installation_uri: None,
                 expires_at: None,
                 poll_after_ms: None,
                 reason_code: Some("GITHUB_APP_NOT_CONFIGURED".into()),

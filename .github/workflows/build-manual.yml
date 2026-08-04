@@ -36,6 +36,7 @@ env:
   LINUX_ARM64_GLIBC_MAX: "GLIBC_2.30"
   # GitHub App client ID 是公开标识，通过仓库变量注入最终二进制。
   TJUAE_GITHUB_APP_CLIENT_ID: ${{ vars.TJUAE_GITHUB_APP_CLIENT_ID }}
+  TJUAE_GITHUB_APP_INSTALLATION_URL: ${{ vars.TJUAE_GITHUB_APP_INSTALLATION_URL }}
 
 jobs:
   prepare-matrix:
@@ -109,6 +110,10 @@ jobs:
         run: |
           if [[ -z "${TJUAE_GITHUB_APP_CLIENT_ID//[[:space:]]/}" ]] || [[ "${TJUAE_GITHUB_APP_CLIENT_ID}" =~ [[:space:]] ]]; then
             echo "::error::请在 TjuaeCore 仓库变量中配置非空且不含空白的 TJUAE_GITHUB_APP_CLIENT_ID。"
+            exit 1
+          fi
+          if [[ ! "${TJUAE_GITHUB_APP_INSTALLATION_URL}" =~ ^https://github\.com/apps/[A-Za-z0-9-]+/installations/new$ ]]; then
+            echo "::error::请在 TjuaeCore 仓库变量中配置合法的 TJUAE_GITHUB_APP_INSTALLATION_URL。"
             exit 1
           fi
 

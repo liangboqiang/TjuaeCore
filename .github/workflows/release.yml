@@ -7,13 +7,13 @@ on:
   workflow_call:
     inputs:
       tag_name:
-        description: "要构建并发布的标签（例如 v0.3.0）"
+        description: "要构建并发布的标签（例如 v0.3.1）"
         required: true
         type: string
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "要构建并发布的标签（例如 v0.3.0）"
+        description: "要构建并发布的标签（例如 v0.3.1）"
         required: true
         type: string
 
@@ -32,6 +32,8 @@ env:
   RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
   # GitHub App client ID 是公开标识，通过仓库变量注入最终二进制。
   TJUAE_GITHUB_APP_CLIENT_ID: ${{ vars.TJUAE_GITHUB_APP_CLIENT_ID }}
+  # App 安装页也是公开配置，用于未安装时引导用户完成前置条件。
+  TJUAE_GITHUB_APP_INSTALLATION_URL: ${{ vars.TJUAE_GITHUB_APP_INSTALLATION_URL }}
 
 jobs:
   prepare-release:
@@ -104,6 +106,10 @@ jobs:
         run: |
           if [[ -z "${TJUAE_GITHUB_APP_CLIENT_ID//[[:space:]]/}" ]] || [[ "${TJUAE_GITHUB_APP_CLIENT_ID}" =~ [[:space:]] ]]; then
             echo "::error::请在 TjuaeCore 仓库变量中配置非空且不含空白的 TJUAE_GITHUB_APP_CLIENT_ID。"
+            exit 1
+          fi
+          if [[ ! "${TJUAE_GITHUB_APP_INSTALLATION_URL}" =~ ^https://github\.com/apps/[A-Za-z0-9-]+/installations/new$ ]]; then
+            echo "::error::请在 TjuaeCore 仓库变量中配置合法的 TJUAE_GITHUB_APP_INSTALLATION_URL。"
             exit 1
           fi
 

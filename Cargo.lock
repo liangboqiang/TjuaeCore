@@ -5588,7 +5588,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-ai-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "a2a-client-lf",
  "a2a-grpc",
@@ -5652,7 +5652,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-api-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5661,7 +5661,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5722,7 +5722,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-asset"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5760,7 +5760,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-assistant"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5785,7 +5785,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-auth"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "base64",
@@ -5809,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-channel"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5840,7 +5840,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-common"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -5858,7 +5858,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-conversation"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5888,7 +5888,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-cron"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5917,7 +5917,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-db"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "fs2",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-extension"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5972,7 +5972,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-file"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-logo-catalog"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "http 1.4.2",
@@ -6015,7 +6015,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6042,7 +6042,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-office"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "calamine",
@@ -6064,7 +6064,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-process"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "fs2",
@@ -6084,7 +6084,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-project"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "serde",
@@ -6099,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-realtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "dashmap",
@@ -6114,7 +6114,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "flate2",
@@ -6142,7 +6142,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-session"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -6162,7 +6162,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-shell"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -6193,7 +6193,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-system"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6223,7 +6223,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-team"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -6251,7 +6251,7 @@ dependencies = [
 
 [[package]]
 name = "tjuaeui-team-prompts"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

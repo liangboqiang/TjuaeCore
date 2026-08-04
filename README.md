@@ -4,7 +4,7 @@ TjuaeCore 是 Tjuae 的本地服务与资产事实层，负责会话、四类本
 MCP、定时任务、文件处理和系统能力。它通过 HTTP 与 WebSocket 向 TjuaeUI 提供统一接口，
 并通过固定版本的 TjuaeCLI SDK 执行智能体会话。
 
-当前候选版本为 `0.3.0`。
+当前候选版本为 `0.3.1`。
 
 ## 仓库关系
 
@@ -73,11 +73,26 @@ just check
 
 ## 发布
 
-Release tag 使用 `v<version>`。`v0.3.0` 对应的产物命名为：
+资产发布连接使用 GitHub App Device Flow，不依赖用户机器上的 `gh` 或 `git`。正式构建前需：
+
+1. 创建 GitHub App 并启用 Device Flow。
+2. 仓库权限设置为 Administration（读写）、Contents（读写）和 Pull requests（读写）。
+3. 在 `liangboqiang` 账户和发布者账户安装该 App；发布者安装必须选择“全部仓库”，以便新建的
+   `TjuaeHub` fork 自动进入安装范围。
+4. 在 TjuaeCore 仓库变量中配置公开标识 `TJUAE_GITHUB_APP_CLIENT_ID`，以及形如
+   `https://github.com/apps/<slug>/installations/new` 的 `TJUAE_GITHUB_APP_INSTALLATION_URL`。
+
+Core 在保存加密用户令牌后会检查安装账户、仓库范围和上述三项权限；未安装时 UI 会直接打开安装页，
+安装完成后可原地重新检查，不需要再次登录。相关 GitHub 官方说明见
+[生成用户访问令牌](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)、
+[选择 GitHub App 权限](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)和
+[创建 fork 的 REST 权限](https://docs.github.com/en/rest/repos/forks#create-a-fork)。
+
+Release tag 使用 `v<version>`。`v0.3.1` 对应的产物命名为：
 
 ```text
-tjuaecore-v0.3.0-<target>.tar.gz
-tjuaecore-v0.3.0-<target>.zip
+tjuaecore-v0.3.1-<target>.tar.gz
+tjuaecore-v0.3.1-<target>.zip
 ```
 
 发布流程不依赖外部发版服务：主分支通过 `just verify` 和安全审计后，

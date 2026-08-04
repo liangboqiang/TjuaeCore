@@ -133,6 +133,9 @@ fn hub_api_error(error: AssetPublishError) -> ApiError {
                 "GitHub 连接已失效，请重新授权。".to_owned()
             }
             "GITHUB_INSUFFICIENT_PERMISSIONS" => "当前 GitHub 授权缺少发布所需权限。".to_owned(),
+            "GITHUB_APP_INSTALLATION_REQUIRED" => {
+                "请先为当前 GitHub 账户安装 Tjuae GitHub App，并选择全部仓库。".to_owned()
+            }
             _ => "发布前置条件未满足，请检查 GitHub 连接状态。".to_owned(),
         },
         AssetPublishError::HubPublishFailed(_) => "已停止发布，未对 main 分支写入任何内容。".to_owned(),

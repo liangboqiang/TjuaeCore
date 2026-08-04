@@ -79,6 +79,11 @@ pub struct HubPublishConnectionStatus {
     pub user_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_uri: Option<String>,
+    /// GitHub App installation page. It is returned only when the authenticated
+    /// account has not installed the app with the repository access required by
+    /// the publish workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +172,7 @@ mod tests {
             account: None,
             user_code: Some("ABCD-EFGH".into()),
             verification_uri: Some("https://github.com/login/device".into()),
+            installation_uri: None,
             expires_at: Some(123),
             poll_after_ms: Some(5_000),
             reason_code: None,

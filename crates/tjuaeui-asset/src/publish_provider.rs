@@ -36,7 +36,10 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 const DEFAULT_OAUTH_BASE: &str = "https://github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const FORK_READY_ATTEMPTS: usize = 8;
+const GITHUB_APP_INSTALLATION_REQUIRED: &str = "GITHUB_APP_INSTALLATION_REQUIRED";
+const GITHUB_INSUFFICIENT_PERMISSIONS: &str = "GITHUB_INSUFFICIENT_PERMISSIONS";
 const COMPILED_GITHUB_APP_CLIENT_ID: Option<&str> = option_env!("TJUAE_GITHUB_APP_CLIENT_ID");
+const COMPILED_GITHUB_APP_INSTALLATION_URL: Option<&str> = option_env!("TJUAE_GITHUB_APP_INSTALLATION_URL");
 
 /// Publishing boundary used by the asset service.
 ///
@@ -64,6 +67,7 @@ pub struct GitHubRestPublishProvider {
     operations: Arc<dyn IGithubPublishOperationRepository>,
     encryption_key: [u8; 32],
     client_id: Option<String>,
+    installation_url: Option<String>,
     oauth_base: String,
     api_base: String,
 }
@@ -81,6 +85,11 @@ impl GitHubRestPublishProvider {
             .as_deref()
             .and_then(normalize_client_id)
             .or_else(|| COMPILED_GITHUB_APP_CLIENT_ID.and_then(normalize_client_id));
+        let installation_url = std::env::var("TJUAE_GITHUB_APP_INSTALLATION_URL")
+            .ok()
+            .as_deref()
+            .and_then(normalize_installation_url)
+            .or_else(|| COMPILED_GITHUB_APP_INSTALLATION_URL.and_then(normalize_installation_url));
         let client = tjuaeui_runtime::build_http_client(Duration::from_secs(10), REQUEST_TIMEOUT)
             .map_err(AssetPublishError::Internal)?;
         Ok(Self {
@@ -89,6 +98,7 @@ impl GitHubRestPublishProvider {
             operations,
             encryption_key,
             client_id,
+            installation_url,
             oauth_base: DEFAULT_OAUTH_BASE.into(),
             api_base: DEFAULT_API_BASE.into(),
         })
@@ -101,6 +111,7 @@ impl GitHubRestPublishProvider {
         operations: Arc<dyn IGithubPublishOperationRepository>,
         encryption_key: [u8; 32],
         client_id: Option<&str>,
+        installation_url: Option<&str>,
         base: &str,
     ) -> Self {
         Self {
@@ -109,23 +120,56 @@ impl GitHubRestPublishProvider {
             operations,
             encryption_key,
             client_id: client_id.map(str::to_owned),
+            installation_url: installation_url.map(str::to_owned),
             oauth_base: base.trim_end_matches('/').into(),
             api_base: base.trim_end_matches('/').into(),
         }
     }
 
     fn configured_client_id(&self) -> Result<&str, AssetPublishError> {
+        let _ = self.configured_installation_url()?;
         self.client_id
             .as_deref()
             .ok_or_else(|| AssetPublishError::HubPublishPrerequisite("GITHUB_APP_NOT_CONFIGURED".into()))
     }
 
+    fn configured_installation_url(&self) -> Result<&str, AssetPublishError> {
+        self.installation_url
+            .as_deref()
+            .ok_or_else(|| AssetPublishError::HubPublishPrerequisite("GITHUB_APP_NOT_CONFIGURED".into()))
+    }
+
+    fn is_configured(&self) -> bool {
+        self.client_id.is_some() && self.installation_url.is_some()
+    }
+
+    fn basic_connection_status(
+        &self,
+        state: HubPublishConnectionState,
+        account: Option<String>,
+        reason_code: Option<String>,
+    ) -> HubPublishConnectionStatus {
+        let installation_uri = (reason_code.as_deref() == Some(GITHUB_APP_INSTALLATION_REQUIRED))
+            .then(|| self.installation_url.clone())
+            .flatten();
+        HubPublishConnectionStatus {
+            state,
+            account,
+            user_code: None,
+            verification_uri: None,
+            installation_uri,
+            expires_at: None,
+            poll_after_ms: None,
+            reason_code,
+        }
+    }
+
     fn status_from_row(&self, row: Option<&GithubPublishCredentialRow>) -> HubPublishConnectionStatus {
-        if self.client_id.is_none() {
-            return connection_status(HubPublishConnectionState::NotConfigured, None, None);
+        if !self.is_configured() {
+            return self.basic_connection_status(HubPublishConnectionState::NotConfigured, None, None);
         }
         let Some(row) = row else {
-            return connection_status(HubPublishConnectionState::Disconnected, None, None);
+            return self.basic_connection_status(HubPublishConnectionState::Disconnected, None, None);
         };
         match row.state.as_str() {
             "authorizationPending" if row.device_expires_at.is_some_and(|expires| expires > now_ms()) => {
@@ -134,6 +178,7 @@ impl GitHubRestPublishProvider {
                     account: None,
                     user_code: row.user_code.clone(),
                     verification_uri: row.verification_uri.clone(),
+                    installation_uri: None,
                     expires_at: row.device_expires_at,
                     poll_after_ms: row
                         .next_poll_at
@@ -142,22 +187,22 @@ impl GitHubRestPublishProvider {
                     reason_code: row.last_error_code.clone(),
                 }
             }
-            "connected" => connection_status(
+            "connected" => self.basic_connection_status(
                 HubPublishConnectionState::Connected,
                 row.account_login.clone(),
                 row.last_error_code.clone(),
             ),
-            "insufficientPermissions" => connection_status(
+            "insufficientPermissions" => self.basic_connection_status(
                 HubPublishConnectionState::InsufficientPermissions,
                 row.account_login.clone(),
                 row.last_error_code.clone(),
             ),
-            "authorizationPending" => connection_status(
+            "authorizationPending" => self.basic_connection_status(
                 HubPublishConnectionState::Disconnected,
                 None,
                 Some("GITHUB_DEVICE_CODE_EXPIRED".into()),
             ),
-            _ => connection_status(
+            _ => self.basic_connection_status(
                 HubPublishConnectionState::Disconnected,
                 None,
                 row.last_error_code.clone(),
@@ -277,8 +322,9 @@ impl GitHubRestPublishProvider {
         &self,
         row: &GithubPublishCredentialRow,
         reason_code: &str,
-    ) -> Result<(), AssetPublishError> {
-        self.credentials
+    ) -> Result<HubPublishConnectionStatus, AssetPublishError> {
+        let updated = self
+            .credentials
             .upsert(UpsertGithubPublishCredentialParams {
                 user_id: &row.user_id,
                 state: "insufficientPermissions",
@@ -298,7 +344,55 @@ impl GitHubRestPublishProvider {
                 last_error_code: Some(reason_code),
             })
             .await?;
-        Ok(())
+        Ok(self.status_from_row(Some(&updated)))
+    }
+
+    async fn mark_connected(
+        &self,
+        row: &GithubPublishCredentialRow,
+    ) -> Result<HubPublishConnectionStatus, AssetPublishError> {
+        let updated = self
+            .credentials
+            .upsert(UpsertGithubPublishCredentialParams {
+                user_id: &row.user_id,
+                state: "connected",
+                access_token_ciphertext: row.access_token_ciphertext.as_deref(),
+                refresh_token_ciphertext: row.refresh_token_ciphertext.as_deref(),
+                token_type: row.token_type.as_deref(),
+                access_expires_at: row.access_expires_at,
+                refresh_expires_at: row.refresh_expires_at,
+                account_login: row.account_login.as_deref(),
+                scopes_json: &row.scopes_json,
+                device_code_ciphertext: None,
+                user_code: None,
+                verification_uri: None,
+                device_expires_at: None,
+                poll_interval_seconds: None,
+                next_poll_at: None,
+                last_error_code: None,
+            })
+            .await?;
+        Ok(self.status_from_row(Some(&updated)))
+    }
+
+    async fn mark_publish_access_check(
+        &self,
+        row: &GithubPublishCredentialRow,
+        login: &str,
+        token: &str,
+    ) -> Result<HubPublishConnectionStatus, AssetPublishError> {
+        match self.verify_publish_access(login, token).await {
+            Ok(()) => self.mark_connected(row).await,
+            Err(AssetPublishError::HubPublishPrerequisite(code))
+                if matches!(
+                    code.as_str(),
+                    GITHUB_APP_INSTALLATION_REQUIRED | GITHUB_INSUFFICIENT_PERMISSIONS
+                ) =>
+            {
+                self.mark_permission_failure(row, &code).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn update_publish_operation(
@@ -333,6 +427,52 @@ impl GitHubRestPublishProvider {
             return Err(AssetPublishError::HubPublishPrerequisite("GITHUB_AUTH_REVOKED".into()));
         }
         decode_api_response(response, "GITHUB_IDENTITY_FAILED").await
+    }
+
+    /// A GitHub App user access token can only operate on repositories that
+    /// both the user and an installation of this app may access. Publishing
+    /// creates a new fork in the user's account, so that personal installation
+    /// must select all repositories and grant the three write permissions used
+    /// by the REST-only workflow.
+    async fn verify_app_installation(&self, login: &str, token: &str) -> Result<(), AssetPublishError> {
+        let response = self
+            .api_request(Method::GET, "/user/installations", token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let installations: GithubInstallationsResponse =
+            decode_api_response(response, "GITHUB_INSTALLATION_CHECK_FAILED").await?;
+        let Some(installation) = installations
+            .installations
+            .iter()
+            .find(|installation| installation.account.login.eq_ignore_ascii_case(login))
+        else {
+            return Err(AssetPublishError::HubPublishPrerequisite(
+                GITHUB_APP_INSTALLATION_REQUIRED.into(),
+            ));
+        };
+        if installation.repository_selection != "all" {
+            return Err(AssetPublishError::HubPublishPrerequisite(
+                GITHUB_APP_INSTALLATION_REQUIRED.into(),
+            ));
+        }
+        if !installation.permissions.supports_publish() {
+            return Err(AssetPublishError::HubPublishPrerequisite(
+                GITHUB_INSUFFICIENT_PERMISSIONS.into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_publish_access(&self, login: &str, token: &str) -> Result<(), AssetPublishError> {
+        self.verify_app_installation(login, token).await?;
+        let response = self
+            .api_request(Method::GET, &format!("/repos/{HUB_OWNER}/{HUB_REPOSITORY}"), token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let _: GithubRepository = decode_api_response(response, "GITHUB_REPOSITORY_ACCESS_FAILED").await?;
+        Ok(())
     }
 
     async fn access_token(&self, user_id: &str) -> Result<(String, GithubPublishCredentialRow), AssetPublishError> {
@@ -744,6 +884,21 @@ fn normalize_client_id(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+fn normalize_installation_url(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches('/');
+    let slug = value
+        .strip_prefix("https://github.com/apps/")?
+        .strip_suffix("/installations/new")?;
+    if slug.is_empty()
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+        || !slug.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
 #[async_trait]
 impl HubPublishProvider for GitHubRestPublishProvider {
     async fn connection_status(&self, user_id: &str) -> Result<HubPublishConnectionStatus, AssetPublishError> {
@@ -772,6 +927,23 @@ impl HubPublishProvider for GitHubRestPublishProvider {
             .get(user_id)
             .await?
             .ok_or_else(|| AssetPublishError::HubPublishPrerequisite("GITHUB_AUTHORIZATION_NOT_STARTED".into()))?;
+        if row.state == "insufficientPermissions" {
+            let (token, current) = self.access_token(user_id).await?;
+            let user = self.authenticated_identity(&token).await?;
+            if current
+                .account_login
+                .as_deref()
+                .is_some_and(|stored| !stored.eq_ignore_ascii_case(&user.login))
+            {
+                self.credentials.delete(user_id).await?;
+                return Ok(self.basic_connection_status(
+                    HubPublishConnectionState::Disconnected,
+                    None,
+                    Some("GITHUB_ACCOUNT_CHANGED".into()),
+                ));
+            }
+            return self.mark_publish_access_check(&current, &user.login, &token).await;
+        }
         if row.state != "authorizationPending" {
             return Ok(self.status_from_row(Some(&row)));
         }
@@ -816,33 +988,14 @@ impl HubPublishProvider for GitHubRestPublishProvider {
         match body {
             TokenOrErrorResponse::Token(token) => {
                 let user = self.authenticated_identity(&token.access_token).await?;
-                let upstream_response = self
-                    .api_request(
-                        Method::GET,
-                        &format!("/repos/{HUB_OWNER}/{HUB_REPOSITORY}"),
-                        &token.access_token,
-                    )
-                    .send()
+                self.persist_connected(user_id, &token, &user.login).await?;
+                let connected = self
+                    .credentials
+                    .get(user_id)
+                    .await?
+                    .ok_or_else(|| AssetPublishError::Internal("保存 GitHub 发布凭据后找不到记录".into()))?;
+                self.mark_publish_access_check(&connected, &user.login, &token.access_token)
                     .await
-                    .map_err(network_error)?;
-                if upstream_response.status() == StatusCode::FORBIDDEN {
-                    let connected = self.persist_connected(user_id, &token, &user.login).await?;
-                    let refreshed = self
-                        .credentials
-                        .get(user_id)
-                        .await?
-                        .ok_or_else(|| AssetPublishError::Internal("保存 GitHub 发布凭据后找不到记录".into()))?;
-                    self.mark_permission_failure(&refreshed, "GITHUB_INSUFFICIENT_PERMISSIONS")
-                        .await?;
-                    return Ok(HubPublishConnectionStatus {
-                        state: HubPublishConnectionState::InsufficientPermissions,
-                        reason_code: Some("GITHUB_INSUFFICIENT_PERMISSIONS".into()),
-                        ..connected
-                    });
-                }
-                let _: GithubRepository =
-                    decode_api_response(upstream_response, "GITHUB_REPOSITORY_ACCESS_FAILED").await?;
-                self.persist_connected(user_id, &token, &user.login).await
             }
             TokenOrErrorResponse::Error(error) => match error.error.as_str() {
                 "authorization_pending" => {
@@ -879,10 +1032,10 @@ impl HubPublishProvider for GitHubRestPublishProvider {
 
     async fn disconnect(&self, user_id: &str) -> Result<HubPublishConnectionStatus, AssetPublishError> {
         self.credentials.delete(user_id).await?;
-        Ok(if self.client_id.is_some() {
-            connection_status(HubPublishConnectionState::Disconnected, None, None)
+        Ok(if self.is_configured() {
+            self.basic_connection_status(HubPublishConnectionState::Disconnected, None, None)
         } else {
-            connection_status(HubPublishConnectionState::NotConfigured, None, None)
+            self.basic_connection_status(HubPublishConnectionState::NotConfigured, None, None)
         })
     }
 
@@ -956,6 +1109,17 @@ impl HubPublishProvider for GitHubRestPublishProvider {
                     "GITHUB_ACCOUNT_CHANGED".into(),
                 ));
             }
+            if let Err(error) = self.verify_publish_access(&identity.login, &token).await {
+                if let AssetPublishError::HubPublishPrerequisite(code) = &error
+                    && matches!(
+                        code.as_str(),
+                        GITHUB_APP_INSTALLATION_REQUIRED | GITHUB_INSUFFICIENT_PERMISSIONS
+                    )
+                {
+                    self.mark_permission_failure(&row, code).await?;
+                }
+                return Err(error);
+            }
             match self
                 .publish_package(
                     request,
@@ -971,7 +1135,12 @@ impl HubPublishProvider for GitHubRestPublishProvider {
                     self.credentials.delete(user_id).await?;
                     Err(AssetPublishError::HubPublishPrerequisite(code))
                 }
-                Err(AssetPublishError::HubPublishPrerequisite(code)) if code == "GITHUB_INSUFFICIENT_PERMISSIONS" => {
+                Err(AssetPublishError::HubPublishPrerequisite(code))
+                    if matches!(
+                        code.as_str(),
+                        GITHUB_APP_INSTALLATION_REQUIRED | GITHUB_INSUFFICIENT_PERMISSIONS
+                    ) =>
+                {
                     self.mark_permission_failure(&row, &code).await?;
                     Err(AssetPublishError::HubPublishPrerequisite(code))
                 }
@@ -1101,6 +1270,41 @@ struct GithubUser {
 }
 
 #[derive(Debug, Deserialize)]
+struct GithubInstallationsResponse {
+    installations: Vec<GithubInstallation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubInstallation {
+    account: GithubInstallationAccount,
+    repository_selection: String,
+    permissions: GithubInstallationPermissions,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubInstallationAccount {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubInstallationPermissions {
+    #[serde(default)]
+    administration: Option<String>,
+    #[serde(default)]
+    contents: Option<String>,
+    #[serde(default)]
+    pull_requests: Option<String>,
+}
+
+impl GithubInstallationPermissions {
+    fn supports_publish(&self) -> bool {
+        [&self.administration, &self.contents, &self.pull_requests]
+            .into_iter()
+            .all(|permission| permission.as_deref() == Some("write"))
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct GithubRepository {
     #[allow(dead_code)]
     name: String,
@@ -1152,6 +1356,7 @@ fn connection_status(
         account,
         user_code: None,
         verification_uri: None,
+        installation_uri: None,
         expires_at: None,
         poll_after_ms: None,
         reason_code,
@@ -1568,6 +1773,11 @@ mod tests {
             Some("Iv1.public-client-id")
         );
         assert_eq!(normalize_client_id(" \t\r\n "), None);
+        assert_eq!(
+            normalize_installation_url(" https://github.com/apps/tjuae-publisher/installations/new/ ").as_deref(),
+            Some("https://github.com/apps/tjuae-publisher/installations/new")
+        );
+        assert_eq!(normalize_installation_url("https://example.com/install"), None);
     }
 
     async fn provider_context(server: &MockServer, client_id: Option<&str>) -> TestContext {
@@ -1583,6 +1793,7 @@ mod tests {
             operations.clone(),
             [7; 32],
             client_id,
+            client_id.map(|_| "https://github.com/apps/tjuae-test/installations/new"),
             &server.uri(),
         );
         TestContext {
@@ -1620,6 +1831,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "octocat"})))
             .mount(server)
             .await;
+        mount_valid_installation(server, access_token).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/liangboqiang/TjuaeHub"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "TjuaeHub"})))
+            .mount(server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/repos/octocat/TjuaeHub"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "TjuaeHub"})))
@@ -1628,6 +1845,26 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/repos/octocat/TjuaeHub/merge-upstream"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message": "synced"})))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_valid_installation(server: &MockServer, access_token: &str) {
+        Mock::given(method("GET"))
+            .and(path("/user/installations"))
+            .and(header("authorization", format!("Bearer {access_token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
+                "installations": [{
+                    "account": {"login": "octocat"},
+                    "repository_selection": "all",
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "write",
+                        "pull_requests": "write"
+                    }
+                }]
+            })))
             .mount(server)
             .await;
     }
@@ -1758,6 +1995,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "TjuaeHub"})))
             .mount(&server)
             .await;
+        mount_valid_installation(&server, "ghu_super_secret").await;
 
         let context = provider_context(&server, Some("client-id")).await;
         let provider = &context.provider;
@@ -1787,6 +2025,108 @@ mod tests {
                 .contains("ghr_refresh_secret")
         );
         assert!(context.credentials.get("other-user").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_personal_app_installation_is_actionable_without_losing_tokens() {
+        let server = MockServer::start().await;
+        let context = provider_context(&server, Some("client-id")).await;
+        connect(&context.provider, "access-secret").await;
+        let row = context.credentials.get("system_default_user").await.unwrap().unwrap();
+        context
+            .provider
+            .mark_permission_failure(&row, GITHUB_APP_INSTALLATION_REQUIRED)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "octocat"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/installations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 0,
+                "installations": []
+            })))
+            .mount(&server)
+            .await;
+
+        let status = context
+            .provider
+            .poll_authorization("system_default_user")
+            .await
+            .unwrap();
+        assert_eq!(status.state, HubPublishConnectionState::InsufficientPermissions);
+        assert_eq!(status.reason_code.as_deref(), Some(GITHUB_APP_INSTALLATION_REQUIRED));
+        assert_eq!(
+            status.installation_uri.as_deref(),
+            Some("https://github.com/apps/tjuae-test/installations/new")
+        );
+        let persisted = context.credentials.get("system_default_user").await.unwrap().unwrap();
+        assert!(persisted.access_token_ciphertext.is_some());
+    }
+
+    #[tokio::test]
+    async fn installation_recheck_transitions_to_connected() {
+        let server = MockServer::start().await;
+        let context = provider_context(&server, Some("client-id")).await;
+        connect(&context.provider, "access-secret").await;
+        let row = context.credentials.get("system_default_user").await.unwrap().unwrap();
+        context
+            .provider
+            .mark_permission_failure(&row, GITHUB_APP_INSTALLATION_REQUIRED)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "octocat"})))
+            .mount(&server)
+            .await;
+        mount_valid_installation(&server, "access-secret").await;
+        Mock::given(method("GET"))
+            .and(path("/repos/liangboqiang/TjuaeHub"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "TjuaeHub"})))
+            .mount(&server)
+            .await;
+
+        let status = context
+            .provider
+            .poll_authorization("system_default_user")
+            .await
+            .unwrap();
+        assert_eq!(status.state, HubPublishConnectionState::Connected);
+        assert_eq!(status.account.as_deref(), Some("octocat"));
+        assert!(status.reason_code.is_none());
+        assert!(status.installation_uri.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_repositories_installation_cannot_cover_a_future_fork() {
+        let server = MockServer::start().await;
+        let context = provider_context(&server, Some("client-id")).await;
+        Mock::given(method("GET"))
+            .and(path("/user/installations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
+                "installations": [{
+                    "account": {"login": "octocat"},
+                    "repository_selection": "selected",
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "write",
+                        "pull_requests": "write"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            context.provider.verify_app_installation("octocat", "access-secret").await,
+            Err(AssetPublishError::HubPublishPrerequisite(code))
+                if code == GITHUB_APP_INSTALLATION_REQUIRED
+        ));
     }
 
     #[tokio::test]
