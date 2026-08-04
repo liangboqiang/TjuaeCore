@@ -5370,7 +5370,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tjuae-agent"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5401,7 +5401,7 @@ dependencies = [
 [[package]]
 name = "tjuae-compact"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "regex",
  "serde",
@@ -5413,7 +5413,7 @@ dependencies = [
 [[package]]
 name = "tjuae-config"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5438,7 +5438,7 @@ dependencies = [
 [[package]]
 name = "tjuae-mcp"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5459,7 +5459,7 @@ dependencies = [
 [[package]]
 name = "tjuae-memory"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "chrono",
  "serde",
@@ -5473,7 +5473,7 @@ dependencies = [
 [[package]]
 name = "tjuae-process"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "libc",
  "tokio",
@@ -5484,7 +5484,7 @@ dependencies = [
 [[package]]
 name = "tjuae-protocol"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "serde",
  "serde_json",
@@ -5497,7 +5497,7 @@ dependencies = [
 [[package]]
 name = "tjuae-providers"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5526,7 +5526,7 @@ dependencies = [
 [[package]]
 name = "tjuae-skills"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5554,7 +5554,7 @@ dependencies = [
 [[package]]
 name = "tjuae-tools"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5576,7 +5576,7 @@ dependencies = [
 [[package]]
 name = "tjuae-types"
 version = "0.4.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "async-trait",
  "base64",
@@ -7460,7 +7460,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=431ed635634074b8cde4939e253e4a2f38dd684b#431ed635634074b8cde4939e253e4a2f38dd684b"
+source = "git+https://github.com/liangboqiang/TjuaeCLI.git?rev=65d3b1d15f624ad46baeb99575576d10728a3786#65d3b1d15f624ad46baeb99575576d10728a3786"
 dependencies = [
  "bitflags",
  "cc",

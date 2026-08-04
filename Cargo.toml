@@ -63,12 +63,12 @@ tjuaeui-cron = { path = "crates/tjuaeui-cron" }
 tjuaeui-assistant = { path = "crates/tjuaeui-assistant" }
 tjuaeui-app = { path = "crates/tjuaeui-app" }
 
-tjuae-agent = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
-tjuae-providers = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
-tjuae-types = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
-tjuae-protocol = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
-tjuae-config = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
-tjuae-mcp = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "431ed635634074b8cde4939e253e4a2f38dd684b" }
+tjuae-agent = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-providers = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-types = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-protocol = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-config = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
+tjuae-mcp = { git = "https://github.com/liangboqiang/TjuaeCLI.git", rev = "65d3b1d15f624ad46baeb99575576d10728a3786" }
 
 # Core framework
 tokio = { version = "1", features = ["full"] }
