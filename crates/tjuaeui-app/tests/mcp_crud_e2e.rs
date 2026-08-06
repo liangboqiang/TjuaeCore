@@ -83,7 +83,7 @@ async fn create_http_server() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["transport"]["type"], "http");
+    assert_eq!(json["data"]["transport"]["type"], "streamable_http");
     assert_eq!(json["data"]["transport"]["url"], "https://example.com/mcp");
 }
 
@@ -134,7 +134,7 @@ async fn create_same_name_upserts() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let second = body_json(resp).await;
     assert_eq!(second["data"]["id"].as_str().unwrap(), first_id);
-    assert_eq!(second["data"]["transport"]["type"], "http");
+    assert_eq!(second["data"]["transport"]["type"], "streamable_http");
 }
 
 // ===========================================================================
@@ -371,7 +371,7 @@ async fn update_server_transport() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["transport"]["type"], "http");
+    assert_eq!(json["data"]["transport"]["type"], "streamable_http");
     assert_eq!(json["data"]["transport"]["url"], "https://new.url");
 }
 

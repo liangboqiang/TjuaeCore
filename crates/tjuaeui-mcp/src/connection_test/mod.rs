@@ -481,7 +481,7 @@ fn runtime_resolution_error(message: &str) -> std::io::Error {
 fn mcp_transport_type(transport: &McpServerTransport) -> &'static str {
     match transport {
         McpServerTransport::Stdio { .. } => "stdio",
-        McpServerTransport::Http { .. } => "http",
+        McpServerTransport::Http { .. } => "streamable_http",
         McpServerTransport::Sse { .. } => "sse",
     }
 }

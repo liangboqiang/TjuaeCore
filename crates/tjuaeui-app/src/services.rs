@@ -59,6 +59,8 @@ pub struct AppServices {
     pub skill_paths: Arc<tjuaeui_extension::SkillPaths>,
     /// User skill metadata and import history repository.
     pub skill_repo: Arc<dyn ISkillRepository>,
+    /// 与正式会话共用，供启动扫描预加载直接 CLI 的模型目录。
+    pub session_spawner: Arc<dyn tjuaeui_process::Spawner>,
     runtime_helper_bin: String,
     runtime_base_url: String,
 }
@@ -211,7 +213,7 @@ impl AppServices {
             broadcaster: event_bus.clone(),
             backend_binary_path: backend_binary_path.clone(),
             mcp_server_repo: Some(mcp_server_repo),
-            session_spawner,
+            session_spawner: session_spawner.clone(),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -268,6 +270,7 @@ impl AppServices {
             app_version,
             skill_paths,
             skill_repo,
+            session_spawner,
             runtime_helper_bin,
             runtime_base_url,
         })

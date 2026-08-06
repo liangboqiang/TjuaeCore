@@ -9,7 +9,9 @@ use tjuaeui_common::{McpServerStatus, McpSource, TimestampMs};
 
 /// MCP server transport configuration (tagged union).
 ///
-/// `http` represents Streamable HTTP (the MCP standard); `sse` is legacy.
+/// `streamable_http` is the MCP standard transport; legacy `http` payloads are
+/// accepted on read and normalized when serialized. `sse` remains a
+/// compatibility transport for older servers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum McpTransport {
@@ -27,7 +29,7 @@ pub enum McpTransport {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         headers: HashMap<String, String>,
     },
-    #[serde(rename = "http")]
+    #[serde(rename = "streamable_http", alias = "http")]
     Http {
         url: String,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -310,7 +312,7 @@ mod tests {
             headers: HashMap::new(),
         };
         let json = serde_json::to_value(&t).unwrap();
-        assert_eq!(json["type"], "http");
+        assert_eq!(json["type"], "streamable_http");
         assert_eq!(json["url"], "https://example.com/mcp");
         assert!(json.get("headers").is_none()); // empty map skipped
     }
@@ -324,6 +326,17 @@ mod tests {
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["type"], "sse");
         assert_eq!(json["headers"]["Authorization"], "Bearer xxx");
+    }
+
+    #[test]
+    fn test_legacy_http_transport_is_normalized() {
+        let parsed: McpTransport = serde_json::from_value(serde_json::json!({
+            "type": "http",
+            "url": "https://example.com/mcp"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(parsed).unwrap();
+        assert_eq!(serialized["type"], "streamable_http");
     }
 
     #[test]

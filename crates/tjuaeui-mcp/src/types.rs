@@ -37,7 +37,7 @@ impl McpServerTransport {
         match self {
             Self::Stdio { .. } => "stdio",
             Self::Sse { .. } => "sse",
-            Self::Http { .. } => "http",
+            Self::Http { .. } => "streamable_http",
         }
     }
 
@@ -92,10 +92,10 @@ impl McpServerTransport {
                 let headers = parse_headers_object(&value["headers"]);
                 Ok(Self::Sse { url, headers })
             }
-            "http" => {
+            "streamable_http" | "http" => {
                 let url = value["url"]
                     .as_str()
-                    .ok_or_else(|| McpError::InvalidTransport("http: missing url".into()))?
+                    .ok_or_else(|| McpError::InvalidTransport("streamable_http: missing url".into()))?
                     .to_owned();
                 let headers = parse_headers_object(&value["headers"]);
                 Ok(Self::Http { url, headers })
@@ -293,7 +293,7 @@ mod tests {
             url: "http://x".into(),
             headers: HashMap::new(),
         };
-        assert_eq!(http.transport_type(), "http");
+        assert_eq!(http.transport_type(), "streamable_http");
     }
 
     #[test]

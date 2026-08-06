@@ -276,14 +276,40 @@ fn resolve_endpoint_url(base_url: &str, endpoint: &str) -> Result<String, String
 pub(super) fn build_http_headers(headers: &HashMap<String, String>) -> reqwest::header::HeaderMap {
     let mut map = reqwest::header::HeaderMap::new();
     for (k, v) in headers {
+        let Some(resolved_value) = expand_environment_references(v, |name| std::env::var(name).ok()) else {
+            continue;
+        };
         if let (Ok(name), Ok(val)) = (
             reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-            reqwest::header::HeaderValue::from_str(v),
+            reqwest::header::HeaderValue::from_str(&resolved_value),
         ) {
             map.insert(name, val);
         }
     }
     map
+}
+
+fn expand_environment_references(input: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${env:") {
+        output.push_str(&rest[..start]);
+        let reference = &rest[start + 6..];
+        let end = reference.find('}')?;
+        let name = &reference[..end];
+        if name.is_empty()
+            || !name
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit()))
+        {
+            return None;
+        }
+        output.push_str(&lookup(name)?);
+        rest = &reference[end + 1..];
+    }
+    output.push_str(rest);
+    Some(output)
 }
 
 /// Parse a JSON-RPC response from an HTTP response body.
@@ -851,6 +877,38 @@ mod tests {
     fn build_headers_empty() {
         let headers = build_http_headers(&HashMap::new());
         assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn expands_environment_references_without_exposing_missing_values() {
+        let lookup = |name: &str| match name {
+            "MCP_TOKEN" => Some("secret-token".to_owned()),
+            "TENANT_ID" => Some("tenant-a".to_owned()),
+            _ => None,
+        };
+
+        assert_eq!(
+            expand_environment_references("Bearer ${env:MCP_TOKEN}", lookup),
+            Some("Bearer secret-token".to_owned())
+        );
+        assert_eq!(
+            expand_environment_references("${env:TENANT_ID}:${env:MCP_TOKEN}", lookup),
+            Some("tenant-a:secret-token".to_owned())
+        );
+        assert_eq!(expand_environment_references("${env:MISSING}", lookup), None);
+        assert_eq!(expand_environment_references("${env:1INVALID}", lookup), None);
+        assert_eq!(expand_environment_references("${env:UNCLOSED", lookup), None);
+    }
+
+    #[test]
+    fn omits_headers_whose_environment_reference_cannot_be_resolved() {
+        let mut map = HashMap::new();
+        map.insert("Authorization".into(), "Bearer ${env:TJUAE_TEST_MISSING_TOKEN}".into());
+        map.insert("X-Public".into(), "visible".into());
+
+        let headers = build_http_headers(&map);
+        assert!(headers.get("authorization").is_none());
+        assert_eq!(headers.get("x-public").unwrap().to_str().unwrap(), "visible");
     }
 
     // -- extract_jsonrpc_from_sse -----------------------------------------

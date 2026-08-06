@@ -1385,7 +1385,9 @@ fn codex_managed_workspace_trust_args(workspace: &str, is_custom_workspace: bool
     let quoted_workspace = serde_json::to_string(workspace).expect("workspace path serialization cannot fail");
     vec![
         "-c".to_owned(),
-        format!("projects.{quoted_workspace}.trust_level=\"trusted\""),
+        // `-c` 的值按 TOML 解析。一次覆盖完整 projects 表，可让 Windows
+        // 路径保持为动态字符串键，并且只影响当前受管 Codex 进程。
+        format!("projects={{{quoted_workspace}={{trust_level=\"trusted\"}}}}"),
     ]
 }
 
@@ -1402,7 +1404,7 @@ mod managed_workspace_trust_tests {
             codex_managed_workspace_trust_args("C:\\work\\managed-session", false),
             vec![
                 "-c".to_owned(),
-                r#"projects."C:\\work\\managed-session".trust_level="trusted""#.to_owned(),
+                r#"projects={"C:\\work\\managed-session"={trust_level="trusted"}}"#.to_owned(),
             ]
         );
     }
@@ -1500,11 +1502,40 @@ fn build_session_cli_config_dump_value(backend: &str, cfg: &tjuaeui_session::Ses
 /// Convert a neutral `SessionMcpServer` (already stdio-launch-resolved by
 /// `mcp_resolve`) into the crate-local `McpServerSpec`. Verbatim port of
 /// clean-slate `session_runtime::session_server_to_spec`.
+fn expand_session_environment_references(input: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${env:") {
+        output.push_str(&rest[..start]);
+        let reference = &rest[start + 6..];
+        let end = reference.find('}')?;
+        let name = &reference[..end];
+        if name.is_empty()
+            || !name
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit()))
+        {
+            return None;
+        }
+        output.push_str(&lookup(name)?);
+        rest = &reference[end + 1..];
+    }
+    output.push_str(rest);
+    Some(output)
+}
+
 fn session_server_to_spec(server: &tjuaeui_api_types::SessionMcpServer) -> tjuaeui_session::McpServerSpec {
     use tjuaeui_api_types::SessionMcpTransport as T;
     use tjuaeui_session::{McpServerSpec, McpTransport};
     let sorted = |m: &std::collections::HashMap<String, String>| -> Vec<(String, String)> {
-        let mut v: Vec<(String, String)> = m.iter().map(|(k, val)| (k.clone(), val.clone())).collect();
+        let mut v: Vec<(String, String)> = m
+            .iter()
+            .filter_map(|(k, val)| {
+                expand_session_environment_references(val, |name| std::env::var(name).ok())
+                    .map(|resolved| (k.clone(), resolved))
+            })
+            .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     };
@@ -1593,7 +1624,9 @@ pub fn spawn_catalog_writeback(
 /// `config_options[]` wire shape AND the top-level `available_modes`/`available_models`
 /// columns directly (the shape-stable path that keeps the codex model picker from
 /// going empty).
-fn catalog_partial_from_caps(caps: &tjuaeui_session::Capabilities) -> Option<tjuaeui_api_types::AgentHandshake> {
+pub(crate) fn catalog_partial_from_caps(
+    caps: &tjuaeui_session::Capabilities,
+) -> Option<tjuaeui_api_types::AgentHandshake> {
     let mut config_options = Vec::new();
     if !caps.available_modes.is_empty() {
         config_options.push(serde_json::json!({
@@ -3096,6 +3129,26 @@ mod build_mapping_tests {
                 "Http+StreamableHttp → Http"
             );
         }
+    }
+
+    #[test]
+    fn session_mcp_environment_references_are_expanded_or_rejected_atomically() {
+        let lookup = |name: &str| match name {
+            "MCP_TOKEN" => Some("secret-token".to_owned()),
+            "TENANT_ID" => Some("tenant-a".to_owned()),
+            _ => None,
+        };
+
+        assert_eq!(
+            expand_session_environment_references("Bearer ${env:MCP_TOKEN}", lookup),
+            Some("Bearer secret-token".to_owned())
+        );
+        assert_eq!(
+            expand_session_environment_references("${env:TENANT_ID}/${env:MCP_TOKEN}", lookup),
+            Some("tenant-a/secret-token".to_owned())
+        );
+        assert_eq!(expand_session_environment_references("${env:MISSING}", lookup), None);
+        assert_eq!(expand_session_environment_references("${env:1INVALID}", lookup), None);
     }
 }
 

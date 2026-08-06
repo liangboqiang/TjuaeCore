@@ -255,12 +255,13 @@ pub async fn build_module_states(
     let pool = services.database.pool().clone();
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
     let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
-    let agent_service = AgentService::new(
+    let agent_service = AgentService::new_with_spawner(
         services.agent_registry.clone(),
         services.event_bus.clone(),
         provider_repo,
         encryption_key,
         services.data_dir.clone(),
+        services.session_spawner.clone(),
     );
     services
         .conversation_service

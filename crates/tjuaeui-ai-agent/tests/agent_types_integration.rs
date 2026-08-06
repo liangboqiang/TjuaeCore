@@ -191,6 +191,9 @@ async fn collect_idle_ignores_tjuae_cli_agent_type() {
                 team: None,
                 belongs_to_team: false,
             })),
+            AgentType::A2a => {
+                unreachable!("A2A agents use the remote A2A runtime, not AgentSessionKind")
+            }
             AgentType::Gemini
             | AgentType::OpenclawGateway
             | AgentType::Remote
@@ -322,6 +325,7 @@ fn agent_type_serde_all_variants() {
     // Verify that all AgentType variants serialize/deserialize correctly
     for (variant, expected_json) in [
         (AgentType::Acp, "\"acp\""),
+        (AgentType::A2a, "\"a2a\""),
         (AgentType::OpenclawGateway, "\"openclaw-gateway\""),
         (AgentType::Nanobot, "\"nanobot\""),
         (AgentType::Remote, "\"remote\""),

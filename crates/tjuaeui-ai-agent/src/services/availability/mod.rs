@@ -9,6 +9,7 @@ use tjuaeui_api_types::{
 use tjuaeui_common::AgentType;
 use tjuaeui_common::now_ms;
 use tjuaeui_db::{IProviderRepository, UpdateAgentAvailabilitySnapshotParams};
+use tjuaeui_process::Spawner;
 
 use crate::error::AgentError;
 use crate::protocol::custom_agent_probe;
@@ -35,6 +36,8 @@ pub struct AgentAvailabilityService {
     // Used to decide tjuae_cli (built-in, no external CLI) availability: it is
     // usable only when at least one model provider is configured & enabled.
     provider_repo: Arc<dyn IProviderRepository>,
+    /// 正式运行态注入的受管进程启动器；纯仓储测试可以不启动真实 CLI。
+    spawner: Option<Arc<dyn Spawner>>,
 }
 
 impl AgentAvailabilityService {
@@ -42,6 +45,19 @@ impl AgentAvailabilityService {
         Self {
             registry,
             provider_repo,
+            spawner: None,
+        }
+    }
+
+    pub fn new_with_spawner(
+        registry: Arc<AgentRegistry>,
+        provider_repo: Arc<dyn IProviderRepository>,
+        spawner: Arc<dyn Spawner>,
+    ) -> Self {
+        Self {
+            registry,
+            provider_repo,
+            spawner: Some(spawner),
         }
     }
 
@@ -113,7 +129,7 @@ impl AgentAvailabilityService {
         // manual check is the user's self-rescue path. `run_probe` handles a
         // missing binary itself (persisted command_not_found snapshot), and a
         // success restores the agent.
-        let snapshot = run_probe(&self.registry, &self.provider_repo, &meta, kind).await;
+        let snapshot = run_probe(&self.registry, &self.provider_repo, self.spawner.as_ref(), &meta, kind).await;
         self.persist_snapshot(id, &snapshot).await?;
         self.management_row_by_id(id)
             .await
@@ -192,8 +208,9 @@ impl AgentAvailabilityService {
 }
 
 async fn run_probe(
-    _registry: &Arc<AgentRegistry>,
+    registry: &Arc<AgentRegistry>,
     provider_repo: &Arc<dyn IProviderRepository>,
+    spawner: Option<&Arc<dyn Spawner>>,
     meta: &AgentMetadata,
     kind: AgentSnapshotCheckKind,
 ) -> AvailabilitySnapshot {
@@ -224,12 +241,16 @@ async fn run_probe(
     } else if meta.agent_source == AgentSource::Builtin
         && matches!(meta.backend.as_deref(), Some("claude") | Some("codex"))
     {
-        // Builtin claude/codex are direct CLIs that do not speak ACP, so
-        // their deep check is PATH + `--version` (integrity), never a
-        // session/new-style handshake (#675). Uses the wide recheck budget:
-        // the user is explicitly waiting and large Node CLIs load slowly.
+        // 启动自动扫描和手动“一键测试”共用真实目录探测：完整性检查成功后，
+        // 继续通过 CLI 已验证的初始化协议读取并持久化模型目录。
         match crate::cli_probe::validate_with_budget(meta, crate::cli_probe::CLI_VERSION_RECHECK_TIMEOUT).await {
-            Ok(_) => (AgentSnapshotCheckStatus::Online, None, None),
+            Ok(_) => match spawner {
+                Some(spawner) => match probe_direct_cli_catalog(registry, meta, spawner.clone()).await {
+                    Ok(()) => (AgentSnapshotCheckStatus::Online, None, None),
+                    Err((code, message)) => (AgentSnapshotCheckStatus::Offline, Some(code), Some(message)),
+                },
+                None => (AgentSnapshotCheckStatus::Online, None, None),
+            },
             Err(failure) => (
                 AgentSnapshotCheckStatus::Offline,
                 Some(failure.error_code().to_owned()),
@@ -251,7 +272,7 @@ async fn run_probe(
             Ok(args) => {
                 let report = custom_agent_probe::probe_custom_agent(command, &args, &env, None).await;
                 if let Some(handshake) = report.handshake.as_ref()
-                    && let Err(error) = _registry.apply_probe_handshake(&meta.id, handshake).await
+                    && let Err(error) = registry.apply_probe_handshake(&meta.id, handshake).await
                 {
                     tracing::warn!(agent_id = %meta.id, %error, "Agent 探测目录预加载失败");
                 }
@@ -312,6 +333,117 @@ async fn run_probe(
         latency_ms,
         checked_at: started_at,
     }
+}
+
+/// 使用与正式会话相同的后端连接，读取 Claude/Codex 自己返回的模型目录。
+///
+/// 探测只执行初始化与目录协议，不发送用户消息；完成后立即释放受管进程。
+async fn probe_direct_cli_catalog(
+    registry: &Arc<AgentRegistry>,
+    meta: &AgentMetadata,
+    spawner: Arc<dyn Spawner>,
+) -> Result<(), (String, String)> {
+    use tjuaeui_session::{BackendConnection, ClaudeConnection, CodexConnection, SessionConfig, SessionSpec};
+
+    let backend = meta.backend.as_deref().unwrap_or_default();
+    let connection: Box<dyn BackendConnection> = match backend {
+        "claude" => Box::new(ClaudeConnection::new(spawner)),
+        "codex" => Box::new(CodexConnection::new(spawner)),
+        _ => return Ok(()),
+    };
+    let command = crate::cli_probe::command_name(meta).ok_or_else(|| {
+        (
+            "command_not_found".to_owned(),
+            "Agent 没有可供目录探测的 CLI 命令".to_owned(),
+        )
+    })?;
+    let cli_program = tjuaeui_runtime::resolve_command_path(command)
+        .ok_or_else(|| ("command_not_found".to_owned(), format!("未找到可执行程序：{command}")))?;
+    let mut spawn_env: Vec<tjuaeui_common::EnvVar> = meta
+        .env
+        .iter()
+        .map(|entry| tjuaeui_common::EnvVar {
+            name: entry.name.clone(),
+            value: entry.value.clone(),
+        })
+        .collect();
+    if backend == "claude" {
+        spawn_env.extend(
+            crate::cc_switch::read_claude_provider_env()
+                .into_iter()
+                .map(|(name, value)| tjuaeui_common::EnvVar { name, value }),
+        );
+    }
+
+    let session_id = format!("catalog-probe-{}", uuid::Uuid::now_v7());
+    let session = connection
+        .open_session(
+            SessionSpec::Fresh {
+                session_id: session_id.clone(),
+            },
+            SessionConfig {
+                cli_program: Some(cli_program),
+                spawn_env,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| classify_catalog_probe_error(&error.to_string()))?;
+
+    // Codex 会在读取项目级技能、刷新远端模型目录后才完成 thread/start。
+    // Windows 上的真实冷启动已经观察到约 5.7 秒，不能沿用原先 5 秒的
+    // 紧门限，否则模型已经返回却仍会被误判为离线。与正式会话握手预算
+    // 对齐，给启动扫描和手动“一键测试”同一段 15 秒目录预加载窗口。
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let caps = loop {
+        let caps = session.capabilities();
+        if !caps.available_models.is_empty() {
+            break caps;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            drop(session);
+            let _ = connection.close_session(&session_id).await;
+            return Err((
+                "catalog_probe_timeout".to_owned(),
+                "CLI 已安装，但未在 15 秒内返回可用模型目录".to_owned(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    let handshake = crate::session_agent::catalog_partial_from_caps(&caps).ok_or_else(|| {
+        (
+            "catalog_probe_empty".to_owned(),
+            "CLI 已连接，但返回了空的模型目录".to_owned(),
+        )
+    })?;
+    registry
+        .apply_probe_handshake(&meta.id, &handshake)
+        .await
+        .map_err(|error| {
+            (
+                "catalog_persist_failed".to_owned(),
+                format!("保存 Agent 模型目录失败：{error}"),
+            )
+        })?;
+    drop(session);
+    let _ = connection.close_session(&session_id).await;
+    Ok(())
+}
+
+fn classify_catalog_probe_error(message: &str) -> (String, String) {
+    let normalized = message.to_ascii_lowercase();
+    let code = if normalized.contains("auth")
+        || normalized.contains("login")
+        || normalized.contains("unauthorized")
+        || normalized.contains("凭据")
+        || normalized.contains("登录")
+    {
+        "auth_required"
+    } else {
+        "catalog_probe_failed"
+    };
+    (code.to_owned(), format!("CLI 目录预加载失败：{message}"))
 }
 
 fn snapshot_kind(kind: AgentSnapshotCheckKind) -> &'static str {
@@ -617,7 +749,7 @@ mod tests {
             env_override_key_count: 0,
         };
 
-        let snapshot = run_probe(&registry, &provider_repo, &meta, AgentSnapshotCheckKind::Manual).await;
+        let snapshot = run_probe(&registry, &provider_repo, None, &meta, AgentSnapshotCheckKind::Manual).await;
 
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("command_not_found"));
@@ -858,7 +990,7 @@ mod tests {
             env_override_key_count: 0,
         };
 
-        let snapshot = run_probe(&registry, &provider_repo, &meta, AgentSnapshotCheckKind::Manual).await;
+        let snapshot = run_probe(&registry, &provider_repo, None, &meta, AgentSnapshotCheckKind::Manual).await;
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("version_probe_failed"));
         assert!(

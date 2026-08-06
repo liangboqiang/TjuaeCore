@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use tjuaeui_api_types::{AgentLogoEntry, AgentManagementRow, ProviderHealthCheckRequest, ProviderHealthCheckResponse};
 use tjuaeui_db::IProviderRepository;
+use tjuaeui_process::Spawner;
 use tjuaeui_realtime::EventBroadcaster;
 
 use super::availability::{AgentAvailabilityFeedbackPort, AgentAvailabilityService};
@@ -39,8 +40,40 @@ impl AgentService {
         encryption_key: [u8; 32],
         data_dir: PathBuf,
     ) -> Arc<Self> {
+        Self::build(registry, broadcaster, provider_repo, encryption_key, data_dir, None)
+    }
+
+    pub fn new_with_spawner(
+        registry: Arc<AgentRegistry>,
+        broadcaster: Arc<dyn EventBroadcaster>,
+        provider_repo: Arc<dyn IProviderRepository>,
+        encryption_key: [u8; 32],
+        data_dir: PathBuf,
+        spawner: Arc<dyn Spawner>,
+    ) -> Arc<Self> {
+        Self::build(
+            registry,
+            broadcaster,
+            provider_repo,
+            encryption_key,
+            data_dir,
+            Some(spawner),
+        )
+    }
+
+    fn build(
+        registry: Arc<AgentRegistry>,
+        broadcaster: Arc<dyn EventBroadcaster>,
+        provider_repo: Arc<dyn IProviderRepository>,
+        encryption_key: [u8; 32],
+        data_dir: PathBuf,
+        spawner: Option<Arc<dyn Spawner>>,
+    ) -> Arc<Self> {
         let provider_health = ProviderHealthCheckService::new(provider_repo.clone(), encryption_key, data_dir.clone());
-        let availability = AgentAvailabilityService::new(registry.clone(), provider_repo);
+        let availability = match spawner {
+            Some(spawner) => AgentAvailabilityService::new_with_spawner(registry.clone(), provider_repo, spawner),
+            None => AgentAvailabilityService::new(registry.clone(), provider_repo),
+        };
         Arc::new(Self {
             registry,
             broadcaster,

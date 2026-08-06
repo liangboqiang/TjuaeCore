@@ -33,6 +33,7 @@ pub enum FilesystemScope {
 /// Extension permission declarations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExtPermissions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkPermission>,

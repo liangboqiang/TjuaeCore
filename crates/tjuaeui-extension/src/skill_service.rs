@@ -1641,20 +1641,22 @@ async fn sync_builtin_skills_into_repo(paths: &SkillPaths, repo: &dyn ISkillRepo
             if skill.name == BUILTIN_AUTO_SKILLS_SUBDIR {
                 continue;
             }
-            sync_managed_skill_into_repo(repo, &skill, "builtin").await?;
+            sync_managed_skill_into_repo(repo, &skill, "builtin", true).await?;
         }
     }
 
     let auto_inject_dir = paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
     if let Ok(skills) = scan_skill_dirs(&auto_inject_dir).await {
         for skill in skills {
-            sync_managed_skill_into_repo(repo, &skill, "builtin").await?;
+            // Auto-injected skills are part of the runtime contract and must
+            // not be shadowed by legacy/user copies with the same name.
+            sync_managed_skill_into_repo(repo, &skill, "builtin", false).await?;
         }
     }
 
     if let Ok(skills) = scan_skill_dirs(&paths.cron_skills_dir).await {
         for skill in skills {
-            sync_managed_skill_into_repo(repo, &skill, "cron").await?;
+            sync_managed_skill_into_repo(repo, &skill, "cron", true).await?;
         }
     }
 
@@ -1665,8 +1667,10 @@ async fn sync_managed_skill_into_repo(
     repo: &dyn ISkillRepository,
     skill: &ScannedSkill,
     source: &str,
+    allow_user_override: bool,
 ) -> Result<(), ExtensionError> {
-    if let Some(existing) = repo.find_by_name_any(&skill.name).await?
+    if allow_user_override
+        && let Some(existing) = repo.find_by_name_any(&skill.name).await?
         && existing.source == "user"
         && existing.deleted_at.is_none()
         && existing.enabled
@@ -2955,6 +2959,38 @@ mod tests {
         assert_eq!(scheduled.relative_location, None);
         let scheduled_row = repo.find_by_name("scheduled-task").await.unwrap().unwrap();
         assert_eq!(scheduled_row.source, "cron");
+    }
+
+    #[tokio::test]
+    async fn auto_injected_builtin_skill_replaces_legacy_user_copy() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_disk_builtin_paths(tmp.path());
+        let repo = make_test_skill_repo().await;
+        let builtin_dir = disk_builtin_dir(&paths).to_path_buf();
+        let auto_dir = builtin_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
+
+        create_skill_in_dir(&paths.user_skills_dir, "cron", "Legacy user cron");
+        create_skill_in_dir(&paths.user_skills_dir, "debug", "Custom debug");
+        create_skill_in_dir(&auto_dir, "cron", "Auto injected cron");
+        create_skill_in_dir(&builtin_dir, "debug", "Builtin debug");
+
+        sync_skill_catalog_into_repo(&paths, &repo).await.unwrap();
+
+        let cron = repo.find_by_name("cron").await.unwrap().unwrap();
+        assert_eq!(cron.source, "builtin");
+        assert_eq!(
+            Path::new(&cron.path),
+            auto_dir.join("cron"),
+            "auto-injected builtins are authoritative"
+        );
+
+        let debug = repo.find_by_name("debug").await.unwrap().unwrap();
+        assert_eq!(debug.source, "user");
+        assert_eq!(
+            Path::new(&debug.path),
+            paths.user_skills_dir.join("debug"),
+            "ordinary builtins still allow an intentional user override"
+        );
     }
 
     #[tokio::test]
