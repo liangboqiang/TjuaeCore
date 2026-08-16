@@ -1,9 +1,10 @@
 //! Shared application services for dependency injection.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{AppConfig, derive_encryption_key};
+use anyhow::Context;
 use tjuaeui_ai_agent::{
     AcpSessionSyncService, AcpSkillManager, ActiveLeaseRegistry, AgentFactoryDeps, AgentRegistry, IWorkerTaskManager,
     RuntimeTokenService, WorkerTaskManagerImpl, build_agent_factory,
@@ -102,8 +103,9 @@ impl AppServices {
     }
 
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
-        let data_dir = config.data_dir.clone();
-        let work_dir = config.work_dir.clone();
+        let current_dir = std::env::current_dir().context("无法读取 TjuaeCore 当前工作目录")?;
+        let data_dir = absolute_config_path(&current_dir, &config.data_dir);
+        let work_dir = absolute_config_path(&current_dir, &config.work_dir);
         let local = config.local;
         let dump_prompts = config.dump_prompts;
         let app_version = config.app_version.clone();
@@ -283,6 +285,14 @@ impl AppServices {
     }
 }
 
+fn absolute_config_path(current_dir: &Path, configured: &Path) -> PathBuf {
+    if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        current_dir.join(configured)
+    }
+}
+
 struct ConversationServiceDeps<'a> {
     database: &'a Database,
     work_dir: PathBuf,
@@ -336,6 +346,24 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_config_paths_resolve_from_process_working_directory() {
+        let process_dir = Path::new(std::path::MAIN_SEPARATOR_STR).join("tjuae/runtime");
+
+        assert_eq!(
+            absolute_config_path(&process_dir, Path::new("data/conversations")),
+            process_dir.join("data/conversations"),
+        );
+    }
+
+    #[test]
+    fn absolute_config_paths_are_preserved() {
+        let process_dir = Path::new(std::path::MAIN_SEPARATOR_STR).join("tjuae/runtime");
+        let configured = Path::new(std::path::MAIN_SEPARATOR_STR).join("TjuaeData");
+
+        assert_eq!(absolute_config_path(&process_dir, &configured), configured);
+    }
 
     #[tokio::test]
     async fn test_app_services_from_memory_db() {
