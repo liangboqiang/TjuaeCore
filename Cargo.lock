@@ -5242,7 +5242,6 @@ dependencies = [
  "base64",
  "dashmap",
  "dirs",
- "git2",
  "ignore",
  "mime_guess",
  "notify",
@@ -5254,6 +5253,7 @@ dependencies = [
  "tjuaeui-api-types",
  "tjuaeui-common",
  "tjuaeui-realtime",
+ "tjuaeui-runtime",
  "tokio",
  "tower-http",
  "tracing",
@@ -5334,6 +5334,7 @@ dependencies = [
 name = "tjuaeui-project"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "serde",
  "tempfile",

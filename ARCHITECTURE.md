@@ -387,7 +387,7 @@ pub struct CronRouterState {
 
 // 复杂的领域——需要多个 service
 pub struct OfficeRouterState {
-    pub snapshot_service: Arc<SnapshotService>,
+    pub git_service: Arc<GitService>,
     pub conversion_service: Arc<ConversionService>,
 }
 ```

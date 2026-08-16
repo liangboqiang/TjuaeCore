@@ -140,6 +140,9 @@ pub enum ProjectError {
     #[error("临时目录已存在：{path}")]
     TempDirExists { path: String },
 
+    #[error("无法为工作区 {path} 建立 Git：{reason}")]
+    GitProvisionFailed { path: String, reason: String },
+
     #[error("工作区路径缺失，无法补写")]
     WorkspaceMissing,
 
@@ -186,6 +189,7 @@ impl ProjectError {
             ProjectError::FolderPermissionDenied { .. } => "folder_permission_denied",
             ProjectError::FolderCanonicalizeFailed { .. } => "folder_canonicalize_failed",
             ProjectError::TempDirExists { .. } => "temp_dir_exists",
+            ProjectError::GitProvisionFailed { .. } => "git_provision_failed",
             ProjectError::WorkspaceMissing => "workspace_missing",
             ProjectError::WorkspaceFolderMismatch { .. } => "workspace_folder_mismatch",
             ProjectError::StandardProjectConflict { .. } => "standard_project_conflict",

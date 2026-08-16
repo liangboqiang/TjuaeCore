@@ -13,6 +13,7 @@ mod id;
 mod pagination;
 mod timestamp;
 mod types;
+mod workspace_git;
 
 pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
 pub use crypto::{CryptoError, decrypt_string, encrypt_string};
@@ -30,3 +31,4 @@ pub use id::{fnv1a_hex8, generate_id, generate_id_with_length, generate_prefixed
 pub use pagination::PaginatedResult;
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel, UpdateType, VersionInfo};
+pub use workspace_git::{WorkspaceGitProvision, WorkspaceGitProvisioner};

@@ -241,6 +241,7 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
     async fn create_team_temp_workspace(&self, team_id: &str) -> Result<String, TeamError> {
         self.conversation_service
             .create_team_temp_workspace(team_id)
+            .await
             .map_err(map_conversation_update_error)
     }
 

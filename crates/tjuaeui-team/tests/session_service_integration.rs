@@ -15,7 +15,9 @@ use tjuaeui_api_types::{
     AcpBuildExtra, AcpConfigOptionDto, AcpConfigSelectOptionDto, AddAgentRequest, CreateTeamRequest,
     GetConfigOptionsResponse, TeamAgentInput, TeamRunSource, WebSocketMessage,
 };
-use tjuaeui_common::{AgentKillReason, AgentType, PaginatedResult, ProviderWithModel};
+use tjuaeui_common::{
+    AgentKillReason, AgentType, PaginatedResult, ProviderWithModel, WorkspaceGitProvision, WorkspaceGitProvisioner,
+};
 use tjuaeui_db::models::{
     AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, ConversationRow, MessageRow,
     UpdateAgentAvailabilitySnapshotParams, UpdateAgentHandshakeParams, UpsertAgentMetadataParams,
@@ -40,6 +42,21 @@ use tjuaeui_team::{
     TeamProjectionMessageStore,
 };
 use tjuaeui_team::{TeamError, TeamSessionService};
+
+struct TestWorkspaceGitProvisioner;
+
+#[async_trait::async_trait]
+impl WorkspaceGitProvisioner for TestWorkspaceGitProvisioner {
+    async fn ensure_workspace_git(&self, workspace: &std::path::Path) -> Result<WorkspaceGitProvision, String> {
+        let workspace = workspace.to_string_lossy().into_owned();
+        Ok(WorkspaceGitProvision {
+            repository_root: workspace.clone(),
+            workspace_path: workspace,
+            branch: "main".into(),
+            head_commit: "test-head".into(),
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mock ConversationRepository — minimal impl for TeamSessionService tests
@@ -2319,6 +2336,7 @@ async fn create_team_side_branch_backfills_project_binding_when_injected() {
     svc.with_project_service(Arc::new(tjuaeui_project::ProjectService::new(
         store,
         std::env::temp_dir().join("tjuaeui-team-bind-test-conversations"),
+        Arc::new(TestWorkspaceGitProvisioner),
     )));
 
     let workspace_dir = std::env::temp_dir().join(format!("tjuaeui-team-bind-{}", tjuaeui_common::generate_id()));

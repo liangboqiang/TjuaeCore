@@ -1,11 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tjuaeui_common::FileChangeOperation;
-
 use crate::error::FileError;
 
-use crate::types::{CompareResult, CopyResult, DirOrFile, FileMetadata, SnapshotInfo, WorkspaceFlatFile, ZipEntry};
+use crate::types::{
+    CopyResult, DirOrFile, FileMetadata, GitCommit, GitCommitFile, GitRepositoryInfo, GitRevision, GitStatus,
+    GitWorktree, WorkspaceFlatFile, ZipEntry,
+};
 
 /// Core file operations: directory browsing, file read/write, management,
 /// image processing, and ZIP packaging.
@@ -164,63 +165,49 @@ pub trait IFileWatchService: Send + Sync {
     async fn stop_office_watch(&self, workspace: &str) -> Result<(), FileError>;
 }
 
-/// Git-based workspace snapshot system for tracking file changes.
-///
-/// Supports two modes:
-/// - **git-repo**: directory already has `.git` — uses it directly.
-/// - **snapshot**: no `.git` — creates a temporary repo under
-///   `/tmp/tjuaeui-snapshot-*`.
+/// Persistent Git authority for every Tjuae workspace.
 #[async_trait::async_trait]
-pub trait ISnapshotService: Send + Sync {
-    /// Initialize the snapshot system for a workspace.
-    /// Auto-detects `git-repo` or `snapshot` mode.
-    async fn init(&self, workspace: &str) -> Result<SnapshotInfo, FileError>;
-
-    /// Get the current snapshot mode and branch info.
-    async fn get_info(&self, workspace: &str) -> Result<SnapshotInfo, FileError>;
-
-    /// Compare workspace state against the baseline.
-    /// Returns staged and unstaged changes.
-    async fn compare(&self, workspace: &str) -> Result<CompareResult, FileError>;
-
-    /// Get the baseline (HEAD) content of a file.
-    /// Returns `None` for new/untracked files.
-    async fn get_baseline_content(&self, workspace: &str, file_path: &str) -> Result<Option<String>, FileError>;
-
-    /// Stage a single file (git-repo mode only).
+pub trait IGitService: Send + Sync {
+    async fn ensure(&self, workspace: &str) -> Result<GitRepositoryInfo, FileError>;
+    async fn repository_info(&self, workspace: &str) -> Result<GitRepositoryInfo, FileError>;
+    async fn status(&self, workspace: &str) -> Result<GitStatus, FileError>;
+    async fn baseline_content(&self, workspace: &str, file_path: &str) -> Result<Option<String>, FileError>;
+    async fn index_content(&self, workspace: &str, file_path: &str) -> Result<Option<String>, FileError>;
     async fn stage_file(&self, workspace: &str, file_path: &str) -> Result<(), FileError>;
-
-    /// Stage all changes.
     async fn stage_all(&self, workspace: &str) -> Result<(), FileError>;
-
-    /// Unstage a single file.
     async fn unstage_file(&self, workspace: &str, file_path: &str) -> Result<(), FileError>;
-
-    /// Unstage all staged changes.
     async fn unstage_all(&self, workspace: &str) -> Result<(), FileError>;
-
-    /// Discard changes to a file (restore to baseline).
-    async fn discard_file(
+    async fn discard_file(&self, workspace: &str, file_path: &str) -> Result<(), FileError>;
+    async fn history(
         &self,
         workspace: &str,
-        file_path: &str,
-        operation: FileChangeOperation,
-    ) -> Result<(), FileError>;
-
-    /// Reset a file to its baseline state.
-    async fn reset_file(
+        file_path: Option<&str>,
+        reference: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<GitCommit>, FileError>;
+    async fn commit_files(&self, workspace: &str, revision: &str) -> Result<Vec<GitCommitFile>, FileError>;
+    async fn revision(&self, workspace: &str, file_path: &str, revision: &str) -> Result<GitRevision, FileError>;
+    async fn create_branch(&self, workspace: &str, name: &str, start_point: Option<&str>) -> Result<(), FileError>;
+    async fn switch_branch(&self, workspace: &str, name: &str) -> Result<(), FileError>;
+    async fn checkout_revision(&self, workspace: &str, revision: &str) -> Result<(), FileError>;
+    async fn clone_repository(
+        &self,
+        repository_url: &str,
+        parent_directory: &str,
+    ) -> Result<GitRepositoryInfo, FileError>;
+    async fn commit(&self, workspace: &str, message: &str, include_unstaged: bool) -> Result<String, FileError>;
+    async fn fetch(&self, workspace: &str) -> Result<(), FileError>;
+    async fn pull(&self, workspace: &str) -> Result<(), FileError>;
+    async fn push(&self, workspace: &str) -> Result<(), FileError>;
+    async fn sync(&self, workspace: &str) -> Result<(), FileError>;
+    async fn create_worktree(
         &self,
         workspace: &str,
-        file_path: &str,
-        operation: FileChangeOperation,
-    ) -> Result<(), FileError>;
-
-    /// List git branches (git-repo mode only).
-    async fn get_branches(&self, workspace: &str) -> Result<Vec<String>, FileError>;
-
-    /// Clean up snapshot resources.
-    /// For snapshot mode, deletes the temporary git repository.
-    async fn dispose(&self, workspace: &str) -> Result<(), FileError>;
+        path: &str,
+        branch: &str,
+        start_point: Option<&str>,
+    ) -> Result<GitWorktree, FileError>;
+    async fn remove_worktree(&self, workspace: &str, path: &str) -> Result<(), FileError>;
 }
 
 /// Convenience alias for an Arc-wrapped file service.
@@ -229,5 +216,5 @@ pub type FileServiceRef = Arc<dyn IFileService>;
 /// Convenience alias for an Arc-wrapped file watch service.
 pub type FileWatchServiceRef = Arc<dyn IFileWatchService>;
 
-/// Convenience alias for an Arc-wrapped snapshot service.
-pub type SnapshotServiceRef = Arc<dyn ISnapshotService>;
+/// Convenience alias for an Arc-wrapped Git service.
+pub type GitServiceRef = Arc<dyn IGitService>;

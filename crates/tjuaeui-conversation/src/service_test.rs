@@ -30,7 +30,7 @@ use tjuaeui_api_types::{
 };
 use tjuaeui_common::{
     AgentKillReason, AgentType, Confirmation, ConversationSource, ConversationStatus, PaginatedResult,
-    ProviderWithModel, TimestampMs,
+    ProviderWithModel, TimestampMs, WorkspaceGitProvision, WorkspaceGitProvisioner,
 };
 use tjuaeui_db::models::{
     AcpSessionRow, AgentMetadataRow, ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow,
@@ -1223,8 +1223,10 @@ fn unique_test_workspace_path(label: &str) -> PathBuf {
 }
 
 fn assert_dated_workspace_path(workspace_root: &Path, workspace: &Path, expected_file_name: &str) {
-    let relative = workspace
-        .strip_prefix(workspace_root.join("conversations"))
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let canonical_conversations_root = workspace_root.join("conversations").canonicalize().unwrap();
+    let relative = canonical_workspace
+        .strip_prefix(canonical_conversations_root)
         .expect("workspace should be under the conversations root");
     let parts = relative
         .iter()
@@ -1400,6 +1402,21 @@ async fn create_returns_conversation_with_defaults() {
 
 // ── Project-bind side branch tests ─────────────────────────────────
 
+struct TestWorkspaceGitProvisioner;
+
+#[async_trait::async_trait]
+impl WorkspaceGitProvisioner for TestWorkspaceGitProvisioner {
+    async fn ensure_workspace_git(&self, workspace: &Path) -> Result<WorkspaceGitProvision, String> {
+        let workspace = workspace.to_string_lossy().into_owned();
+        Ok(WorkspaceGitProvision {
+            repository_root: workspace.clone(),
+            workspace_path: workspace,
+            branch: "main".into(),
+            head_commit: "test-head".into(),
+        })
+    }
+}
+
 async fn make_injected_project_service(temp_root: &std::path::Path) -> std::sync::Arc<tjuaeui_project::ProjectService> {
     // A real store on an in-memory DB; temp_root mirrors the app wiring
     // (`work_dir/conversations`) so classification matches production. The
@@ -1411,6 +1428,7 @@ async fn make_injected_project_service(temp_root: &std::path::Path) -> std::sync
     std::sync::Arc::new(tjuaeui_project::ProjectService::new(
         store,
         temp_root.join("conversations"),
+        std::sync::Arc::new(TestWorkspaceGitProvisioner),
     ))
 }
 
@@ -1523,13 +1541,14 @@ async fn create_auto_provisions_workspace_under_date_partition() {
     assert!(workspace.is_dir());
 }
 
-#[test]
-fn create_team_temp_workspace_uses_date_partition() {
+#[tokio::test]
+async fn create_team_temp_workspace_uses_date_partition() {
     let temp = tempfile::tempdir().unwrap();
     let workspace_root = temp.path().join("tjuaeui-data");
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_workspace_root(workspace_root.clone());
+    svc.with_project_service(make_injected_project_service(&workspace_root).await);
 
-    let workspace = svc.create_team_temp_workspace("team_1").unwrap();
+    let workspace = svc.create_team_temp_workspace("team_1").await.unwrap();
 
     let workspace = Path::new(&workspace);
     assert_dated_workspace_path(&workspace_root, workspace, "team-temp-team_1");

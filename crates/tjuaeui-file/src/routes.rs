@@ -10,21 +10,24 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use tjuaeui_api_types::{
     ApiResponse, BrowseDirectoryQuery, BrowseDirectoryResponse, CancelZipRequest, CopyFilesRequest, CopyFilesResponse,
-    CreateTempFileRequest, DirOrFileResponse, FetchRemoteImageRequest, FileChangeInfoResponse, FileMetadataResponse,
-    FileWatchRequest, GetFileMetadataRequest, GetFilesByDirRequest, GetImageBase64Request, ListWorkspaceFilesRequest,
-    ReadFileBufferRequest, ReadFileRequest, RemoveEntryRequest, RenameRequest, RenameResponse, SnapshotBaselineRequest,
-    SnapshotCompareResponse, SnapshotDiscardRequest, SnapshotInfoResponse, SnapshotStageRequest,
-    SnapshotWorkspaceRequest, WorkspaceFlatFileResponse, WorkspaceOfficeWatchRequest, WriteFileRequest, ZipRequest,
+    CreateTempFileRequest, DirOrFileResponse, FetchRemoteImageRequest, FileMetadataResponse, FileWatchRequest,
+    GetFileMetadataRequest, GetFilesByDirRequest, GetImageBase64Request, GitBranchCreateRequest, GitBranchResponse,
+    GitBranchSwitchRequest, GitCloneRequest, GitCommitFileResponse, GitCommitFilesRequest, GitCommitRequest,
+    GitCommitResponse, GitFileChangeResponse, GitFileRequest, GitFileStatusResponse, GitHistoryRequest,
+    GitRepositoryResponse, GitRevisionCheckoutRequest, GitRevisionRequest, GitRevisionResponse, GitStatusResponse,
+    GitWorkspaceRequest, GitWorktreeCreateRequest, GitWorktreeRemoveRequest, GitWorktreeResponse,
+    ListWorkspaceFilesRequest, ReadFileBufferRequest, ReadFileRequest, RemoveEntryRequest, RenameRequest,
+    RenameResponse, WorkspaceFlatFileResponse, WorkspaceOfficeWatchRequest, WriteFileRequest, ZipRequest,
 };
 use tjuaeui_common::ApiError;
 use tjuaeui_common::constants::UPLOAD_MAX_SIZE;
 
 use crate::browse;
 use crate::error::FileError;
-use crate::traits::{FileServiceRef, FileWatchServiceRef, SnapshotServiceRef};
+use crate::traits::{FileServiceRef, FileWatchServiceRef, GitServiceRef};
 use crate::types::{
-    CompareResult, CopyResult, DirOrFile, FileChangeInfo, FileMetadata, SnapshotInfo, SnapshotMode, WorkspaceFlatFile,
-    ZipEntry,
+    CopyResult, DirOrFile, FileMetadata, GitBranch, GitCommit, GitCommitFile, GitFileChange, GitFileStatus,
+    GitRepositoryInfo, GitRevision, GitStatus, GitWorktree, WorkspaceFlatFile, ZipEntry,
 };
 
 impl From<FileError> for ApiError {
@@ -92,7 +95,7 @@ impl Default for BrowseRoots {
 pub struct FileRouterState {
     pub file_service: FileServiceRef,
     pub watch_service: FileWatchServiceRef,
-    pub snapshot_service: SnapshotServiceRef,
+    pub git_service: GitServiceRef,
     pub allowed_roots: Vec<std::path::PathBuf>,
     /// Roots permitted by the shallow `/api/fs/browse` endpoint. This is
     /// typically wider than `allowed_roots` (it includes `cwd`, Windows
@@ -143,19 +146,31 @@ pub fn file_routes(state: FileRouterState) -> Router {
         .route("/api/fs/watch/stop-all", post(stop_all_watches))
         .route("/api/fs/office-watch/start", post(start_office_watch))
         .route("/api/fs/office-watch/stop", post(stop_office_watch))
-        // E. Workspace snapshot
-        .route("/api/fs/snapshot/init", post(snapshot_init))
-        .route("/api/fs/snapshot/info", post(snapshot_info))
-        .route("/api/fs/snapshot/compare", post(snapshot_compare))
-        .route("/api/fs/snapshot/baseline", post(snapshot_baseline))
-        .route("/api/fs/snapshot/stage", post(snapshot_stage_file))
-        .route("/api/fs/snapshot/stage-all", post(snapshot_stage_all))
-        .route("/api/fs/snapshot/unstage", post(snapshot_unstage_file))
-        .route("/api/fs/snapshot/unstage-all", post(snapshot_unstage_all))
-        .route("/api/fs/snapshot/discard", post(snapshot_discard))
-        .route("/api/fs/snapshot/reset", post(snapshot_reset))
-        .route("/api/fs/snapshot/branches", post(snapshot_branches))
-        .route("/api/fs/snapshot/dispose", post(snapshot_dispose))
+        // E. Persistent workspace Git
+        .route("/api/fs/git/ensure", post(git_ensure))
+        .route("/api/fs/git/info", post(git_info))
+        .route("/api/fs/git/status", post(git_status))
+        .route("/api/fs/git/baseline", post(git_baseline))
+        .route("/api/fs/git/index-content", post(git_index_content))
+        .route("/api/fs/git/stage", post(git_stage_file))
+        .route("/api/fs/git/stage-all", post(git_stage_all))
+        .route("/api/fs/git/unstage", post(git_unstage_file))
+        .route("/api/fs/git/unstage-all", post(git_unstage_all))
+        .route("/api/fs/git/discard", post(git_discard))
+        .route("/api/fs/git/history", post(git_history))
+        .route("/api/fs/git/commit-files", post(git_commit_files))
+        .route("/api/fs/git/revision", post(git_revision))
+        .route("/api/fs/git/branch/create", post(git_create_branch))
+        .route("/api/fs/git/branch/switch", post(git_switch_branch))
+        .route("/api/fs/git/revision/checkout", post(git_checkout_revision))
+        .route("/api/fs/git/clone", post(git_clone))
+        .route("/api/fs/git/commit", post(git_commit))
+        .route("/api/fs/git/fetch", post(git_fetch))
+        .route("/api/fs/git/pull", post(git_pull))
+        .route("/api/fs/git/push", post(git_push))
+        .route("/api/fs/git/sync", post(git_sync))
+        .route("/api/fs/git/worktree/create", post(git_create_worktree))
+        .route("/api/fs/git/worktree/remove", post(git_remove_worktree))
         .with_state(state)
         .merge(upload_router)
 }
@@ -521,129 +536,237 @@ async fn stop_office_watch(
 }
 
 // ---------------------------------------------------------------------------
-// E. Workspace snapshot — handlers
+// E. Persistent workspace Git — handlers
 // ---------------------------------------------------------------------------
 
-async fn snapshot_init(
+async fn git_ensure(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SnapshotInfoResponse>>, ApiError> {
+    body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitRepositoryResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let info = state.snapshot_service.init(&req.workspace).await?;
-    Ok(Json(ApiResponse::ok(to_snapshot_info_response(info))))
+    let info = state.git_service.ensure(&req.workspace).await?;
+    Ok(Json(ApiResponse::ok(to_git_repository_response(info))))
 }
 
-async fn snapshot_info(
+async fn git_info(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SnapshotInfoResponse>>, ApiError> {
+    body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitRepositoryResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let info = state.snapshot_service.get_info(&req.workspace).await?;
-    Ok(Json(ApiResponse::ok(to_snapshot_info_response(info))))
+    let info = state.git_service.repository_info(&req.workspace).await?;
+    Ok(Json(ApiResponse::ok(to_git_repository_response(info))))
 }
 
-async fn snapshot_compare(
+async fn git_status(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SnapshotCompareResponse>>, ApiError> {
+    body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitStatusResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let result = state.snapshot_service.compare(&req.workspace).await?;
-    Ok(Json(ApiResponse::ok(to_compare_response(result))))
+    let result = state.git_service.status(&req.workspace).await?;
+    Ok(Json(ApiResponse::ok(to_git_status_response(result))))
 }
 
-async fn snapshot_baseline(
+async fn git_baseline(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotBaselineRequest>, JsonRejection>,
+    body: Result<Json<GitFileRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Option<String>>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
     let content = state
-        .snapshot_service
-        .get_baseline_content(&req.workspace, &req.file_path)
+        .git_service
+        .baseline_content(&req.workspace, &req.file_path)
         .await?;
     Ok(Json(ApiResponse::ok(content)))
 }
 
-async fn snapshot_stage_file(
+async fn git_index_content(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotStageRequest>, JsonRejection>,
+    body: Result<Json<GitFileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<Option<String>>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    let content = state.git_service.index_content(&req.workspace, &req.file_path).await?;
+    Ok(Json(ApiResponse::ok(content)))
+}
+
+async fn git_stage_file(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitFileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    state.git_service.stage_file(&req.workspace, &req.file_path).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn git_stage_all(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    state.git_service.stage_all(&req.workspace).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn git_unstage_file(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitFileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    state.git_service.unstage_file(&req.workspace, &req.file_path).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn git_unstage_all(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    state.git_service.unstage_all(&req.workspace).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn git_discard(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitFileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    state.git_service.discard_file(&req.workspace, &req.file_path).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn git_history(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitHistoryRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<GitCommitResponse>>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    let commits = state
+        .git_service
+        .history(
+            &req.workspace,
+            req.file_path.as_deref(),
+            req.reference.as_deref(),
+            req.limit,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(
+        commits.into_iter().map(to_git_commit_response).collect(),
+    )))
+}
+
+async fn git_commit_files(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitCommitFilesRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<GitCommitFileResponse>>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    let files = state.git_service.commit_files(&req.workspace, &req.revision).await?;
+    Ok(Json(ApiResponse::ok(
+        files.into_iter().map(to_git_commit_file_response).collect(),
+    )))
+}
+
+async fn git_revision(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitRevisionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitRevisionResponse>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    let revision = state
+        .git_service
+        .revision(&req.workspace, &req.file_path, &req.revision)
+        .await?;
+    Ok(Json(ApiResponse::ok(to_git_revision_response(revision))))
+}
+
+async fn git_create_branch(
+    State(state): State<FileRouterState>,
+    body: Result<Json<GitBranchCreateRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
     state
-        .snapshot_service
-        .stage_file(&req.workspace, &req.file_path)
+        .git_service
+        .create_branch(&req.workspace, &req.name, req.start_point.as_deref())
         .await?;
     Ok(Json(ApiResponse::success()))
 }
 
-async fn snapshot_stage_all(
+async fn git_switch_branch(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
+    body: Result<Json<GitBranchSwitchRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    state.snapshot_service.stage_all(&req.workspace).await?;
+    state.git_service.switch_branch(&req.workspace, &req.name).await?;
     Ok(Json(ApiResponse::success()))
 }
 
-async fn snapshot_unstage_file(
+async fn git_checkout_revision(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotStageRequest>, JsonRejection>,
+    body: Result<Json<GitRevisionCheckoutRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
     state
-        .snapshot_service
-        .unstage_file(&req.workspace, &req.file_path)
+        .git_service
+        .checkout_revision(&req.workspace, &req.revision)
         .await?;
     Ok(Json(ApiResponse::success()))
 }
 
-async fn snapshot_unstage_all(
+async fn git_clone(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
+    body: Result<Json<GitCloneRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitRepositoryResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    state.snapshot_service.unstage_all(&req.workspace).await?;
-    Ok(Json(ApiResponse::success()))
-}
-
-async fn snapshot_discard(
-    State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotDiscardRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
-    state
-        .snapshot_service
-        .discard_file(&req.workspace, &req.file_path, req.operation)
+    let repository = state
+        .git_service
+        .clone_repository(&req.repository_url, &req.parent_directory)
         .await?;
-    Ok(Json(ApiResponse::success()))
+    Ok(Json(ApiResponse::ok(to_git_repository_response(repository))))
 }
 
-async fn snapshot_reset(
+async fn git_commit(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotDiscardRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
+    body: Result<Json<GitCommitRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<String>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    state
-        .snapshot_service
-        .reset_file(&req.workspace, &req.file_path, req.operation)
+    let hash = state
+        .git_service
+        .commit(&req.workspace, &req.message, req.include_unstaged)
         .await?;
-    Ok(Json(ApiResponse::success()))
+    Ok(Json(ApiResponse::ok(hash)))
 }
 
-async fn snapshot_branches(
+macro_rules! git_workspace_mutation_handler {
+    ($name:ident, $method:ident) => {
+        async fn $name(
+            State(state): State<FileRouterState>,
+            body: Result<Json<GitWorkspaceRequest>, JsonRejection>,
+        ) -> Result<Json<ApiResponse<()>>, ApiError> {
+            let Json(req) = body.map_err(ApiError::from)?;
+            state.git_service.$method(&req.workspace).await?;
+            Ok(Json(ApiResponse::success()))
+        }
+    };
+}
+
+git_workspace_mutation_handler!(git_fetch, fetch);
+git_workspace_mutation_handler!(git_pull, pull);
+git_workspace_mutation_handler!(git_push, push);
+git_workspace_mutation_handler!(git_sync, sync);
+
+async fn git_create_worktree(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<Vec<String>>>, ApiError> {
+    body: Result<Json<GitWorktreeCreateRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<GitWorktreeResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let branches = state.snapshot_service.get_branches(&req.workspace).await?;
-    Ok(Json(ApiResponse::ok(branches)))
+    let worktree = state
+        .git_service
+        .create_worktree(&req.workspace, &req.path, &req.branch, req.start_point.as_deref())
+        .await?;
+    Ok(Json(ApiResponse::ok(to_git_worktree_response(worktree))))
 }
 
-async fn snapshot_dispose(
+async fn git_remove_worktree(
     State(state): State<FileRouterState>,
-    body: Result<Json<SnapshotWorkspaceRequest>, JsonRejection>,
+    body: Result<Json<GitWorktreeRemoveRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    state.snapshot_service.dispose(&req.workspace).await?;
+    state.git_service.remove_worktree(&req.workspace, &req.path).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -710,29 +833,99 @@ fn to_zip_entry(e: tjuaeui_api_types::ZipFileEntry) -> ZipEntry {
     }
 }
 
-fn to_snapshot_info_response(info: SnapshotInfo) -> SnapshotInfoResponse {
-    let mode = match info.mode {
-        SnapshotMode::GitRepo => tjuaeui_api_types::SnapshotMode::GitRepo,
-        SnapshotMode::Snapshot => tjuaeui_api_types::SnapshotMode::Snapshot,
-    };
-    SnapshotInfoResponse {
-        mode,
-        branch: info.branch,
+fn to_git_file_status(status: GitFileStatus) -> GitFileStatusResponse {
+    match status {
+        GitFileStatus::Added => GitFileStatusResponse::Added,
+        GitFileStatus::Modified => GitFileStatusResponse::Modified,
+        GitFileStatus::Deleted => GitFileStatusResponse::Deleted,
+        GitFileStatus::Renamed => GitFileStatusResponse::Renamed,
+        GitFileStatus::Untracked => GitFileStatusResponse::Untracked,
+        GitFileStatus::Conflicted => GitFileStatusResponse::Conflicted,
     }
 }
 
-fn to_file_change_response(c: FileChangeInfo) -> FileChangeInfoResponse {
-    FileChangeInfoResponse {
+fn to_git_file_change_response(c: GitFileChange) -> GitFileChangeResponse {
+    GitFileChangeResponse {
         file_path: c.file_path,
         relative_path: c.relative_path,
-        operation: c.operation,
+        old_relative_path: c.old_relative_path,
+        status: to_git_file_status(c.status),
     }
 }
 
-fn to_compare_response(r: CompareResult) -> SnapshotCompareResponse {
-    SnapshotCompareResponse {
-        staged: r.staged.into_iter().map(to_file_change_response).collect(),
-        unstaged: r.unstaged.into_iter().map(to_file_change_response).collect(),
+fn to_git_status_response(status: GitStatus) -> GitStatusResponse {
+    GitStatusResponse {
+        conflicted: status.conflicted.into_iter().map(to_git_file_change_response).collect(),
+        staged: status.staged.into_iter().map(to_git_file_change_response).collect(),
+        unstaged: status.unstaged.into_iter().map(to_git_file_change_response).collect(),
+    }
+}
+
+fn to_git_branch_response(branch: GitBranch) -> GitBranchResponse {
+    GitBranchResponse {
+        name: branch.name,
+        current: branch.current,
+        checked_out: branch.checked_out,
+        commit: branch.commit,
+    }
+}
+
+fn to_git_worktree_response(worktree: GitWorktree) -> GitWorktreeResponse {
+    GitWorktreeResponse {
+        path: worktree.path,
+        branch: worktree.branch,
+        head: worktree.head,
+        current: worktree.current,
+        locked: worktree.locked,
+    }
+}
+
+fn to_git_repository_response(info: GitRepositoryInfo) -> GitRepositoryResponse {
+    GitRepositoryResponse {
+        repository_root: info.repository_root,
+        workspace_path: info.workspace_path,
+        workspace_relative_path: info.workspace_relative_path,
+        branch: info.branch,
+        head_commit: info.head_commit,
+        upstream: info.upstream,
+        ahead: info.ahead,
+        behind: info.behind,
+        dirty: info.dirty,
+        branches: info.branches.into_iter().map(to_git_branch_response).collect(),
+        worktrees: info.worktrees.into_iter().map(to_git_worktree_response).collect(),
+        remotes: info.remotes,
+    }
+}
+
+fn to_git_commit_response(commit: GitCommit) -> GitCommitResponse {
+    GitCommitResponse {
+        hash: commit.hash,
+        short_hash: commit.short_hash,
+        parents: commit.parents,
+        decorations: commit.decorations,
+        author: commit.author,
+        authored_at: commit.authored_at,
+        subject: commit.subject,
+    }
+}
+
+fn to_git_commit_file_response(file: GitCommitFile) -> GitCommitFileResponse {
+    GitCommitFileResponse {
+        path: file.path,
+        old_path: file.old_path,
+        status: to_git_file_status(file.status),
+    }
+}
+
+fn to_git_revision_response(revision: GitRevision) -> GitRevisionResponse {
+    GitRevisionResponse {
+        revision: revision.revision,
+        file_path: revision.file_path,
+        original_revision: revision.original_revision,
+        original_content: revision.original_content,
+        modified_content: revision.modified_content,
+        patch: revision.patch,
+        binary: revision.binary,
     }
 }
 
@@ -909,48 +1102,28 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_info_response_git_repo() {
-        let info = SnapshotInfo {
-            mode: SnapshotMode::GitRepo,
-            branch: Some("main".into()),
-        };
-        let r = to_snapshot_info_response(info);
-        assert_eq!(r.mode, tjuaeui_api_types::SnapshotMode::GitRepo);
-        assert_eq!(r.branch, Some("main".into()));
-    }
-
-    #[test]
-    fn snapshot_info_response_snapshot_mode() {
-        let info = SnapshotInfo {
-            mode: SnapshotMode::Snapshot,
-            branch: None,
-        };
-        let r = to_snapshot_info_response(info);
-        assert_eq!(r.mode, tjuaeui_api_types::SnapshotMode::Snapshot);
-        assert!(r.branch.is_none());
-    }
-
-    #[test]
-    fn compare_response_conversion() {
-        use tjuaeui_common::FileChangeOperation;
-        let result = CompareResult {
-            staged: vec![FileChangeInfo {
+    fn git_status_response_conversion() {
+        let result = GitStatus {
+            conflicted: vec![],
+            staged: vec![GitFileChange {
                 file_path: "/ws/a.txt".into(),
                 relative_path: "a.txt".into(),
-                operation: FileChangeOperation::Create,
+                old_relative_path: None,
+                status: GitFileStatus::Added,
             }],
-            unstaged: vec![FileChangeInfo {
+            unstaged: vec![GitFileChange {
                 file_path: "/ws/b.txt".into(),
                 relative_path: "b.txt".into(),
-                operation: FileChangeOperation::Modify,
+                old_relative_path: None,
+                status: GitFileStatus::Modified,
             }],
         };
-        let r = to_compare_response(result);
+        let r = to_git_status_response(result);
         assert_eq!(r.staged.len(), 1);
         assert_eq!(r.staged[0].file_path, "/ws/a.txt");
-        assert_eq!(r.staged[0].operation, FileChangeOperation::Create);
+        assert_eq!(r.staged[0].status, GitFileStatusResponse::Added);
         assert_eq!(r.unstaged.len(), 1);
-        assert_eq!(r.unstaged[0].operation, FileChangeOperation::Modify);
+        assert_eq!(r.unstaged[0].status, GitFileStatusResponse::Modified);
     }
 
     // ---- sanitize_upload_filename -----------------------------------------

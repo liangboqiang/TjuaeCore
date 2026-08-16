@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tjuaeui_common::FileChangeOperation;
 
 // ---------------------------------------------------------------------------
 // A. Core file operations — Request DTOs
@@ -257,71 +256,189 @@ pub struct WorkspaceOfficeWatchRequest {
 }
 
 // ---------------------------------------------------------------------------
-// E. Workspace snapshot — Request DTOs
+// E. Workspace Git — Request DTOs
 // ---------------------------------------------------------------------------
 
-/// Request body for snapshot init / getInfo / compare / stageAll / unstageAll / dispose.
 #[derive(Debug, Deserialize)]
-pub struct SnapshotWorkspaceRequest {
+pub struct GitWorkspaceRequest {
     pub workspace: String,
 }
 
-/// Request body for snapshot getBaselineContent.
 #[derive(Debug, Deserialize)]
-pub struct SnapshotBaselineRequest {
+pub struct GitFileRequest {
     pub workspace: String,
     pub file_path: String,
 }
 
-/// Request body for snapshot stageFile / unstageFile.
 #[derive(Debug, Deserialize)]
-pub struct SnapshotStageRequest {
+pub struct GitHistoryRequest {
     pub workspace: String,
-    pub file_path: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub reference: Option<String>,
+    #[serde(default = "default_git_history_limit")]
+    pub limit: usize,
 }
 
-/// Request body for snapshot discardFile / resetFile.
+fn default_git_history_limit() -> usize {
+    100
+}
+
 #[derive(Debug, Deserialize)]
-pub struct SnapshotDiscardRequest {
+pub struct GitRevisionRequest {
     pub workspace: String,
     pub file_path: String,
-    pub operation: FileChangeOperation,
+    pub revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitBranchCreateRequest {
+    pub workspace: String,
+    pub name: String,
+    #[serde(default)]
+    pub start_point: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitBranchSwitchRequest {
+    pub workspace: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitRevisionCheckoutRequest {
+    pub workspace: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCommitFilesRequest {
+    pub workspace: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCloneRequest {
+    pub repository_url: String,
+    pub parent_directory: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCommitRequest {
+    pub workspace: String,
+    pub message: String,
+    #[serde(default)]
+    pub include_unstaged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitWorktreeCreateRequest {
+    pub workspace: String,
+    pub path: String,
+    pub branch: String,
+    #[serde(default)]
+    pub start_point: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitWorktreeRemoveRequest {
+    pub workspace: String,
+    pub path: String,
 }
 
 // ---------------------------------------------------------------------------
-// E. Workspace snapshot — Response DTOs
+// E. Workspace Git — Response DTOs
 // ---------------------------------------------------------------------------
 
-/// Snapshot mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SnapshotMode {
-    GitRepo,
-    Snapshot,
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatusResponse {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
 }
 
-/// Information about a workspace snapshot.
-///
-/// API Spec: `branch: string | null` — always present in JSON output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotInfoResponse {
-    pub mode: SnapshotMode,
-    pub branch: Option<String>,
-}
-
-/// A single file change entry in a compare result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FileChangeInfoResponse {
+pub struct GitFileChangeResponse {
     pub file_path: String,
     pub relative_path: String,
-    pub operation: FileChangeOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_relative_path: Option<String>,
+    pub status: GitFileStatusResponse,
 }
 
-/// Result of comparing workspace changes (staged vs unstaged).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotCompareResponse {
-    pub staged: Vec<FileChangeInfoResponse>,
-    pub unstaged: Vec<FileChangeInfoResponse>,
+pub struct GitStatusResponse {
+    pub conflicted: Vec<GitFileChangeResponse>,
+    pub staged: Vec<GitFileChangeResponse>,
+    pub unstaged: Vec<GitFileChangeResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchResponse {
+    pub name: String,
+    pub current: bool,
+    pub checked_out: bool,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitWorktreeResponse {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: String,
+    pub current: bool,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRepositoryResponse {
+    pub repository_root: String,
+    pub workspace_path: String,
+    pub workspace_relative_path: String,
+    pub branch: String,
+    pub head_commit: String,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: bool,
+    pub branches: Vec<GitBranchResponse>,
+    pub worktrees: Vec<GitWorktreeResponse>,
+    pub remotes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitResponse {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub decorations: Vec<String>,
+    pub author: String,
+    pub authored_at: i64,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitFileResponse {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: GitFileStatusResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionResponse {
+    pub revision: String,
+    pub file_path: String,
+    pub original_revision: Option<String>,
+    pub original_content: Option<String>,
+    pub modified_content: Option<String>,
+    pub patch: String,
+    pub binary: bool,
 }
 
 #[cfg(test)]
@@ -422,16 +539,16 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_discard_request_deserialization() {
+    fn git_revision_request_deserialization() {
         let raw = json!({
             "workspace": "/ws",
             "file_path": "src/main.rs",
-            "operation": "modify"
+            "revision": "abc123"
         });
-        let req: SnapshotDiscardRequest = serde_json::from_value(raw).unwrap();
+        let req: GitRevisionRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.workspace, "/ws");
         assert_eq!(req.file_path, "src/main.rs");
-        assert_eq!(req.operation, FileChangeOperation::Modify);
+        assert_eq!(req.revision, "abc123");
     }
 
     // -- Response serialization tests --
@@ -534,74 +651,18 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_mode_serialization() {
-        assert_eq!(serde_json::to_value(SnapshotMode::GitRepo).unwrap(), "git-repo");
-        assert_eq!(serde_json::to_value(SnapshotMode::Snapshot).unwrap(), "snapshot");
-    }
-
-    #[test]
-    fn snapshot_mode_deserialization() {
-        let mode: SnapshotMode = serde_json::from_str(r#""git-repo""#).unwrap();
-        assert_eq!(mode, SnapshotMode::GitRepo);
-        let mode: SnapshotMode = serde_json::from_str(r#""snapshot""#).unwrap();
-        assert_eq!(mode, SnapshotMode::Snapshot);
-    }
-
-    #[test]
-    fn snapshot_info_response_git_repo() {
-        let resp = SnapshotInfoResponse {
-            mode: SnapshotMode::GitRepo,
-            branch: Some("main".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["mode"], "git-repo");
-        assert_eq!(json["branch"], "main");
-    }
-
-    #[test]
-    fn snapshot_info_response_snapshot_mode() {
-        let resp = SnapshotInfoResponse {
-            mode: SnapshotMode::Snapshot,
-            branch: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["mode"], "snapshot");
-        // API Spec: branch is always present, null when snapshot mode
-        assert!(json["branch"].is_null());
-    }
-
-    #[test]
-    fn snapshot_compare_response_serialization() {
-        let resp = SnapshotCompareResponse {
-            staged: vec![FileChangeInfoResponse {
+    fn git_status_response_serialization() {
+        let resp = GitStatusResponse {
+            conflicted: vec![],
+            staged: vec![GitFileChangeResponse {
                 file_path: "/ws/a.txt".into(),
                 relative_path: "a.txt".into(),
-                operation: FileChangeOperation::Create,
+                old_relative_path: None,
+                status: GitFileStatusResponse::Added,
             }],
-            unstaged: vec![FileChangeInfoResponse {
-                file_path: "/ws/b.txt".into(),
-                relative_path: "b.txt".into(),
-                operation: FileChangeOperation::Modify,
-            }],
+            unstaged: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["staged"][0]["file_path"], "/ws/a.txt");
-        assert_eq!(json["staged"][0]["relative_path"], "a.txt");
-        assert_eq!(json["staged"][0]["operation"], "create");
-        assert_eq!(json["unstaged"][0]["operation"], "modify");
-    }
-
-    #[test]
-    fn snapshot_compare_response_deserialization() {
-        let raw = json!({
-            "staged": [
-                { "file_path": "/ws/x.rs", "relative_path": "x.rs", "operation": "delete" }
-            ],
-            "unstaged": []
-        });
-        let resp: SnapshotCompareResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(resp.staged.len(), 1);
-        assert_eq!(resp.staged[0].operation, FileChangeOperation::Delete);
-        assert!(resp.unstaged.is_empty());
+        assert_eq!(json["staged"][0]["status"], "added");
     }
 }

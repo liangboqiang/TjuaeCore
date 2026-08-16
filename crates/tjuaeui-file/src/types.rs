@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tjuaeui_common::FileChangeOperation;
 
 // ---------------------------------------------------------------------------
 // contentUpdate operation (distinct from snapshot FileChangeOperation)
@@ -92,38 +91,95 @@ pub struct OfficeFileAddedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace snapshot
+// Workspace Git
 // ---------------------------------------------------------------------------
 
-/// Snapshot mode for a workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotMode {
-    /// Directory already has a `.git` — use it directly.
-    GitRepo,
-    /// No `.git` — a temporary repo is created under `/tmp/tjuaeui-snapshot-*`.
-    Snapshot,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
 }
 
-/// Information about a workspace snapshot.
-#[derive(Debug, Clone)]
-pub struct SnapshotInfo {
-    pub mode: SnapshotMode,
-    pub branch: Option<String>,
-}
-
-/// A single file change detected by the snapshot system.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FileChangeInfo {
+pub struct GitFileChange {
     pub file_path: String,
     pub relative_path: String,
-    pub operation: FileChangeOperation,
+    pub old_relative_path: Option<String>,
+    pub status: GitFileStatus,
 }
 
-/// Result of comparing workspace changes against the baseline.
+#[derive(Debug, Clone, Default)]
+pub struct GitStatus {
+    pub conflicted: Vec<GitFileChange>,
+    pub staged: Vec<GitFileChange>,
+    pub unstaged: Vec<GitFileChange>,
+}
+
 #[derive(Debug, Clone)]
-pub struct CompareResult {
-    pub staged: Vec<FileChangeInfo>,
-    pub unstaged: Vec<FileChangeInfo>,
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+    pub checked_out: bool,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitWorktree {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: String,
+    pub current: bool,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitRepositoryInfo {
+    pub repository_root: String,
+    pub workspace_path: String,
+    pub workspace_relative_path: String,
+    pub branch: String,
+    pub head_commit: String,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: bool,
+    pub branches: Vec<GitBranch>,
+    pub worktrees: Vec<GitWorktree>,
+    pub remotes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub decorations: Vec<String>,
+    pub author: String,
+    pub authored_at: i64,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitCommitFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: GitFileStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitRevision {
+    pub revision: String,
+    pub file_path: String,
+    pub original_revision: Option<String>,
+    pub original_content: Option<String>,
+    pub modified_content: Option<String>,
+    pub patch: String,
+    pub binary: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,30 +276,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_mode_equality() {
-        assert_eq!(SnapshotMode::GitRepo, SnapshotMode::GitRepo);
-        assert_ne!(SnapshotMode::GitRepo, SnapshotMode::Snapshot);
-    }
-
-    #[test]
-    fn compare_result_empty() {
-        let result = CompareResult {
-            staged: vec![],
-            unstaged: vec![],
-        };
-        assert!(result.staged.is_empty());
-        assert!(result.unstaged.is_empty());
-    }
-
-    #[test]
-    fn file_change_info_equality() {
-        let a = FileChangeInfo {
-            file_path: "/ws/a.txt".into(),
-            relative_path: "a.txt".into(),
-            operation: FileChangeOperation::Create,
-        };
-        let b = a.clone();
-        assert_eq!(a, b);
+    fn git_status_serialization() {
+        assert_eq!(serde_json::to_value(GitFileStatus::Conflicted).unwrap(), "conflicted");
     }
 
     #[test]

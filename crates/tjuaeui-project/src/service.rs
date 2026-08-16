@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{Datelike, Local};
-use tjuaeui_common::generate_short_id;
+use tjuaeui_common::{WorkspaceGitProvisioner, generate_short_id};
 use tjuaeui_db::{FolderRow, IProjectStore, ProjectExplorerRow, ProjectKind, Role};
 
 use crate::canonical::{self, Canonical};
@@ -19,11 +19,20 @@ use crate::types::{
 pub struct ProjectService {
     store: Arc<dyn IProjectStore>,
     temp_root: PathBuf,
+    git_provisioner: Arc<dyn WorkspaceGitProvisioner>,
 }
 
 impl ProjectService {
-    pub fn new(store: Arc<dyn IProjectStore>, temp_root: PathBuf) -> Self {
-        Self { store, temp_root }
+    pub fn new(
+        store: Arc<dyn IProjectStore>,
+        temp_root: PathBuf,
+        git_provisioner: Arc<dyn WorkspaceGitProvisioner>,
+    ) -> Self {
+        Self {
+            store,
+            temp_root,
+            git_provisioner,
+        }
     }
 
     // ── creation / backfill ────────────────────────────────────────────
@@ -32,6 +41,7 @@ impl ProjectService {
     pub async fn create_standard(&self, uri: String) -> Result<ResolveOutput, ProjectError> {
         let canonical = canonical::canonicalize(&uri)?;
         self.ensure_accessible(&canonical)?;
+        self.ensure_git(&canonical).await?;
         self.resolve_core(canonical, uri, ProjectKind::Standard, None).await
     }
 
@@ -52,6 +62,10 @@ impl ProjectService {
         let leaf = leaf_of(&dir);
         let uri = canonical::to_file_uri(&dir)?;
         let canonical = canonical::canonicalize(&uri)?;
+        if let Err(error) = self.ensure_git(&canonical).await {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
         self.resolve_core(canonical, uri, ProjectKind::Temp, Some(leaf)).await
     }
 
@@ -60,6 +74,7 @@ impl ProjectService {
     pub async fn resolve_existing(&self, uri: String) -> Result<ResolveOutput, ProjectError> {
         let canonical = canonical::canonicalize(&uri)?;
         self.ensure_accessible(&canonical)?;
+        self.ensure_git(&canonical).await?;
         let kind = if self.is_under_temp_root(&canonical) {
             ProjectKind::Temp
         } else {
@@ -301,6 +316,18 @@ impl ProjectService {
                 },
             }),
         }
+    }
+
+    async fn ensure_git(&self, canonical: &Canonical) -> Result<(), ProjectError> {
+        let path = canonical::fs_path(canonical)?;
+        self.git_provisioner
+            .ensure_workspace_git(&path)
+            .await
+            .map(|_| ())
+            .map_err(|reason| ProjectError::GitProvisionFailed {
+                path: path.to_string_lossy().into_owned(),
+                reason,
+            })
     }
 
     /// Create `{temp_root}/YYYY/MM/DD/{leaf}`. Errors `temp_dir_exists` if the

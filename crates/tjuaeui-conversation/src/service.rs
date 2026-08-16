@@ -422,11 +422,22 @@ impl ConversationService {
         self
     }
 
-    pub fn create_team_temp_workspace(&self, team_id: &str) -> Result<String, ConversationError> {
-        let ws_path = auto_workspace_parent(&self.workspace_root).join(format!("team-temp-{team_id}"));
-        std::fs::create_dir_all(&ws_path)
-            .map_err(|e| ConversationError::internal(format!("Failed to create Team temporary workspace: {e}")))?;
-        Ok(ws_path.to_string_lossy().into_owned())
+    pub async fn create_team_temp_workspace(&self, team_id: &str) -> Result<String, ConversationError> {
+        let project_service = self
+            .project_service
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .ok_or_else(|| ConversationError::internal("项目工作区服务未初始化"))?;
+        let resolved = project_service
+            .create_temp(Some(format!("team-temp-{team_id}")))
+            .await
+            .map_err(|error| ConversationError::internal(format!("无法创建团队 Git 工作区：{error}")))?;
+        let canonical = canonical::canonicalize(&resolved.folder.resource_canonical)
+            .map_err(|error| ConversationError::internal(format!("无法解析团队工作区：{error}")))?;
+        let path = canonical::fs_path(&canonical)
+            .map_err(|error| ConversationError::internal(format!("无法解析团队工作区路径：{error}")))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     pub fn with_mcp_server_repo(&self, repo: Arc<dyn IMcpServerRepository>) {
@@ -477,6 +488,25 @@ impl ConversationService {
                 warn!(conversation_id = %conversation_id, error = err.code(), "project bind skipped");
             }
         }
+    }
+
+    async fn prepare_project_binding(
+        &self,
+        workspace_path: &str,
+    ) -> Result<Option<(String, String)>, ConversationError> {
+        let project_service = self.project_service.read().ok().and_then(|guard| guard.clone());
+        let Some(project_service) = project_service else {
+            // Unit-level domain tests construct the service without the app
+            // composition root. Production always injects this dependency.
+            return Ok(None);
+        };
+        let uri = canonical::to_file_uri(Path::new(workspace_path))
+            .map_err(|error| ConversationError::internal(format!("无法解析工作区 URI：{error}")))?;
+        let resolved = project_service
+            .resolve_existing(uri)
+            .await
+            .map_err(|error| ConversationError::internal(format!("无法准备 Git 工作区：{error}")))?;
+        Ok(Some((resolved.project.project_id, resolved.folder.folder_id)))
     }
 
     pub fn with_assistant_definition_repo(&self, repo: Arc<dyn IAssistantDefinitionRepository>) {
@@ -1141,6 +1171,15 @@ impl ConversationService {
             }
         }
 
+        let project_binding = match extra
+            .get("workspace")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            Some(workspace) => self.prepare_project_binding(workspace).await?,
+            None => None,
+        };
+
         let row = tjuaeui_db::models::ConversationRow {
             id: id.clone(),
             user_id: user_id.to_owned(),
@@ -1161,21 +1200,11 @@ impl ConversationService {
             pinned_at: None,
             created_at: now,
             updated_at: now,
-            project_id: None,
-            folder_id: None,
+            project_id: project_binding.as_ref().map(|(project_id, _)| project_id.clone()),
+            folder_id: project_binding.map(|(_, folder_id)| folder_id),
         };
 
         self.conversation_repo.create(&row).await?;
-
-        // Project-bind side branch (best-effort; never affects creation).
-        // Uses the workspace the existing flow already decided + created.
-        if let Some(workspace) = extra
-            .get("workspace")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            self.bind_project_best_effort(&id, workspace).await;
-        }
 
         if let Some(snapshot) = assistant_snapshot.as_ref() {
             let resolved_skill_ids = serde_json::to_string(&snapshot.resolved_defaults.skill_ids).map_err(|e| {

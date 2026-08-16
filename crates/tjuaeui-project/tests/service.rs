@@ -1,15 +1,32 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner};
 use tjuaeui_db::{Database, IProjectStore, SqliteProjectStore, init_database_memory};
 use tjuaeui_project::ProjectService;
 use tjuaeui_project::canonical::{canonicalize, to_file_uri};
 use tjuaeui_project::types::{AttachInput, FileOp, ReferenceInput};
 
+struct TestWorkspaceGitProvisioner;
+
+#[async_trait]
+impl WorkspaceGitProvisioner for TestWorkspaceGitProvisioner {
+    async fn ensure_workspace_git(&self, workspace: &std::path::Path) -> Result<WorkspaceGitProvision, String> {
+        let workspace = workspace.to_string_lossy().into_owned();
+        Ok(WorkspaceGitProvision {
+            repository_root: workspace.clone(),
+            workspace_path: workspace,
+            branch: "main".into(),
+            head_commit: "test-head".into(),
+        })
+    }
+}
+
 async fn harness(temp_root: PathBuf) -> (ProjectService, Arc<dyn IProjectStore>, Database) {
     let db = init_database_memory().await.unwrap();
     let store: Arc<dyn IProjectStore> = Arc::new(SqliteProjectStore::new(db.pool().clone()));
-    let service = ProjectService::new(Arc::clone(&store), temp_root);
+    let service = ProjectService::new(Arc::clone(&store), temp_root, Arc::new(TestWorkspaceGitProvisioner));
     (service, store, db)
 }
 

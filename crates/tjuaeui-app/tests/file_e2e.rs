@@ -35,18 +35,27 @@ async fn fs_endpoints_require_auth() {
         "/api/fs/watch/stop-all",
         "/api/fs/office-watch/start",
         "/api/fs/office-watch/stop",
-        "/api/fs/snapshot/init",
-        "/api/fs/snapshot/info",
-        "/api/fs/snapshot/compare",
-        "/api/fs/snapshot/baseline",
-        "/api/fs/snapshot/stage",
-        "/api/fs/snapshot/stage-all",
-        "/api/fs/snapshot/unstage",
-        "/api/fs/snapshot/unstage-all",
-        "/api/fs/snapshot/discard",
-        "/api/fs/snapshot/reset",
-        "/api/fs/snapshot/branches",
-        "/api/fs/snapshot/dispose",
+        "/api/fs/git/ensure",
+        "/api/fs/git/info",
+        "/api/fs/git/status",
+        "/api/fs/git/baseline",
+        "/api/fs/git/index-content",
+        "/api/fs/git/stage",
+        "/api/fs/git/stage-all",
+        "/api/fs/git/unstage",
+        "/api/fs/git/unstage-all",
+        "/api/fs/git/discard",
+        "/api/fs/git/history",
+        "/api/fs/git/revision",
+        "/api/fs/git/branch/create",
+        "/api/fs/git/branch/switch",
+        "/api/fs/git/commit",
+        "/api/fs/git/fetch",
+        "/api/fs/git/pull",
+        "/api/fs/git/push",
+        "/api/fs/git/sync",
+        "/api/fs/git/worktree/create",
+        "/api/fs/git/worktree/remove",
     ];
 
     for uri in endpoints {
@@ -829,11 +838,11 @@ async fn watch_stop_all_succeeds() {
 }
 
 // ===========================================================================
-// Snapshot operations
+// Persistent Git operations
 // ===========================================================================
 
 #[tokio::test]
-async fn snapshot_init_and_compare_on_plain_dir() {
+async fn git_ensure_initializes_main_and_keeps_the_workspace_clean() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -841,10 +850,9 @@ async fn snapshot_init_and_compare_on_plain_dir() {
     let workspace = dir.path();
     std::fs::write(workspace.join("file.txt"), "initial").unwrap();
 
-    // Init snapshot
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/init",
+        "/api/fs/git/ensure",
         json!({ "workspace": workspace.to_str().unwrap() }),
         &token,
         &csrf,
@@ -854,12 +862,17 @@ async fn snapshot_init_and_compare_on_plain_dir() {
 
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["mode"], "snapshot");
+    assert_eq!(json["data"]["branch"], "main");
+    assert!(
+        json["data"]["head_commit"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(workspace.join(".git").is_dir());
 
-    // Get info
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/info",
+        "/api/fs/git/status",
         json!({ "workspace": workspace.to_str().unwrap() }),
         &token,
         &csrf,
@@ -867,14 +880,35 @@ async fn snapshot_init_and_compare_on_plain_dir() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["mode"], "snapshot");
+    assert_eq!(json["data"]["conflicted"].as_array().unwrap().len(), 0);
+    assert_eq!(json["data"]["staged"].as_array().unwrap().len(), 0);
+    assert_eq!(json["data"]["unstaged"].as_array().unwrap().len(), 0);
+}
 
-    // Modify file and compare
+#[tokio::test]
+async fn git_status_stage_commit_history_and_revision_share_one_persistent_repository() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    std::fs::write(workspace.join("file.txt"), "initial").unwrap();
+
+    let req = json_with_token(
+        "POST",
+        "/api/fs/git/ensure",
+        json!({ "workspace": workspace.to_str().unwrap() }),
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
     std::fs::write(workspace.join("file.txt"), "modified").unwrap();
 
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/compare",
+        "/api/fs/git/status",
         json!({ "workspace": workspace.to_str().unwrap() }),
         &token,
         &csrf,
@@ -884,13 +918,12 @@ async fn snapshot_init_and_compare_on_plain_dir() {
 
     let json = body_json(resp).await;
     let unstaged = json["data"]["unstaged"].as_array().unwrap();
-    assert!(!unstaged.is_empty(), "should detect unstaged modification");
-    assert_eq!(unstaged[0]["operation"], "modify");
+    assert_eq!(unstaged.len(), 1);
+    assert_eq!(unstaged[0]["status"], "modified");
 
-    // Get baseline content
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/baseline",
+        "/api/fs/git/baseline",
         json!({
             "workspace": workspace.to_str().unwrap(),
             "file_path": "file.txt"
@@ -903,77 +936,56 @@ async fn snapshot_init_and_compare_on_plain_dir() {
     let json = body_json(resp).await;
     assert_eq!(json["data"], "initial");
 
-    // Dispose
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/dispose",
-        json!({ "workspace": workspace.to_str().unwrap() }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn snapshot_init_git_repo() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
-    // Create a temporary git repo
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let repo = git2::Repository::init(workspace).unwrap();
-    std::fs::write(workspace.join("readme.md"), "# hello").unwrap();
-
-    // Stage and commit
-    let mut index = repo.index().unwrap();
-    index.add_path(std::path::Path::new("readme.md")).unwrap();
-    index.write().unwrap();
-    let tree_id = index.write_tree().unwrap();
-    let tree = repo.find_tree(tree_id).unwrap();
-    let sig = git2::Signature::now("test", "test@test.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
-
-    // Init snapshot — should detect git-repo mode
-    let req = json_with_token(
-        "POST",
-        "/api/fs/snapshot/init",
-        json!({ "workspace": workspace.to_str().unwrap() }),
+        "/api/fs/git/stage",
+        json!({ "workspace": workspace.to_str().unwrap(), "file_path": "file.txt" }),
         &token,
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["mode"], "git-repo");
-    assert!(json["data"]["branch"].is_string());
-
-    // Branches
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/branches",
-        json!({ "workspace": workspace.to_str().unwrap() }),
+        "/api/fs/git/commit",
+        json!({ "workspace": workspace.to_str().unwrap(), "message": "test: update file" }),
         &token,
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    let branches = json["data"].as_array().unwrap();
-    assert!(!branches.is_empty());
+    let commit = json["data"].as_str().unwrap().to_owned();
 
-    // Dispose
     let req = json_with_token(
         "POST",
-        "/api/fs/snapshot/dispose",
-        json!({ "workspace": workspace.to_str().unwrap() }),
+        "/api/fs/git/history",
+        json!({ "workspace": workspace.to_str().unwrap(), "file_path": "file.txt", "limit": 20 }),
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["hash"] == commit)
+    );
+
+    let req = json_with_token(
+        "POST",
+        "/api/fs/git/revision",
+        json!({ "workspace": workspace.to_str().unwrap(), "file_path": "file.txt", "revision": commit }),
         &token,
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["modified_content"], "modified");
 }
 
 // ===========================================================================

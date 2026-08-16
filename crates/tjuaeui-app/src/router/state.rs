@@ -28,7 +28,7 @@ use tjuaeui_extension::{
     HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
-use tjuaeui_file::{BrowseRoots, FileRouterState, FileService, FileWatchService, SnapshotService};
+use tjuaeui_file::{BrowseRoots, FileRouterState, FileService, FileWatchService};
 use tjuaeui_mcp::{
     ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService,
     McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter, TjuaeCliAdapter,
@@ -440,11 +440,10 @@ pub fn build_file_state(services: &AppServices) -> Result<FileRouterState, Route
     let browse_roots = BrowseRoots::new();
     let file_service = Arc::new(FileService::new(broadcaster.clone(), allowed_roots.clone()));
     let watch_service = Arc::new(FileWatchService::new(broadcaster).map_err(file_watch_init_error)?);
-    let snapshot_service = Arc::new(SnapshotService::new());
     Ok(FileRouterState {
         file_service,
         watch_service,
-        snapshot_service,
+        git_service: services.git_service.clone(),
         allowed_roots,
         browse_roots,
     })

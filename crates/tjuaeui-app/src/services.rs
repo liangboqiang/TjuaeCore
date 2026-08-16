@@ -18,6 +18,7 @@ use tjuaeui_db::{
     SqliteConversationRepository, SqliteMcpServerRepository, SqliteProjectStore, SqliteProviderRepository,
     SqliteSettingsRepository, SqliteSkillRepository, SqliteUserRepository,
 };
+use tjuaeui_file::GitService;
 use tjuaeui_project::ProjectService;
 use tjuaeui_realtime::{BroadcastEventBus, WebSocketManager};
 use tjuaeui_system::SettingsService;
@@ -38,6 +39,9 @@ pub struct AppServices {
     /// Project-bind service (project-bind side branch). Shared by conversation
     /// and team wiring to bind/backfill project/folder rows. Cheap to clone.
     pub project_service: ProjectService,
+    /// Persistent Git authority shared by project/conversation provisioning
+    /// and the file API. One instance also provides one write queue per repo.
+    pub git_service: Arc<GitService>,
     /// Same instance as `worker_task_manager`, exposed through the
     /// `OnConversationDelete` trait so `ConversationService::with_delete_hook`
     /// can wire it up. Optional because tests construct `AppServices` with a
@@ -165,8 +169,9 @@ impl AppServices {
         // conversation temp-workspace root (`work_dir/conversations`) so
         // `resolve_existing` classifies auto workspaces as temp and
         // user-picked directories as standard.
+        let git_service = Arc::new(GitService::new());
         let project_store: Arc<dyn IProjectStore> = Arc::new(SqliteProjectStore::new(database.pool().clone()));
-        let project_service = ProjectService::new(project_store, work_dir.join("conversations"));
+        let project_service = ProjectService::new(project_store, work_dir.join("conversations"), git_service.clone());
 
         // Skill paths need app resource dir (for builtin rules) + data dir
         // (for user skills + materialized views). AcpSkillManager uses these
@@ -258,6 +263,7 @@ impl AppServices {
             conversation_runtime_state,
             conversation_service,
             project_service,
+            git_service,
             task_manager_delete_hook: Some(task_manager_delete_hook),
             agent_registry,
             conversation_repo,

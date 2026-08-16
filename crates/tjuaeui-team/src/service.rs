@@ -240,6 +240,26 @@ impl TeamSessionService {
         }
     }
 
+    /// Creation-time project binding. Production injects `ProjectService`, so
+    /// a workspace cannot be persisted before its Git repository is ready.
+    /// Domain-only tests may omit the composition-root dependency.
+    async fn prepare_binding(&self, workspace: &str) -> Result<(Option<String>, Option<String>), TeamError> {
+        let project_service = self.project_service.read().ok().and_then(|guard| guard.clone());
+        let Some(project_service) = project_service else {
+            return Ok((None, None));
+        };
+        if workspace.trim().is_empty() {
+            return Ok((None, None));
+        }
+        let uri = canonical::to_file_uri(Path::new(workspace))
+            .map_err(|error| TeamError::WorkspacePathUnavailable(format!("无法解析工作区 URI：{error}")))?;
+        let resolved = project_service
+            .resolve_existing(uri)
+            .await
+            .map_err(|error| TeamError::WorkspacePathUnavailable(format!("无法准备 Git 工作区：{error}")))?;
+        Ok((Some(resolved.project.project_id), Some(resolved.folder.folder_id)))
+    }
+
     /// Lazily backfill `teams.project_id`/`folder_id` on read. Best-effort;
     /// no-op when already bound, workspace empty, or service unset.
     async fn backfill_team_binding_best_effort(&self, row: &TeamRow) {
@@ -370,8 +390,7 @@ impl TeamSessionService {
         let team_workspace = provisioned.team_workspace;
         let agents_json = serde_json::to_string(&agents)?;
 
-        // Project-bind side branch (best-effort; never affects team creation).
-        let (project_id, folder_id) = self.resolve_binding_best_effort(&team_workspace).await;
+        let (project_id, folder_id) = self.prepare_binding(&team_workspace).await?;
 
         let row = TeamRow {
             id: team_id.clone(),
