@@ -397,26 +397,13 @@ pub(crate) struct ConfigSkillsArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigSkillsCommand {
     List,
-    Info,
-    Paths,
+    Create,
     Import,
+    Clone,
     Delete,
-    Scan,
-    ExternalPaths(ConfigSkillsExternalPathsArgs),
     Market(ConfigSkillsMarketArgs),
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigSkillsExternalPathsArgs {
-    #[command(subcommand)]
-    pub command: ConfigSkillsExternalPathsCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigSkillsExternalPathsCommand {
-    List,
-    Add,
-    Remove,
+    Copy,
+    Preferences,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -427,8 +414,9 @@ pub(crate) struct ConfigSkillsMarketArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ConfigSkillsMarketCommand {
-    Enable,
-    Disable,
+    List,
+    Install,
+    Update,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -820,12 +808,6 @@ mod tests {
             &["tjuaecore", "config", "assistants", "skill", "read"],
             &["tjuaecore", "config", "assistants", "skill", "write"],
             &["tjuaecore", "config", "assistants", "skill", "delete"],
-            &["tjuaecore", "config", "skills", "list"],
-            &["tjuaecore", "config", "skills", "info"],
-            &["tjuaecore", "config", "skills", "paths"],
-            &["tjuaecore", "config", "skills", "import"],
-            &["tjuaecore", "config", "skills", "delete"],
-            &["tjuaecore", "config", "skills", "scan"],
             &["tjuaecore", "config", "mcp", "servers", "list"],
             &["tjuaecore", "config", "mcp", "servers", "get"],
             &["tjuaecore", "config", "mcp", "servers", "create"],
@@ -868,11 +850,16 @@ mod tests {
             &["tjuaecore", "config", "cron", "jobs", "skill", "get"],
             &["tjuaecore", "config", "cron", "jobs", "skill", "save"],
             &["tjuaecore", "config", "cron", "jobs", "skill", "delete"],
-            &["tjuaecore", "config", "skills", "external-paths", "list"],
-            &["tjuaecore", "config", "skills", "external-paths", "add"],
-            &["tjuaecore", "config", "skills", "external-paths", "remove"],
-            &["tjuaecore", "config", "skills", "market", "enable"],
-            &["tjuaecore", "config", "skills", "market", "disable"],
+            &["tjuaecore", "config", "skills", "list"],
+            &["tjuaecore", "config", "skills", "create"],
+            &["tjuaecore", "config", "skills", "import"],
+            &["tjuaecore", "config", "skills", "clone"],
+            &["tjuaecore", "config", "skills", "delete"],
+            &["tjuaecore", "config", "skills", "market", "list"],
+            &["tjuaecore", "config", "skills", "market", "install"],
+            &["tjuaecore", "config", "skills", "market", "update"],
+            &["tjuaecore", "config", "skills", "copy"],
+            &["tjuaecore", "config", "skills", "preferences"],
         ];
 
         for command in commands {

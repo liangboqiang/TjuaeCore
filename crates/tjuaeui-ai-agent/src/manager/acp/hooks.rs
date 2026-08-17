@@ -24,10 +24,14 @@ impl PreSendHook for SessionNewPreludeHook {
         let config = InjectionConfig {
             preset_context: ctx.params.preset_context.as_deref(),
             skills: &ctx.params.config.skills,
-            native_skill_support: metadata
-                .native_skills_dirs
-                .as_ref()
-                .is_some_and(|v: &Vec<String>| !v.is_empty()),
+            // Native directories are populated only in TjuaeUI-owned
+            // temporary workspaces. A custom project must stay clean and
+            // therefore uses the prompt-based skill loading protocol.
+            native_skill_support: !ctx.params.workspace.is_custom
+                && metadata
+                    .native_skills_dirs
+                    .as_ref()
+                    .is_some_and(|v: &Vec<String>| !v.is_empty()),
         };
 
         // inject_first_message_prefix currently swallows I/O errors and

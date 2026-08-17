@@ -20,7 +20,7 @@ use crate::state::ExtensionStateStore;
 use crate::types::{
     ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAcpAdapter,
     ResolvedAgent, ResolvedAssistant, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
-    ResolvedSettingsTab, ResolvedSkill, ResolvedTheme, WebuiContribution,
+    ResolvedSettingsTab, ResolvedTheme, WebuiContribution,
 };
 
 // Re-export ExtensionSummary from registry_helpers so that
@@ -335,11 +335,6 @@ impl ExtensionRegistry {
     pub async fn get_mcp_servers(&self) -> Vec<crate::types::ResolvedMcpServer> {
         let guard = self.inner.read().await;
         guard.contributions.mcp_servers.clone()
-    }
-
-    pub async fn get_skills(&self) -> Vec<ResolvedSkill> {
-        let guard = self.inner.read().await;
-        guard.contributions.skills.clone()
     }
 
     pub async fn get_settings_tabs(&self) -> Vec<ResolvedSettingsTab> {

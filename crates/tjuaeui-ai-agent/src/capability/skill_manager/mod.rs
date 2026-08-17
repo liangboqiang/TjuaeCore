@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
-use tjuaeui_db::ISkillRepository;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -20,14 +19,8 @@ pub struct SkillDefinition {
     pub name: String,
     /// One-line description from SKILL.md frontmatter.
     pub description: String,
-    /// File system path to the SKILL.md file (absolute for custom/extension,
-    /// or the materialized view path for builtin).
+    /// File system path to the managed skill directory.
     pub location: PathBuf,
-    /// Origin of this skill (builtin/custom/extension).
-    pub source: tjuaeui_extension::SkillSource,
-    /// Relative path inside the builtin skill corpus
-    /// (e.g. `auto-inject/cron/SKILL.md`); `None` for non-builtin sources.
-    pub relative_location: Option<String>,
     /// Lazily-loaded full content (body after frontmatter).
     pub body: Option<String>,
 }
@@ -41,8 +34,9 @@ pub struct SkillIndex {
 
 /// Manages skill discovery, indexing, and on-demand loading.
 ///
-/// Skills are stored in directories containing a `SKILL.md` file.
-/// The SKILL.md frontmatter provides `name` and `description`.
+/// Skills are immediate child directories containing the canonical
+/// `.tjuae-skill.json` manifest and its `SKILL.md` entry.
+/// The entry frontmatter provides `name` and `description`.
 /// The body (content after frontmatter) is loaded on demand.
 pub struct AcpSkillManager {
     /// Cached skill definitions keyed by skill name.
@@ -53,9 +47,6 @@ pub struct AcpSkillManager {
     /// Consumed by `discover_skills` / `get_skill` (Task 4 / 5 of the refactor).
     #[allow(dead_code)]
     paths: Arc<tjuaeui_extension::SkillPaths>,
-    /// User skill state source. When absent, discovery falls back to legacy
-    /// path-based listing for unit tests that do not stand up a database.
-    skill_repo: Option<Arc<dyn ISkillRepository>>,
 }
 
 impl AcpSkillManager {
@@ -64,36 +55,21 @@ impl AcpSkillManager {
             cache: RwLock::new(HashMap::new()),
             discovered: RwLock::new(false),
             paths,
-            skill_repo: None,
-        })
-    }
-
-    pub fn new_with_repo(
-        paths: Arc<tjuaeui_extension::SkillPaths>,
-        skill_repo: Arc<dyn ISkillRepository>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            cache: RwLock::new(HashMap::new()),
-            discovered: RwLock::new(false),
-            paths,
-            skill_repo: Some(skill_repo),
         })
     }
 
     /// Discover skills via `tjuaeui_extension::list_available_skills`.
     ///
-    /// Filtering rules:
-    /// - Auto-inject builtin skills (under `auto-inject/` in the corpus) are
-    ///   always included unless listed in `exclude_builtin_skills`.
-    /// - Opt-in builtin skills (siblings of `auto-inject/`) and custom/cron/
-    ///   extension skills are included only if `enabled_skills` contains their
-    ///   name.
+    /// Filtering is driven only by each package's preferences: disabled
+    /// packages are ignored, auto-injected packages are selected unless
+    /// explicitly excluded, and the remaining packages must be named by the
+    /// assistant snapshot.
     ///
     /// Populates the cache; subsequent `get_skill(name)` calls read body lazily.
     pub async fn discover_skills(
         &self,
-        enabled_skills: Option<&[String]>,
-        exclude_builtin_skills: Option<&[String]>,
+        selected_skills: Option<&[String]>,
+        excluded_auto_inject_skills: Option<&[String]>,
     ) -> Vec<SkillIndex> {
         let items = match self.list_available_skills().await {
             Ok(v) => v,
@@ -107,37 +83,24 @@ impl AcpSkillManager {
         cache.clear();
 
         for item in items {
-            let is_auto_inject = item
-                .relative_location
-                .as_deref()
-                .is_some_and(|r| r.starts_with("auto-inject/"));
-
-            let keep = match item.source {
-                tjuaeui_extension::SkillSource::Builtin => {
-                    if is_auto_inject {
-                        !exclude_builtin_skills.is_some_and(|ex| ex.iter().any(|n| n == &item.name))
-                    } else {
-                        enabled_skills.is_some_and(|en| en.iter().any(|n| n == &item.name))
-                    }
-                }
-                tjuaeui_extension::SkillSource::Custom
-                | tjuaeui_extension::SkillSource::Cron
-                | tjuaeui_extension::SkillSource::Extension => {
-                    enabled_skills.is_some_and(|en| en.iter().any(|n| n == &item.name))
-                }
-            };
+            let keep = item.preferences.enabled
+                && if item.preferences.auto_inject {
+                    !excluded_auto_inject_skills
+                        .is_some_and(|excluded| excluded.iter().any(|name| name == &item.slug || name == &item.id))
+                } else {
+                    selected_skills
+                        .is_some_and(|enabled| enabled.iter().any(|name| name == &item.slug || name == &item.id))
+                };
             if !keep {
                 continue;
             }
 
             cache.insert(
-                item.name.clone(),
+                item.slug.clone(),
                 SkillDefinition {
-                    name: item.name.clone(),
+                    name: item.slug.clone(),
                     description: item.description.clone(),
-                    location: std::path::PathBuf::from(&item.location),
-                    source: item.source,
-                    relative_location: item.relative_location.clone(),
+                    location: item.path.clone(),
                     body: None,
                 },
             );
@@ -182,17 +145,15 @@ impl AcpSkillManager {
         let mut cache = self.cache.write().await;
         cache.clear();
         for item in items {
-            if !wanted.contains(&item.name) {
+            if !wanted.contains(&item.slug) && !wanted.contains(&item.id) {
                 continue;
             }
             cache.insert(
-                item.name.clone(),
+                item.slug.clone(),
                 SkillDefinition {
-                    name: item.name.clone(),
+                    name: item.slug.clone(),
                     description: item.description.clone(),
-                    location: std::path::PathBuf::from(&item.location),
-                    source: item.source,
-                    relative_location: item.relative_location.clone(),
+                    location: item.path.clone(),
                     body: None,
                 },
             );
@@ -210,12 +171,8 @@ impl AcpSkillManager {
 
     async fn list_available_skills(
         &self,
-    ) -> Result<Vec<tjuaeui_extension::SkillListItem>, tjuaeui_extension::ExtensionError> {
-        if let Some(repo) = &self.skill_repo {
-            tjuaeui_extension::list_available_skills_with_repo(&self.paths, repo.as_ref()).await
-        } else {
-            tjuaeui_extension::list_available_skills(&self.paths).await
-        }
+    ) -> Result<Vec<tjuaeui_extension::InstalledSkill>, tjuaeui_extension::ExtensionError> {
+        tjuaeui_extension::list_installed_skills(&self.paths.user_skills_dir).await
     }
 
     /// Return the current skill index without re-scanning.
@@ -233,9 +190,7 @@ impl AcpSkillManager {
     /// Load a skill's full content by name.
     ///
     /// Returns `None` if the skill is unknown. On first access the body is
-    /// read via the appropriate channel based on `source`:
-    /// - `Builtin` → `tjuaeui_extension::read_builtin_skill(&paths, relative)`
-    /// - `Custom` / `Cron` / `Extension` → direct `tokio::fs::read_to_string(location/SKILL.md)`
+    /// read directly from the package's `SKILL.md` entry.
     pub async fn get_skill(&self, name: &str) -> Option<SkillDefinition> {
         // Fast path: check if body is already cached
         {
@@ -247,44 +202,19 @@ impl AcpSkillManager {
             }
         }
 
-        // Slow path: read body per source and cache it
+        // Slow path: read the unified package entry and cache it.
         let mut cache = self.cache.write().await;
         let def = cache.get_mut(name)?;
         if def.body.is_some() {
             return Some(def.clone());
         }
 
-        let content = match def.source {
-            tjuaeui_extension::SkillSource::Builtin => {
-                if let Some(rel) = def.relative_location.as_deref() {
-                    match tjuaeui_extension::read_builtin_skill(&self.paths, rel).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!(skill = name, error = %e, "Failed to read builtin skill");
-                            String::new()
-                        }
-                    }
-                } else {
-                    warn!(skill = name, "Builtin skill missing relative_location");
-                    String::new()
-                }
-            }
-            tjuaeui_extension::SkillSource::Custom
-            | tjuaeui_extension::SkillSource::Cron
-            | tjuaeui_extension::SkillSource::Extension => {
-                // `location` for scanned user skills is the directory; append SKILL.md.
-                let skill_file = if def.location.is_dir() {
-                    def.location.join("SKILL.md")
-                } else {
-                    def.location.clone()
-                };
-                match tokio::fs::read_to_string(&skill_file).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(skill = name, path = %skill_file.display(), error = %e, "Failed to read skill file");
-                        String::new()
-                    }
-                }
+        let skill_file = def.location.join("SKILL.md");
+        let content = match tokio::fs::read_to_string(&skill_file).await {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(skill = name, path = %skill_file.display(), %error, "Failed to read skill file");
+                String::new()
             }
         };
 
@@ -347,17 +277,14 @@ mod tests {
     }
 
     #[test]
-    fn skill_definition_has_source_and_relative_location() {
+    fn skill_definition_uses_managed_directory() {
         let def = SkillDefinition {
             name: "x".into(),
             description: "d".into(),
             location: PathBuf::from("/tmp/x"),
-            source: tjuaeui_extension::SkillSource::Builtin,
-            relative_location: Some("auto-inject/x/SKILL.md".into()),
             body: None,
         };
-        assert_eq!(def.source, tjuaeui_extension::SkillSource::Builtin);
-        assert_eq!(def.relative_location.as_deref(), Some("auto-inject/x/SKILL.md"));
+        assert_eq!(def.location, PathBuf::from("/tmp/x"));
     }
 
     // Frontmatter parsing tests live in tjuaeui-extension (covers
@@ -429,10 +356,9 @@ mod tests {
     // -----------------------------------------------------------------------
     // AcpSkillManager async tests
     //
-    // Discovery-layout tests moved to `tests/skill_manager_integration.rs`
-    // because they now need `tjuaeui_extension::BUILTIN_SKILLS_ENV_VAR` to
-    // point the extension service at a tempdir corpus. Only the tests that
-    // don't require a skill corpus remain here.
+    // Discovery-layout tests live in `tests/skill_manager_integration.rs`
+    // because they exercise a real canonical package corpus. Only the tests
+    // that don't require a skill corpus remain here.
     // -----------------------------------------------------------------------
 
     #[tokio::test]

@@ -15,9 +15,9 @@ async-trait.workspace = true
 axum.workspace = true
 dirs.workspace = true
 fs2.workspace = true
-include_dir.workspace = true
 semver.workspace = true
 notify.workspace = true
+reqwest.workspace = true
 hex.workspace = true
 sha2.workspace = true
 tokio.workspace = true
@@ -27,7 +27,6 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 mime_guess.workspace = true
-zip.workspace = true
 
 # NTFS junctions are used on Windows to materialize skill links without
 # requiring `SeCreateSymbolicLink` (Developer Mode / Admin). Pulled in

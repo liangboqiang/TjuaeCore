@@ -14,10 +14,10 @@ use tjuaeui_common::OnConversationDelete;
 use tjuaeui_conversation::{ConversationService, runtime_state::ConversationRuntimeStateService};
 use tjuaeui_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository, IMcpServerRepository,
-    IProjectStore, ISkillRepository, IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    IProjectStore, IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
     SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository,
     SqliteConversationRepository, SqliteMcpServerRepository, SqliteProjectStore, SqliteProviderRepository,
-    SqliteSettingsRepository, SqliteSkillRepository, SqliteUserRepository,
+    SqliteSettingsRepository, SqliteUserRepository,
 };
 use tjuaeui_file::GitService;
 use tjuaeui_project::ProjectService;
@@ -62,8 +62,6 @@ pub struct AppServices {
     /// Resolved skill paths. Shared with the `ConversationService` for
     /// snapshot resolution at create time.
     pub skill_paths: Arc<tjuaeui_extension::SkillPaths>,
-    /// User skill metadata and import history repository.
-    pub skill_repo: Arc<dyn ISkillRepository>,
     /// 与正式会话共用，供启动扫描预加载直接 CLI 的模型目录。
     pub session_spawner: Arc<dyn tjuaeui_process::Spawner>,
     runtime_helper_bin: String,
@@ -89,7 +87,6 @@ impl AppServices {
             work_dir: self.work_dir.clone(),
             event_bus: self.event_bus.clone(),
             skill_paths: self.skill_paths.clone(),
-            skill_repo: self.skill_repo.clone(),
             worker_task_manager: self.worker_task_manager.clone(),
             conversation_runtime_state: self.conversation_runtime_state.clone(),
             conversation_repo: self.conversation_repo.clone(),
@@ -165,7 +162,6 @@ impl AppServices {
 
         let conversation_repo: Arc<dyn IConversationRepository> =
             Arc::new(SqliteConversationRepository::new(database.pool().clone()));
-        let skill_repo: Arc<dyn ISkillRepository> = Arc::new(SqliteSkillRepository::new(database.pool().clone()));
 
         // Project-bind service (side branch). temp_root mirrors the existing
         // conversation temp-workspace root (`work_dir/conversations`) so
@@ -184,9 +180,9 @@ impl AppServices {
             .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let skill_paths = Arc::new(tjuaeui_extension::resolve_skill_paths(&app_resource_dir, &data_dir));
-        tjuaeui_extension::sync_skill_catalog_into_repo(skill_paths.as_ref(), skill_repo.as_ref())
+        tjuaeui_extension::initialize_skill_workspaces(&skill_paths.user_skills_dir, git_service.clone())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to synchronize skill catalog: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to initialize skill workspaces: {e}"))?;
 
         // Absolute path to this process's binary. Reused as the `command` for
         // the stdio MCP bridge spawned by ACP CLIs when a team session is
@@ -210,7 +206,7 @@ impl AppServices {
         ));
 
         let factory = build_agent_factory(AgentFactoryDeps {
-            skill_manager: AcpSkillManager::new_with_repo(skill_paths.clone(), skill_repo.clone()),
+            skill_manager: AcpSkillManager::new(skill_paths.clone()),
             provider_repo,
             encryption_key,
             agent_registry: agent_registry.clone(),
@@ -240,7 +236,6 @@ impl AppServices {
             work_dir: work_dir.clone(),
             event_bus: event_bus.clone(),
             skill_paths: skill_paths.clone(),
-            skill_repo: skill_repo.clone(),
             worker_task_manager: worker_task_manager.clone(),
             conversation_runtime_state: conversation_runtime_state.clone(),
             conversation_repo: conversation_repo.clone(),
@@ -277,7 +272,6 @@ impl AppServices {
             local,
             app_version,
             skill_paths,
-            skill_repo,
             session_spawner,
             runtime_helper_bin,
             runtime_base_url,
@@ -298,7 +292,6 @@ struct ConversationServiceDeps<'a> {
     work_dir: PathBuf,
     event_bus: Arc<BroadcastEventBus>,
     skill_paths: Arc<tjuaeui_extension::SkillPaths>,
-    skill_repo: Arc<dyn ISkillRepository>,
     worker_task_manager: Arc<dyn IWorkerTaskManager>,
     conversation_runtime_state: Arc<ConversationRuntimeStateService>,
     conversation_repo: Arc<dyn IConversationRepository>,
@@ -312,7 +305,6 @@ struct ConversationServiceDeps<'a> {
 fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> ConversationService {
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         deps.skill_paths,
-        deps.skill_repo,
     ));
     let service = ConversationService::new(
         deps.work_dir,

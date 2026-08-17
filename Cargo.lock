@@ -5211,10 +5211,10 @@ dependencies = [
  "fs2",
  "hex",
  "http-body-util",
- "include_dir",
  "junction",
  "mime_guess",
  "notify",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
@@ -5230,7 +5230,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -5246,6 +5245,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

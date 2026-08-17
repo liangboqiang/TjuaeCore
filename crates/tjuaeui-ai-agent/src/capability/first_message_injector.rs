@@ -54,30 +54,11 @@ pub async fn inject_first_message_prefix(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use tjuaeui_extension::{BUILTIN_SKILLS_ENV_VAR, resolve_skill_paths};
+    use tjuaeui_extension::resolve_skill_paths;
 
     fn test_mgr(base: &std::path::Path) -> Arc<AcpSkillManager> {
         let paths = Arc::new(resolve_skill_paths(base, base));
         AcpSkillManager::new(paths)
-    }
-
-    /// Point the embedded corpus at an empty dir so tests don't pick up
-    /// real auto-inject builtin skills.
-    struct EmptyBuiltinGuard;
-    impl EmptyBuiltinGuard {
-        fn new(empty_path: &std::path::Path) -> Self {
-            unsafe {
-                std::env::set_var(BUILTIN_SKILLS_ENV_VAR, empty_path);
-            }
-            Self
-        }
-    }
-    impl Drop for EmptyBuiltinGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(BUILTIN_SKILLS_ENV_VAR);
-            }
-        }
     }
 
     #[tokio::test]
@@ -122,7 +103,6 @@ mod tests {
     #[tokio::test]
     async fn heavy_mode_no_skills_no_context_passes_through() {
         let tmp = TempDir::new().unwrap();
-        let _guard = EmptyBuiltinGuard::new(tmp.path());
         let mgr = test_mgr(tmp.path());
 
         let out = inject_first_message_prefix(
@@ -141,7 +121,6 @@ mod tests {
     #[tokio::test]
     async fn heavy_mode_with_preset_context_no_skills() {
         let tmp = TempDir::new().unwrap();
-        let _guard = EmptyBuiltinGuard::new(tmp.path());
         let mgr = test_mgr(tmp.path());
 
         let out = inject_first_message_prefix(
@@ -162,22 +141,31 @@ mod tests {
 
     #[tokio::test]
     async fn heavy_mode_with_resolved_skills_injects_index() {
-        // Set up a builtin skills dir with two skills; pass only one in `skills`.
+        // Set up two canonical packages; pass only one in `skills`.
         let tmp = TempDir::new().unwrap();
-        let auto = tmp.path().join("auto-inject");
-        std::fs::create_dir_all(auto.join("cron")).unwrap();
+        let skills = tmp.path().join("skills");
+        std::fs::create_dir_all(skills.join("cron")).unwrap();
         std::fs::write(
-            auto.join("cron").join("SKILL.md"),
+            skills.join("cron").join(".tjuae-skill.json"),
+            r#"{"$schema":"https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json","schemaVersion":1,"id":"cron","version":"1.0.0","categories":[],"enabled":true,"autoInject":false,"source":{"kind":"local"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            skills.join("cron").join("SKILL.md"),
             "---\nname: cron\ndescription: Schedule stuff\n---\nBody.",
         )
         .unwrap();
-        std::fs::create_dir_all(auto.join("pdf")).unwrap();
+        std::fs::create_dir_all(skills.join("pdf")).unwrap();
         std::fs::write(
-            auto.join("pdf").join("SKILL.md"),
+            skills.join("pdf").join(".tjuae-skill.json"),
+            r#"{"$schema":"https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json","schemaVersion":1,"id":"pdf","version":"1.0.0","categories":[],"enabled":true,"autoInject":false,"source":{"kind":"local"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            skills.join("pdf").join("SKILL.md"),
             "---\nname: pdf\ndescription: Render PDFs\n---\nBody.",
         )
         .unwrap();
-        let _guard = EmptyBuiltinGuard::new(tmp.path());
         let mgr = test_mgr(tmp.path());
 
         let out = inject_first_message_prefix(
@@ -198,7 +186,6 @@ mod tests {
     #[tokio::test]
     async fn native_support_uses_light_mode_even_with_skills() {
         let tmp = TempDir::new().unwrap();
-        let _guard = EmptyBuiltinGuard::new(tmp.path());
         let mgr = test_mgr(tmp.path());
 
         let out = inject_first_message_prefix(

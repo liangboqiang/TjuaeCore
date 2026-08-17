@@ -177,16 +177,6 @@ pub struct ExtAgent {
     pub models: Vec<String>,
 }
 
-/// Skill contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtSkill {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 /// Theme contributed by an extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtTheme {
@@ -290,8 +280,6 @@ pub struct ExtContributes {
     pub assistants: Vec<ExtAssistant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<ExtAgent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<ExtSkill>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub themes: Vec<ExtTheme>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -566,17 +554,6 @@ pub struct ResolvedAgent {
     pub models: Vec<String>,
 }
 
-/// Resolved skill contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedSkill {
-    pub extension_name: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 /// Resolved theme (CSS content loaded into memory).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResolvedTheme {
@@ -662,7 +639,6 @@ pub struct ResolvedContributions {
     pub mcp_servers: Vec<ResolvedMcpServer>,
     pub assistants: Vec<ResolvedAssistant>,
     pub agents: Vec<ResolvedAgent>,
-    pub skills: Vec<ResolvedSkill>,
     pub themes: Vec<ResolvedTheme>,
     pub channel_plugins: Vec<ResolvedChannelPlugin>,
     pub webui: Vec<WebuiContribution>,

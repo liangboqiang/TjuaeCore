@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner};
+use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner, WorkspaceGitState, WorkspacePathPublishResult};
 use tjuaeui_runtime::Builder as CommandBuilder;
 use tokio::sync::Mutex;
 
@@ -18,6 +18,7 @@ use crate::types::{
 const INITIAL_COMMIT_MESSAGE: &str = "chore: 初始化 Tjuae 工作区";
 const LOCAL_GIT_USER_NAME: &str = "Tjuae";
 const LOCAL_GIT_USER_EMAIL: &str = "tjuae@localhost";
+const MARKET_BASELINE_REF: &str = "refs/tjuae/market-sync";
 
 #[derive(Clone, Default)]
 pub struct GitService {
@@ -65,10 +66,10 @@ impl GitService {
         let repository_lock = self.mutation_lock(&context.repository_root);
         let _repository_guard = repository_lock.lock().await;
         drop(provision_guard);
+        ensure_local_excludes(&context.repository_root)?;
         if initialized || !has_head(&context.repository_root).await {
             ensure_main_head(&context.repository_root).await?;
             ensure_local_identity(&context.repository_root).await?;
-            ensure_local_excludes(&context.repository_root)?;
             stage_scope(&context).await?;
             ensure_index_is_scoped(&context).await?;
             run_git(
@@ -161,6 +162,320 @@ impl WorkspaceGitProvisioner for GitService {
             head_commit: info.head_commit,
         })
     }
+
+    async fn workspace_git_state(&self, workspace: &Path) -> Result<WorkspaceGitState, String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        let status = IGitService::status(self, workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !status.conflicted.is_empty() {
+            Ok(WorkspaceGitState::Conflicted)
+        } else if !status.staged.is_empty() || !status.unstaged.is_empty() {
+            Ok(WorkspaceGitState::Modified)
+        } else {
+            Ok(WorkspaceGitState::Clean)
+        }
+    }
+
+    async fn commit_workspace_snapshot(&self, workspace: &Path, message: &str) -> Result<String, String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        let status = IGitService::status(self, workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        if status.conflicted.is_empty() && status.staged.is_empty() && status.unstaged.is_empty() {
+            return IGitService::repository_info(self, workspace)
+                .await
+                .map(|info| info.head_commit)
+                .map_err(|error| error.to_string());
+        }
+        IGitService::commit(self, workspace, message, true)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn clone_workspace_repository(
+        &self,
+        repository_url: &str,
+        parent_directory: &Path,
+    ) -> Result<WorkspaceGitProvision, String> {
+        let parent = parent_directory
+            .to_str()
+            .ok_or_else(|| "技能目录路径不是有效 UTF-8".to_owned())?;
+        let info = IGitService::clone_repository(self, repository_url, parent)
+            .await
+            .map_err(|error| error.to_string())?;
+        if info.branch != "main" {
+            run_git(
+                Path::new(&info.repository_root),
+                ["branch", "-M", "main"],
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        let info = IGitService::repository_info(self, &info.workspace_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(WorkspaceGitProvision {
+            repository_root: info.repository_root,
+            workspace_path: info.workspace_path,
+            branch: info.branch,
+            head_commit: info.head_commit,
+        })
+    }
+
+    async fn materialize_repository_path(
+        &self,
+        repository_url: &str,
+        revision: &str,
+        source_path: &str,
+        destination: &Path,
+    ) -> Result<(), String> {
+        let repository_url = validate_repository_url(repository_url).map_err(|error| error.to_string())?;
+        validate_revision(revision).map_err(|error| error.to_string())?;
+        let source_path = normalize_relative(source_path);
+        let source = Path::new(&source_path);
+        if source.is_absolute()
+            || source_path.is_empty()
+            || source
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err("市场目录必须是仓库内的安全相对路径".to_owned());
+        }
+        if destination.exists() {
+            return Err(format!("市场安装目标已存在：{}", destination.display()));
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| "市场安装目标缺少父目录".to_owned())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let parent = canonical_workspace(parent).map_err(|error| error.to_string())?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let checkout_name = format!(".tjuae-market-{}-{nonce}", std::process::id());
+        let checkout = parent.join(&checkout_name);
+        let result = async {
+            run_git_owned(
+                &parent,
+                vec![
+                    OsString::from("clone"),
+                    OsString::from("--no-checkout"),
+                    OsString::from("--filter=blob:none"),
+                    OsString::from("--"),
+                    OsString::from(repository_url),
+                    OsString::from(&checkout_name),
+                ],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            run_git(&checkout, ["checkout", "--detach", revision], Duration::from_secs(120))
+                .await
+                .map_err(|error| error.to_string())?;
+            let checked_source = checkout.join(&source_path);
+            let metadata = std::fs::metadata(&checked_source)
+                .map_err(|error| format!("市场仓库中不存在目录 {source_path}：{error}"))?;
+            if !metadata.is_dir() {
+                return Err(format!("市场路径不是目录：{source_path}"));
+            }
+            copy_market_tree(&checked_source, destination).map_err(|error| error.to_string())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&checkout);
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(destination);
+        }
+        result
+    }
+
+    async fn workspace_matches_market_baseline(&self, workspace: &Path) -> Result<bool, String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        let info = IGitService::repository_info(self, workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        if info.dirty || info.head_commit.is_empty() {
+            return Ok(false);
+        }
+        let baseline = optional_git_stdout(
+            Path::new(&info.repository_root),
+            ["rev-parse", "--verify", MARKET_BASELINE_REF],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(baseline.as_deref() == Some(info.head_commit.as_str()))
+    }
+
+    async fn mark_market_baseline(&self, workspace: &Path) -> Result<(), String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        let (context, lock) = self
+            .locked_context(workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        let _guard = lock.lock().await;
+        run_git(
+            &context.repository_root,
+            ["update-ref", MARKET_BASELINE_REF, "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn publish_workspace_path(
+        &self,
+        workspace: &Path,
+        target_repository_url: &str,
+        target_path: &str,
+        branch: &str,
+        message: &str,
+    ) -> Result<WorkspacePathPublishResult, String> {
+        let workspace = canonical_workspace(workspace).map_err(|error| error.to_string())?;
+        let repository_url = validate_repository_url(target_repository_url).map_err(|error| error.to_string())?;
+        validate_branch(branch).map_err(|error| error.to_string())?;
+        let message = message.trim();
+        if message.is_empty() || message.len() > 500 {
+            return Err("发布说明不能为空且不能超过 500 个字符".to_owned());
+        }
+        let target_path = normalize_relative(target_path);
+        let target_path_value = Path::new(&target_path);
+        if target_path.is_empty()
+            || target_path_value.is_absolute()
+            || target_path_value
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err("发布目录必须是仓库内的安全相对路径".to_owned());
+        }
+        let info = IGitService::repository_info(self, workspace.to_string_lossy().as_ref())
+            .await
+            .map_err(|error| error.to_string())?;
+        if info.dirty {
+            return Err("发布前请先提交本地技能的全部修改".to_owned());
+        }
+
+        let parent = workspace.parent().ok_or_else(|| "技能工作区缺少父目录".to_owned())?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let checkout_name = format!(".tjuae-publish-{}-{nonce}", std::process::id());
+        let checkout = parent.join(&checkout_name);
+        let result = async {
+            run_git_owned(
+                parent,
+                vec![
+                    OsString::from("clone"),
+                    OsString::from("--"),
+                    OsString::from(repository_url),
+                    OsString::from(&checkout_name),
+                ],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            run_git(&checkout, ["switch", "-c", branch], Duration::from_secs(30))
+                .await
+                .map_err(|error| error.to_string())?;
+            let destination = checkout.join(&target_path);
+            if destination.exists() {
+                remove_directory_contents(&destination).map_err(|error| error.to_string())?;
+            }
+            copy_market_tree(&workspace, &destination).map_err(|error| error.to_string())?;
+            ensure_local_identity(&checkout)
+                .await
+                .map_err(|error| error.to_string())?;
+            run_git_owned(
+                &checkout,
+                vec![
+                    OsString::from("add"),
+                    OsString::from("-A"),
+                    OsString::from("--"),
+                    OsString::from(&target_path),
+                ],
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            run_git_owned(
+                &checkout,
+                vec![OsString::from("commit"), OsString::from("-m"), OsString::from(message)],
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let commit = git_stdout(&checkout, ["rev-parse", "HEAD"])
+                .await
+                .map_err(|error| error.to_string())?;
+            run_git_owned(
+                &checkout,
+                vec![
+                    OsString::from("push"),
+                    OsString::from("--set-upstream"),
+                    OsString::from("origin"),
+                    OsString::from(branch),
+                ],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(WorkspacePathPublishResult {
+                branch: branch.to_owned(),
+                commit,
+            })
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&checkout);
+        result
+    }
+}
+
+fn copy_market_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("技能目录不能包含符号链接：{}", entry.path().display()),
+            ));
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_market_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_directory_contents(directory: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -649,10 +964,14 @@ fn ensure_local_excludes(root: &Path) -> Result<(), FileError> {
     std::fs::create_dir_all(&info).map_err(|error| FileError::Internal(format!("无法创建 Git info 目录：{error}")))?;
     let exclude = info.join("exclude");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    let managed = "\n# Tjuae workspace defaults\nnode_modules/\ndist/\nbuild/\ntarget/\n.env\n.env.*\n";
+    let managed = "\n# Tjuae workspace defaults\n.tjuae/\nnode_modules/\ndist/\nbuild/\ntarget/\n.env\n.env.*\n";
+    let has_runtime_exclude = existing.lines().any(|line| line.trim() == ".tjuae/");
     if !existing.contains("# Tjuae workspace defaults") {
         std::fs::write(&exclude, format!("{existing}{managed}"))
             .map_err(|error| FileError::Internal(format!("无法写入 Git 排除规则：{error}")))?;
+    } else if !has_runtime_exclude {
+        std::fs::write(&exclude, format!("{existing}.tjuae/\n"))
+            .map_err(|error| FileError::Internal(format!("无法更新 Git 排除规则：{error}")))?;
     }
     Ok(())
 }
@@ -1209,6 +1528,7 @@ async fn run_git_owned(root: &Path, args: Vec<OsString>, timeout: Duration) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn rejects_option_injection_in_refs() {
@@ -1238,5 +1558,40 @@ mod tests {
         assert_eq!(repository_folder_name(ssh).unwrap(), "TjuaeCore");
         assert!(validate_repository_url("--upload-pack=malicious").is_err());
         assert!(validate_repository_url("C:\\private\\repo").is_err());
+    }
+
+    #[tokio::test]
+    async fn provision_creates_main_with_a_clean_initial_commit() {
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path().join("skill");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SKILL.md"), "# skill\n").unwrap();
+
+        let service = GitService::new();
+        let workspace_text = workspace.to_string_lossy();
+        let info = service.ensure(&workspace_text).await.unwrap();
+        let status = service.status(&workspace_text).await.unwrap();
+
+        assert_eq!(info.branch, "main");
+        assert!(!info.head_commit.is_empty());
+        assert!(!info.dirty);
+        assert!(status.conflicted.is_empty());
+        assert!(status.staged.is_empty());
+        assert!(status.unstaged.is_empty());
+        assert!(workspace.join(".git").exists());
+
+        let exclude = workspace.join(".git/info/exclude");
+        assert!(std::fs::read_to_string(&exclude).unwrap().contains(".tjuae/"));
+        std::fs::create_dir_all(workspace.join(".tjuae/skills")).unwrap();
+        std::fs::write(workspace.join(".tjuae/skills/runtime-link"), "ephemeral").unwrap();
+        let runtime_status = service.status(&workspace_text).await.unwrap();
+        assert!(runtime_status.conflicted.is_empty());
+        assert!(runtime_status.staged.is_empty());
+        assert!(runtime_status.unstaged.is_empty());
+
+        let old_defaults = std::fs::read_to_string(&exclude).unwrap().replace(".tjuae/\n", "");
+        std::fs::write(&exclude, old_defaults).unwrap();
+        service.ensure(&workspace_text).await.unwrap();
+        assert!(std::fs::read_to_string(exclude).unwrap().contains(".tjuae/"));
     }
 }

@@ -13,7 +13,6 @@ pub mod i18n;
 pub mod mcp_server;
 pub mod model_provider;
 pub mod settings_tab;
-pub mod skill;
 pub mod theme;
 pub mod webui;
 
@@ -39,7 +38,6 @@ pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContrib
         mcp_servers: mcp_server::resolve_mcp_servers(&contributes.mcp_servers, ext_name),
         assistants: assistant::resolve_assistants(&contributes.assistants, ext_name, ext_dir),
         agents: agent::resolve_agents(&contributes.agents, ext_name, ext_dir),
-        skills: skill::resolve_skills(&contributes.skills, ext_name, ext_dir),
         themes: theme::resolve_themes(&contributes.themes, ext_name, ext_dir),
         channel_plugins: channel_plugin::resolve_channel_plugins(&contributes.channel_plugins, ext_name, ext_dir),
         webui: webui::resolve_webui_contributions(&contributes.webui, ext_name, ext_dir),
@@ -88,7 +86,6 @@ fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContr
     target.mcp_servers.extend(source.mcp_servers);
     target.assistants.extend(source.assistants);
     target.agents.extend(source.agents);
-    target.skills.extend(source.skills);
     target.themes.extend(source.themes);
     target.channel_plugins.extend(source.channel_plugins);
     target.webui.extend(source.webui);
@@ -185,46 +182,40 @@ mod tests {
 
     #[test]
     fn test_resolve_all_skips_disabled() {
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join("skills")).unwrap();
-        std::fs::write(dir.path().join("skills/my-skill.md"), "# skill").unwrap();
-
         let enabled = make_extension(
             "enabled-ext",
             true,
             Some(ExtContributes {
-                skills: vec![ExtSkill {
-                    name: "my-skill".into(),
+                model_providers: vec![ExtModelProvider {
+                    id: "visible-provider".into(),
+                    name: "Visible Provider".into(),
                     description: None,
-                    path: Some("skills/my-skill.md".into()),
+                    protocol: None,
+                    base_url: None,
+                    models: vec![],
                 }],
                 ..Default::default()
             }),
         );
-        let enabled = LoadedExtension {
-            directory: dir.path().to_string_lossy().into_owned(),
-            ..enabled
-        };
         let disabled = make_extension(
             "disabled-ext",
             false,
             Some(ExtContributes {
-                skills: vec![ExtSkill {
-                    name: "hidden-skill".into(),
+                model_providers: vec![ExtModelProvider {
+                    id: "hidden-provider".into(),
+                    name: "Hidden Provider".into(),
                     description: None,
-                    path: Some("skills/hidden-skill.md".into()),
+                    protocol: None,
+                    base_url: None,
+                    models: vec![],
                 }],
                 ..Default::default()
             }),
         );
-        let disabled = LoadedExtension {
-            directory: dir.path().to_string_lossy().into_owned(),
-            ..disabled
-        };
 
         let result = resolve_all_contributions(&[enabled, disabled]);
-        assert_eq!(result.skills.len(), 1);
-        assert_eq!(result.skills[0].name, "my-skill");
+        assert_eq!(result.model_providers.len(), 1);
+        assert_eq!(result.model_providers[0].id, "visible-provider");
     }
 
     #[test]

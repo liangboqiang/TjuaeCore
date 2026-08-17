@@ -53,7 +53,7 @@ use crate::convert::{
 use crate::error::ConversationError;
 use crate::session_context::{SessionContextBuilder, TjuaeCliRuntimePermissionSeed};
 use crate::skill_resolver::SkillResolver;
-use crate::skill_snapshot::{backfill_skills_if_missing, compute_initial_skills};
+use crate::skill_snapshot::compute_initial_skills;
 use crate::turn_orchestrator::{ConversationTurnOrchestrator, ConversationTurnStatus, TurnStartInput};
 use std::sync::RwLock;
 
@@ -974,11 +974,9 @@ impl ConversationService {
             }
         }
 
-        // Consume transient skill-shaping inputs and freeze the initial
-        // `skills` snapshot into `extra.skills`. These request-only fields
-        // must not land in the stored row. Legacy names (`enabled_skills`,
-        // `exclude_builtin_skills`) are accepted as aliases for compatibility
-        // with older frontend builds and pre-snapshot presets (§7.1).
+        // Consume the two canonical skill-selection inputs and freeze the
+        // initial `skills` snapshot into `extra.skills`. Request-only fields
+        // and unsupported legacy aliases must not land in the stored row.
         fn take_string_array(obj: &mut serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Vec<String> {
             for key in keys {
                 if let Some(v) = obj.remove(*key)
@@ -1002,9 +1000,10 @@ impl ConversationService {
 
         let (preset_enabled, exclude_auto_inject) = match extra.as_object_mut() {
             Some(obj) => {
-                let extra_preset = take_string_array(obj, &["preset_enabled_skills", "enabled_skills"]);
-                let extra_exclude = take_string_array(obj, &["exclude_auto_inject_skills", "exclude_builtin_skills"]);
-                // Strip the stale cache field if a clone copied it in.
+                let extra_preset = take_string_array(obj, &["preset_enabled_skills"]);
+                let extra_exclude = take_string_array(obj, &["exclude_auto_inject_skills"]);
+                obj.remove("enabled_skills");
+                obj.remove("exclude_builtin_skills");
                 obj.remove("loaded_skills");
 
                 match assistant_snapshot.as_ref() {
@@ -1021,13 +1020,11 @@ impl ConversationService {
         let auto_inject_names = self.skill_resolver.auto_inject_names().await;
         let initial_skills = compute_initial_skills(&auto_inject_names, &preset_enabled, &exclude_auto_inject);
 
-        // Wire skill links into the runtime workspace so the agent CLI picks
-        // them up via its native skills dir (e.g. `.claude/skills/`). This
-        // applies to both temp and user-selected workspaces.
-        let skill_link_workspace = user_supplied_workspace
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| auto_provisioned_workspace.clone());
+        // Native skill links are a runtime projection and therefore belong
+        // only in TjuaeUI-owned temporary workspaces. User-selected projects
+        // must remain untouched; those sessions receive the same skills via
+        // the prompt loading protocol instead.
+        let skill_link_workspace = auto_provisioned_workspace.clone();
         if let Some(ws_path) = skill_link_workspace.as_ref()
             && !initial_skills.is_empty()
             && let Some(rel_dirs) = native_skills_dirs(
@@ -3422,25 +3419,25 @@ impl ConversationService {
         Some(issue.token)
     }
 
-    /// Ensure native skill links exist in the runtime workspace. Auto
-    /// workspaces are constrained to TjuaeUI's generated path; custom
-    /// workspaces were validated when the session context was built.
+    /// Ensure native skill links exist in a TjuaeUI-owned runtime workspace.
+    /// Custom project workspaces are intentionally never modified.
     pub(crate) async fn ensure_workspace_skill_links(&self, row: &ConversationRow, build_opts: &BuildTaskOptions) {
         let context = &build_opts.context;
         let backend = context_backend_value(context);
 
-        let workspace = PathBuf::from(context.workspace.path.trim());
-        if !context.workspace.is_custom {
-            let expected_workspace = expected_auto_workspace_path(
-                &self.workspace_root,
-                &row.id,
-                &context.conversation.agent_type,
-                backend.as_ref(),
-            );
+        if context.workspace.is_custom {
+            return;
+        }
 
-            if workspace != expected_workspace {
-                return;
-            }
+        let workspace = PathBuf::from(context.workspace.path.trim());
+        let expected_workspace = expected_auto_workspace_path(
+            &self.workspace_root,
+            &row.id,
+            &context.conversation.agent_type,
+            backend.as_ref(),
+        );
+        if workspace != expected_workspace {
+            return;
         }
 
         let skill_names = context_skill_names(context);
@@ -3549,14 +3546,11 @@ impl ConversationService {
         Arc::clone(&self.skill_resolver)
     }
 
-    /// Backfill `extra.skills` if the row predates the snapshot model.
-    /// Persists the mutation asynchronously; failures are logged and
-    /// swallowed so a read path never 500s because of a backfill write
-    /// failure.
+    /// Normalize persisted conversation metadata that still uses an internal
+    /// alias. Skill snapshots are intentionally not migrated here: new and
+    /// existing conversations use the single `extra.skills` model.
     async fn backfill_extra_inplace(&self, conversation_id: &str, extra: &mut serde_json::Value) {
-        let auto_inject = self.skill_resolver.auto_inject_names().await;
-        let mut mutated = backfill_skills_if_missing(extra, &auto_inject);
-        mutated |= backfill_cron_job_id_alias(extra);
+        let mutated = backfill_cron_job_id_alias(extra);
         if !mutated {
             return;
         }

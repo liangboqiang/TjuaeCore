@@ -9,7 +9,6 @@ use wiremock::MockServer;
 
 use tjuaeui_ai_agent::{AgentInstance, IAgentTask, IMockAgent, WorkerTaskManagerImpl};
 use tjuaeui_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
-use tjuaeui_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use tjuaeui_file::FileService;
 use tjuaeui_system::VersionCheckService;
 
@@ -18,71 +17,6 @@ pub async fn build_app() -> (axum::Router, AppServices) {
     let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
     let router = create_router(&services).await.expect("build router");
     (router, services)
-}
-
-/// Build an app whose skill router uses the given temp directories.
-///
-/// Use for HTTP integration tests that need deterministic on-disk layouts
-/// (E1 `/api/skills`, E3/E4 built-in reads, E5 `/api/skills/info`).
-/// Returns the router, services, and the `SkillPaths` so the test can seed
-/// fixtures at known locations. `/api/skills` reads the database only; tests
-/// that seed skill directories should call `sync_skill_catalog_for_test`.
-#[allow(dead_code)]
-pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router, AppServices, SkillPaths) {
-    let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let config = AppConfig {
-        data_dir: root.to_path_buf(),
-        work_dir: root.to_path_buf(),
-        ..Default::default()
-    };
-    let services = AppServices::from_config(db, &config).await.unwrap();
-    sqlx::query("DELETE FROM skill_import_records")
-        .execute(services.database.pool())
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM skills")
-        .execute(services.database.pool())
-        .await
-        .unwrap();
-    let (mut states, _) = build_module_states(&services).await.expect("build module states");
-
-    let builtin_dir = root.join("builtin-skills");
-    let paths = SkillPaths {
-        data_dir: root.to_path_buf(),
-        user_skills_dir: root.join("skills"),
-        cron_skills_dir: root.join("cron").join("skills"),
-        builtin_skills_dir: builtin_dir.clone(),
-        builtin_rules_dir: root.join("builtin-rules"),
-        assistant_rules_dir: root.join("assistant-rules"),
-        assistant_skills_dir: root.join("assistant-skills"),
-    };
-    for dir in [
-        &paths.user_skills_dir,
-        &builtin_dir,
-        &paths.builtin_rules_dir,
-        &paths.assistant_rules_dir,
-        &paths.assistant_skills_dir,
-    ] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
-
-    let ext_paths_mgr = std::sync::Arc::new(ExternalPathsManager::with_file(root.join("paths.json")).await);
-    states.skill = SkillRouterState {
-        skill_paths: paths.clone(),
-        skill_repo: std::sync::Arc::new(tjuaeui_db::SqliteSkillRepository::new(services.database.pool().clone())),
-        external_paths_manager: ext_paths_mgr,
-        assistant_dispatcher: states.skill.assistant_dispatcher.clone(),
-    };
-
-    let router = create_router_with_states(&services, states);
-    (router, services, paths)
-}
-
-pub async fn sync_skill_catalog_for_test(services: &AppServices, paths: &SkillPaths) {
-    let repo = tjuaeui_db::SqliteSkillRepository::new(services.database.pool().clone());
-    tjuaeui_extension::sync_skill_catalog_into_repo(paths, &repo)
-        .await
-        .expect("sync skill catalog");
 }
 
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {

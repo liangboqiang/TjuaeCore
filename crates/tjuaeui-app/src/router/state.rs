@@ -24,8 +24,8 @@ use tjuaeui_db::{
     SqliteRemoteAgentRepository, SqliteSettingsRepository,
 };
 use tjuaeui_extension::{
-    AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
-    HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
+    AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, HubIndexManager,
+    HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
 use tjuaeui_file::{BrowseRoots, FileRouterState, FileService, FileWatchService};
@@ -692,7 +692,6 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
     let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
-        services.skill_repo.clone(),
     ));
     let conv_service = ConversationService::new(
         services.work_dir.clone(),
@@ -815,8 +814,6 @@ pub async fn build_extension_states(
     let index_manager = HubIndexManager::new(hub_dir, registry.clone());
     let installer = HubInstaller::new(index_manager.clone(), registry.clone());
 
-    let ext_paths_mgr = Arc::new(ExternalPathsManager::new(&skill_data_dir).await);
-
     let ext_state = ExtensionRouterState {
         registry: registry.clone(),
     };
@@ -828,8 +825,7 @@ pub async fn build_extension_states(
 
     let skill_state = SkillRouterState {
         skill_paths: services.skill_paths.as_ref().clone(),
-        skill_repo: services.skill_repo.clone(),
-        external_paths_manager: ext_paths_mgr,
+        git: services.git_service.clone(),
         assistant_dispatcher: None,
     };
 

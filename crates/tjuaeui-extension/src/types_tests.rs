@@ -93,20 +93,6 @@ fn test_ext_contributes_empty() {
 }
 
 #[test]
-fn test_ext_contributes_with_skills() {
-    let c = ExtContributes {
-        skills: vec![ExtSkill {
-            name: "my-skill".into(),
-            description: Some("A test skill".into()),
-            path: Some("skills/my-skill".into()),
-        }],
-        ..Default::default()
-    };
-    let json = serde_json::to_value(&c).unwrap();
-    assert_eq!(json["skills"][0]["name"], "my-skill");
-}
-
-#[test]
 fn test_ext_acp_adapter_minimal() {
     let adapter = ExtAcpAdapter {
         id: "claude-adapter".into(),

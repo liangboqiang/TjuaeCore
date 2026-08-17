@@ -240,38 +240,7 @@ fn cr4_agent_file_reference_resolved() {
 }
 
 // ---------------------------------------------------------------------------
-// CR-5: Skill resolution
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cr5_skill_resolved_with_path() {
-    let dir = std::env::temp_dir().join("cr5_skill_resolved_with_path");
-    std::fs::create_dir_all(dir.join("skills")).unwrap();
-    std::fs::write(dir.join("skills/code-review.md"), "# review").unwrap();
-
-    let contributes = ExtContributes {
-        skills: vec![ExtSkill {
-            name: "code-review".into(),
-            description: Some("Review code for quality".into()),
-            path: Some("skills/code-review.md".into()),
-        }],
-        ..Default::default()
-    };
-
-    let ext = make_loaded_extension("skill-ext", &dir.to_string_lossy(), contributes);
-    let result = resolve_extension_contributions(&ext);
-
-    assert_eq!(result.skills.len(), 1);
-    let skill = &result.skills[0];
-    assert_eq!(skill.extension_name, "skill-ext");
-    assert_eq!(skill.name, "code-review");
-    assert!(skill.path.as_ref().unwrap().contains("skills/code-review"));
-
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// CR-6: Theme resolution (CSS content loaded)
+// CR-5: Theme resolution (CSS content loaded)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -501,21 +470,10 @@ fn cr10_i18n_unsupported_locale_returns_empty() {
 
 #[test]
 fn resolve_all_merges_contributions_from_multiple_extensions() {
-    let dir = std::env::temp_dir().join("resolve_all_merges_contributions_from_multiple_extensions");
-    std::fs::create_dir_all(dir.join("a/skills")).unwrap();
-    std::fs::create_dir_all(dir.join("b/skills")).unwrap();
-    std::fs::write(dir.join("a/skills/skill-a.md"), "# a").unwrap();
-    std::fs::write(dir.join("b/skills/skill-b.md"), "# b").unwrap();
-
     let ext_a = make_loaded_extension(
         "ext-a",
-        &dir.join("a").to_string_lossy(),
+        "/ext/a",
         ExtContributes {
-            skills: vec![ExtSkill {
-                name: "skill-a".into(),
-                description: None,
-                path: Some("skills/skill-a.md".into()),
-            }],
             model_providers: vec![ExtModelProvider {
                 id: "mp-a".into(),
                 name: "Provider A".into(),
@@ -529,22 +487,21 @@ fn resolve_all_merges_contributions_from_multiple_extensions() {
     );
     let ext_b = make_loaded_extension(
         "ext-b",
-        &dir.join("b").to_string_lossy(),
+        "/ext/b",
         ExtContributes {
-            skills: vec![ExtSkill {
-                name: "skill-b".into(),
+            mcp_servers: vec![ExtMcpServer {
+                id: "mcp-b".into(),
+                name: "MCP B".into(),
                 description: None,
-                path: Some("skills/skill-b.md".into()),
+                config: serde_json::json!({}),
             }],
             ..Default::default()
         },
     );
 
     let result = resolve_all_contributions(&[ext_a, ext_b]);
-    assert_eq!(result.skills.len(), 2);
     assert_eq!(result.model_providers.len(), 1);
-
-    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(result.mcp_servers.len(), 1);
 }
 
 #[test]
@@ -553,10 +510,13 @@ fn resolve_all_skips_disabled_extensions() {
         "disabled-ext",
         "/ext/disabled",
         ExtContributes {
-            skills: vec![ExtSkill {
-                name: "hidden".into(),
+            model_providers: vec![ExtModelProvider {
+                id: "hidden".into(),
+                name: "Hidden".into(),
                 description: None,
-                path: None,
+                protocol: None,
+                base_url: None,
+                models: vec![],
             }],
             ..Default::default()
         },
@@ -564,7 +524,7 @@ fn resolve_all_skips_disabled_extensions() {
     ext.state.enabled = false;
 
     let result = resolve_all_contributions(&[ext]);
-    assert!(result.skills.is_empty());
+    assert!(result.model_providers.is_empty());
 }
 
 #[test]

@@ -11,7 +11,6 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 
-use serde_json::json;
 use tjuaeui_api_types::{
     ApiResponse, DisableExtensionRequest, EnableExtensionRequest, ExtensionSummaryResponse, GetI18nRequest,
     GetPermissionsRequest, GetRiskLevelRequest, PermissionDetailResponse, PermissionSummaryResponse,
@@ -43,7 +42,6 @@ impl From<ExtensionError> for ApiError {
             ExtensionError::ResolutionFailed { .. } => ApiError::Internal(err.to_string()),
             ExtensionError::NotFound(name) => ApiError::NotFound(format!("找不到扩展：{name}")),
             ExtensionError::StatePersistence(msg) => ApiError::Internal(msg),
-            ExtensionError::BuiltinSkillDeletion(name) => ApiError::BadRequest(format!("无法删除内置技能：{name}")),
             ExtensionError::SkillNotFound(name) => ApiError::NotFound(format!("找不到技能：{name}")),
             ExtensionError::InvalidSkillPath(path) => ApiError::BadRequest(format!("技能路径无效：{path}")),
             ExtensionError::SkillInvalidFrontmatter(_) => ApiError::coded(
@@ -61,45 +59,7 @@ impl From<ExtensionError> for ApiError {
             ExtensionError::SkillImportInvalidSource(_) => ApiError::coded(
                 StatusCode::BAD_REQUEST,
                 "SKILL_IMPORT_INVALID_SOURCE",
-                "所选路径不是技能目录、SKILL.md、父目录或 zip 压缩包。",
-                None,
-            ),
-            ExtensionError::SkillImportSymlinkEntry(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_SYMLINK_ENTRY",
-                "技能导入内容不能包含符号链接。",
-                None,
-            ),
-            ExtensionError::SkillImportFileTooLarge {
-                file_path,
-                file_bytes,
-                limit_bytes,
-            } => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_FILE_TOO_LARGE",
-                "技能导入内容包含过大的文件。",
-                Some(json!({
-                    "error_path": file_path,
-                    "file_bytes": file_bytes,
-                    "limit_bytes": limit_bytes,
-                })),
-            ),
-            ExtensionError::SkillImportTotalTooLarge {
-                total_bytes,
-                limit_bytes,
-            } => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_TOTAL_TOO_LARGE",
-                "技能导入内容过大。",
-                Some(json!({
-                    "total_bytes": total_bytes,
-                    "limit_bytes": limit_bytes,
-                })),
-            ),
-            ExtensionError::SkillImportInvalidZip(_) => ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "SKILL_IMPORT_INVALID_ZIP",
-                "所选 zip 压缩包不是有效的技能包。",
+                "所选路径不是有效的技能目录。",
                 None,
             ),
             ExtensionError::Db(tjuaeui_db::DbError::NotFound(msg)) => ApiError::NotFound(msg),
@@ -140,7 +100,6 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         .route("/api/extensions/acp-adapters", get(get_acp_adapters))
         .route("/api/extensions/agents", get(get_agents))
         .route("/api/extensions/mcp-servers", get(get_mcp_servers))
-        .route("/api/extensions/skills", get(get_skills))
         .route("/api/extensions/channel-plugins", get(get_channel_plugins))
         .route("/api/extensions/settings-tabs", get(get_settings_tabs))
         .route(
@@ -355,26 +314,6 @@ async fn get_mcp_servers(
                     "original_json": serde_json::to_string_pretty(&original_json).unwrap_or_default(),
                     "_source": "extension",
                     "_extensionName": server.extension_name,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/skills` — get all resolved skills.
-async fn get_skills(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let skills = state.registry.get_skills().await;
-    let value = serde_json::Value::Array(
-        skills
-            .into_iter()
-            .map(|skill| {
-                serde_json::json!({
-                    "name": skill.name,
-                    "description": skill.description.unwrap_or_else(|| format!("Skill from extension: {}", skill.extension_name)),
-                    "location": skill.path,
                 })
             })
             .collect(),

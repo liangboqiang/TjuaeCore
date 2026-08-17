@@ -241,27 +241,28 @@ async fn fake_provider_update(
     }))
 }
 
-async fn fake_external_paths_list() -> axum::Json<serde_json::Value> {
+async fn fake_market_skills_list() -> axum::Json<serde_json::Value> {
     axum::Json(json!({
         "success": true,
         "data": [{
-            "name": "Team Skills",
-            "path": "/skills/team"
+            "slug": "cron",
+            "name": "cron",
+            "installed": false
         }]
     }))
 }
 
-async fn fake_external_paths_add(
+async fn fake_market_skill_install(
     State(capture): State<SharedCapture>,
-    axum::Json(payload): axum::Json<serde_json::Value>,
+    Path((_market_id, slug)): Path<(String, String)>,
 ) -> axum::Json<serde_json::Value> {
     *capture.lock().unwrap() = Some(Capture {
-        payload: Some(payload),
+        resource_id: Some(slug.clone()),
         ..Capture::default()
     });
     axum::Json(json!({
         "success": true,
-        "data": null
+        "data": { "slug": slug }
     }))
 }
 
@@ -380,9 +381,10 @@ async fn spawn_config_probe_server(capture: SharedCapture) -> (String, tokio::ta
         .route("/api/mcp/oauth/logout", post(fake_mcp_oauth_logout))
         .route("/api/providers", get(fake_provider_list).post(fake_provider_create))
         .route("/api/providers/{provider_id}", put(fake_provider_update))
+        .route("/api/skills/market", get(fake_market_skills_list))
         .route(
-            "/api/skills/external-paths",
-            get(fake_external_paths_list).post(fake_external_paths_add),
+            "/api/skills/market/{market_id}/{slug}/install",
+            post(fake_market_skill_install),
         )
         .route("/api/agents/management", get(fake_agent_management_list))
         .route("/api/agents/custom/{agent_id}", put(fake_agent_custom_update))
@@ -596,12 +598,12 @@ async fn config_conversation_rename_patches_name_and_reads_resource_before_and_a
 }
 
 #[tokio::test]
-async fn config_external_paths_add_reads_collection_before_and_after_write() {
+async fn config_market_install_reads_collection_before_and_after_write() {
     let capture = Arc::new(Mutex::new(None));
     let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
 
     let mut child = config_command()
-        .args(["skills", "external-paths", "add"])
+        .args(["skills", "market", "install"])
         .env("TJUAE_BASE_URL", &base_url)
         .env("TJUAE_CONVERSATION_ID", "conv-skill")
         .env("TJUAE_USER_ID", "user-skill")
@@ -614,7 +616,7 @@ async fn config_external_paths_add_reads_collection_before_and_after_write() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(br#"{ "name": "Team Skills", "path": "/skills/team" }"#)
+        .write_all(br#"{ "market_id": "tjuae-hub", "slug": "cron" }"#)
         .await
         .unwrap();
     drop(child.stdin.take());
@@ -624,13 +626,18 @@ async fn config_external_paths_add_reads_collection_before_and_after_write() {
     handle.abort();
     assert!(
         output.status.success(),
-        "external path add failed\nstdout:\n{}\nstderr:\n{}",
+        "Market skill install failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(stdout["meta"]["before"].is_array());
     assert!(stdout["meta"]["after"].is_array());
+    let captured = capture.lock().unwrap();
+    assert_eq!(
+        captured.as_ref().and_then(|value| value.resource_id.as_deref()),
+        Some("cron")
+    );
 }
 
 #[tokio::test]
@@ -1080,38 +1087,4 @@ async fn config_context_fails_with_stable_error_when_conversation_env_missing() 
     assert!(stderr.contains(
         "CONFIG_ENV_MISSING command=\"config context\" field=\"TJUAE_CONVERSATION_ID\": missing required environment variable"
     ));
-}
-
-#[test]
-fn builtin_config_skills_use_config_cli_not_python_or_cron_helper() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/builtin-skills/auto-inject");
-    let tjuaeui_config = std::fs::read_to_string(root.join("tjuaeui-config/SKILL.md")).unwrap();
-    let cron = std::fs::read_to_string(root.join("cron/SKILL.md")).unwrap();
-
-    for forbidden in ["python3", "tjuaeui_api.py", "lsof", "netstat", "curl"] {
-        assert!(
-            !tjuaeui_config.contains(forbidden),
-            "tjuaeui-config skill must not mention {forbidden}"
-        );
-    }
-    assert!(tjuaeui_config.contains("\"$TJUAE_HELPER_BIN\" config context"));
-    assert!(tjuaeui_config.contains("\"$TJUAE_HELPER_BIN\" config capabilities"));
-    assert!(tjuaeui_config.contains("assistant_id\": \"current"));
-    for command in [
-        "\"$TJUAE_HELPER_BIN\" config mcp servers",
-        "\"$TJUAE_HELPER_BIN\" config providers",
-        "\"$TJUAE_HELPER_BIN\" config settings",
-        "\"$TJUAE_HELPER_BIN\" config agents",
-        "\"$TJUAE_HELPER_BIN\" config cron jobs",
-        "\"$TJUAE_HELPER_BIN\" config skills external-paths",
-    ] {
-        assert!(
-            tjuaeui_config.contains(command),
-            "tjuaeui-config skill must document {command}"
-        );
-    }
-
-    assert!(!cron.contains("cron-helper"));
-    assert!(cron.contains("\"$TJUAE_HELPER_BIN\" config cron current list"));
-    assert!(cron.contains("\"job_id\""));
 }

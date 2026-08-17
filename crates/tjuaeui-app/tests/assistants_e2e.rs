@@ -31,7 +31,7 @@ use tjuaeui_db::{
 };
 use tjuaeui_extension::{
     AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionSource, ExtensionStateStore,
-    ExternalPathsManager, HubIndexManager, HubInstaller, HubRouterState, ScanPath, SkillPaths, SkillRouterState,
+    HubIndexManager, HubInstaller, HubRouterState, ScanPath, SkillRouterState, resolve_skill_paths,
 };
 use tower::ServiceExt;
 
@@ -252,20 +252,11 @@ async fn fixture() -> Fixture {
         index_manager,
         installer,
     };
-    let ext_paths_mgr = Arc::new(ExternalPathsManager::with_file(ext_data_dir.join("paths.json")).await);
-    let skill_paths = SkillPaths {
-        data_dir: ext_data_dir.clone(),
-        user_skills_dir: ext_data_dir.join("skills"),
-        cron_skills_dir: ext_data_dir.join("cron").join("skills"),
-        builtin_skills_dir: ext_data_dir.join("builtin-skills"),
-        builtin_rules_dir: ext_data_dir.join("builtin-rules"),
-        assistant_rules_dir: user_data_dir.join("assistant-rules"),
-        assistant_skills_dir: user_data_dir.join("assistant-skills"),
-    };
+    let mut skill_paths = resolve_skill_paths(&ext_data_dir, &ext_data_dir);
+    skill_paths.assistant_rules_dir = user_data_dir.join("assistant-rules");
     states.skill = SkillRouterState {
         skill_paths,
-        skill_repo: std::sync::Arc::new(tjuaeui_db::SqliteSkillRepository::new(services.database.pool().clone())),
-        external_paths_manager: ext_paths_mgr,
+        git: services.git_service.clone(),
         assistant_dispatcher: None, // wired below once service is constructed
     };
 
@@ -1423,11 +1414,11 @@ async fn delete_rule_extension_registry_id_behaves_like_user_id() {
 }
 
 // ===========================================================================
-// POST /api/skills/assistant-skill/read
+// 已删除的助手私有技能兼容接口
 // ===========================================================================
 
 #[tokio::test]
-async fn read_skill_builtin_returns_empty_string() {
+async fn legacy_assistant_skill_read_route_is_removed() {
     let fx = fixture().await;
     let req = json_with_token(
         "POST",
@@ -1437,77 +1428,11 @@ async fn read_skill_builtin_returns_empty_string() {
         &fx.csrf,
     );
     let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"], "");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn read_skill_extension_returns_empty_string() {
-    let fx = fixture().await;
-    let req = json_with_token(
-        "POST",
-        "/api/skills/assistant-skill/read",
-        json!({ "assistant_id": "ext-helper", "locale": "en-US" }),
-        &fx.token,
-        &fx.csrf,
-    );
-    let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"], "");
-}
-
-#[tokio::test]
-async fn read_skill_user_round_trip_through_write() {
-    let fx = fixture().await;
-    create_user(&fx, "u1", "A").await;
-
-    let req = json_with_token(
-        "POST",
-        "/api/skills/assistant-skill/write",
-        json!({ "assistant_id": "u1", "content": "my skill", "locale": "zh-CN" }),
-        &fx.token,
-        &fx.csrf,
-    );
-    let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let req = json_with_token(
-        "POST",
-        "/api/skills/assistant-skill/read",
-        json!({ "assistant_id": "u1", "locale": "zh-CN" }),
-        &fx.token,
-        &fx.csrf,
-    );
-    let resp = fx.app.clone().oneshot(req).await.unwrap();
-    let json = body_json(resp).await;
-    assert_eq!(json["data"], "my skill");
-}
-
-// ===========================================================================
-// POST /api/skills/assistant-skill/write
-// ===========================================================================
-
-#[tokio::test]
-async fn write_skill_user_happy_path() {
-    let fx = fixture().await;
-    create_user(&fx, "u1", "A").await;
-    let req = json_with_token(
-        "POST",
-        "/api/skills/assistant-skill/write",
-        json!({ "assistant_id": "u1", "content": "skill body" }),
-        &fx.token,
-        &fx.csrf,
-    );
-    let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let file = fx.user_data_dir.join("assistant-skills/u1.md");
-    assert_eq!(std::fs::read_to_string(file).unwrap(), "skill body");
-}
-
-#[tokio::test]
-async fn write_skill_builtin_returns_400() {
+async fn legacy_assistant_skill_write_route_is_removed() {
     let fx = fixture().await;
     let req = json_with_token(
         "POST",
@@ -1517,47 +1442,11 @@ async fn write_skill_builtin_returns_400() {
         &fx.csrf,
     );
     let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn write_skill_extension_registry_id_behaves_like_user_id() {
-    let fx = fixture().await;
-    let req = json_with_token(
-        "POST",
-        "/api/skills/assistant-skill/write",
-        json!({ "assistant_id": "ext-helper", "content": "nope" }),
-        &fx.token,
-        &fx.csrf,
-    );
-    let resp = fx.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-// ===========================================================================
-// DELETE /api/skills/assistant-skill/{id}
-// ===========================================================================
-
-#[tokio::test]
-async fn delete_skill_user_removes_file() {
-    let fx = fixture().await;
-    create_user(&fx, "u1", "A").await;
-    let skills_dir = fx.user_data_dir.join("assistant-skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    std::fs::write(skills_dir.join("u1.md"), "body").unwrap();
-
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(delete_with_token("/api/skills/assistant-skill/u1", &fx.token, &fx.csrf))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(!skills_dir.join("u1.md").exists());
-}
-
-#[tokio::test]
-async fn delete_skill_builtin_returns_400() {
+async fn legacy_assistant_skill_delete_route_is_removed() {
     let fx = fixture().await;
     let resp = fx
         .app
@@ -1569,23 +1458,7 @@ async fn delete_skill_builtin_returns_400() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn delete_skill_extension_registry_id_behaves_like_user_id() {
-    let fx = fixture().await;
-    let resp = fx
-        .app
-        .clone()
-        .oneshot(delete_with_token(
-            "/api/skills/assistant-skill/ext-helper",
-            &fx.token,
-            &fx.csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================

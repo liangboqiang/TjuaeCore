@@ -139,29 +139,6 @@ async fn au2_unauthenticated_all_endpoints() {
     }
 }
 
-#[test]
-fn cron_skill_does_not_instruct_agents_to_write_payload_files() {
-    let skill = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/builtin-skills/auto-inject/cron/SKILL.md"),
-    )
-    .unwrap();
-
-    assert!(!skill.contains("--input"));
-    assert!(!skill.contains("cat >"));
-    assert!(!skill.contains("/tmp/tjuaeui-cron"));
-    assert!(!skill.contains("python3"));
-    assert!(!skill.contains("tjuaeui_cron.py"));
-    assert!(skill.contains("$TJUAE_HELPER_BIN"));
-    assert!(!skill.contains("cron-helper"));
-    assert!(skill.contains("config cron current list"));
-    assert!(skill.contains("config cron current create"));
-    assert!(skill.contains("config cron current update"));
-    assert!(skill.contains("\"job_id\""));
-    assert!(skill.contains("成功后只给普通用户能理解的简短确认"));
-    assert!(skill.contains("不显示"));
-    assert!(skill.contains("cron_..."));
-}
-
 // ── CJ-1: Create cron job ───────────────────────────────────────────
 
 #[tokio::test]

@@ -14,7 +14,7 @@ use crate::cli::{
     ConfigCronJobSkillCommand, ConfigCronJobsArgs, ConfigCronJobsCommand, ConfigMcpArgs, ConfigMcpCommand,
     ConfigMcpOauthCommand, ConfigMcpServersCommand, ConfigProviderModelsCommand, ConfigProvidersArgs,
     ConfigProvidersCommand, ConfigSettingsArgs, ConfigSettingsClientCommand, ConfigSettingsCommand, ConfigSkillsArgs,
-    ConfigSkillsCommand, ConfigSkillsExternalPathsCommand, ConfigSkillsMarketCommand,
+    ConfigSkillsCommand, ConfigSkillsMarketCommand,
 };
 use crate::commands::config_capabilities;
 
@@ -307,22 +307,16 @@ async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<
             let data = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
             print_envelope(data, meta(None), command)
         }
-        ConfigSkillsCommand::Info => {
-            run_payload_passthrough(
+        ConfigSkillsCommand::Create => {
+            run_payload_request_with_collection_readback(
                 client,
-                "config skills info",
+                "config skills create",
                 Method::POST,
-                "/api/skills/info",
-                None,
-                ReadBack::None,
+                "/api/skills/create",
+                "/api/skills",
+                false,
             )
             .await
-        }
-        ConfigSkillsCommand::Paths => {
-            let command = "config skills paths";
-            let env = ConfigEnv::from_env(command)?;
-            let data = request_json(client, &env, Method::GET, "/api/skills/paths", None, command).await?;
-            print_envelope(data, meta(None), command)
         }
         ConfigSkillsCommand::Import => {
             run_payload_request_with_collection_readback(
@@ -335,77 +329,129 @@ async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<
             )
             .await
         }
-        ConfigSkillsCommand::Delete => run_skill_delete(client).await,
-        ConfigSkillsCommand::Scan => {
-            run_payload_passthrough(
+        ConfigSkillsCommand::Clone => {
+            let command = "config skills clone";
+            let env = ConfigEnv::from_env(command)?;
+            let mut payload = read_stdin_payload(command)?;
+            let repository_url = take_required_string_field(&mut payload, "repository_url", command)?;
+            reject_remaining_fields(&payload, command)?;
+            let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+            let data = request_json(
                 client,
-                "config skills scan",
+                &env,
                 Method::POST,
-                "/api/skills/scan",
-                None,
-                ReadBack::None,
+                "/api/skills/clone",
+                Some(json!({ "repositoryUrl": repository_url })),
+                command,
             )
-            .await
+            .await?;
+            let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+            let mut extra = Map::new();
+            extra.insert("before".into(), redact_meta_value(before));
+            extra.insert("after".into(), redact_meta_value(after));
+            print_envelope(data, meta_from_map(extra), command)
         }
-        ConfigSkillsCommand::ExternalPaths(args) => match args.command {
-            ConfigSkillsExternalPathsCommand::List => {
+        ConfigSkillsCommand::Delete => run_skill_delete(client).await,
+        ConfigSkillsCommand::Market(args) => match args.command {
+            ConfigSkillsMarketCommand::List => {
                 run_no_input_request(
                     client,
-                    "config skills external-paths list",
+                    "config skills market list",
                     Method::GET,
-                    "/api/skills/external-paths",
+                    "/api/skills/market",
                     false,
                 )
                 .await
             }
-            ConfigSkillsExternalPathsCommand::Add => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config skills external-paths add",
-                    Method::POST,
-                    "/api/skills/external-paths",
-                    "/api/skills/external-paths",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsExternalPathsCommand::Remove => {
-                run_payload_request_with_collection_readback(
-                    client,
-                    "config skills external-paths remove",
-                    Method::DELETE,
-                    "/api/skills/external-paths",
-                    "/api/skills/external-paths",
-                    false,
-                )
-                .await
-            }
+            ConfigSkillsMarketCommand::Install => run_skill_market_mutation(client, "install").await,
+            ConfigSkillsMarketCommand::Update => run_skill_market_mutation(client, "update").await,
         },
-        ConfigSkillsCommand::Market(args) => match args.command {
-            ConfigSkillsMarketCommand::Enable => {
-                run_no_input_request_with_collection_readback(
-                    client,
-                    "config skills market enable",
-                    Method::POST,
-                    "/api/skills/market/enable",
-                    "/api/skills/paths",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsMarketCommand::Disable => {
-                run_no_input_request_with_collection_readback(
-                    client,
-                    "config skills market disable",
-                    Method::POST,
-                    "/api/skills/market/disable",
-                    "/api/skills/paths",
-                    false,
-                )
-                .await
-            }
-        },
+        ConfigSkillsCommand::Copy => run_skill_copy(client).await,
+        ConfigSkillsCommand::Preferences => run_skill_preferences(client).await,
     }
+}
+
+async fn run_skill_market_mutation(client: &reqwest::Client, operation: &'static str) -> Result<(), ConfigError> {
+    let command = if operation == "install" {
+        "config skills market install"
+    } else {
+        "config skills market update"
+    };
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let market_id = take_required_string_field(&mut payload, "market_id", command)?;
+    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let before = request_json(client, &env, Method::GET, "/api/skills/market", None, command).await?;
+    let path = format!(
+        "/api/skills/market/{}/{}/{}",
+        encode_path_segment(&market_id),
+        encode_path_segment(&slug),
+        operation
+    );
+    let data = request_json(client, &env, Method::POST, &path, None, command).await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills/market", None, command).await?;
+    let mut extra = Map::new();
+    extra.insert("before".into(), redact_meta_value(before));
+    extra.insert("after".into(), redact_meta_value(after));
+    print_envelope(data, meta_from_map(extra), command)
+}
+
+async fn run_skill_copy(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config skills copy";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let target_slug = take_required_string_field(&mut payload, "target_slug", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let path = format!("/api/skills/{}/copy", encode_path_segment(&slug));
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({ "targetSlug": target_slug })),
+        command,
+    )
+    .await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let mut extra = Map::new();
+    extra.insert("before".into(), redact_meta_value(before));
+    extra.insert("after".into(), redact_meta_value(after));
+    print_envelope(data, meta_from_map(extra), command)
+}
+
+async fn run_skill_preferences(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config skills preferences";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "JSON 载荷必须是对象").field("field", "stdin")
+    })?;
+    let enabled = take_required_bool_field(object, "enabled", command)?;
+    let auto_inject = take_required_bool_field(object, "auto_inject", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let path = format!("/api/skills/{}/preferences", encode_path_segment(&slug));
+    let data = request_json(
+        client,
+        &env,
+        Method::PUT,
+        &path,
+        Some(json!({
+            "enabled": enabled,
+            "autoInject": auto_inject,
+        })),
+        command,
+    )
+    .await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let mut extra = Map::new();
+    extra.insert("before".into(), redact_meta_value(before));
+    extra.insert("after".into(), redact_meta_value(after));
+    print_envelope(data, meta_from_map(extra), command)
 }
 
 async fn run_skill_delete(client: &reqwest::Client) -> Result<(), ConfigError> {
@@ -995,21 +1041,6 @@ async fn run_no_input_request(
     print_config_output(data, meta(None), command, redact_output)
 }
 
-async fn run_no_input_request_with_collection_readback(
-    client: &reqwest::Client,
-    command: &'static str,
-    method: Method,
-    path: &'static str,
-    collection_path: &'static str,
-    redact_output: bool,
-) -> Result<(), ConfigError> {
-    let env = ConfigEnv::from_env(command)?;
-    let before = request_json(client, &env, Method::GET, collection_path, None, command).await?;
-    let data = request_json(client, &env, method, path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, collection_path, None, command).await?;
-    print_config_output(data, readback_meta(Map::new(), before, after), command, redact_output)
-}
-
 async fn run_payload_request(
     client: &reqwest::Client,
     command: &'static str,
@@ -1210,30 +1241,6 @@ fn readback_meta(mut extra: Map<String, Value>, before: Value, after: Value) -> 
 fn print_config_output(data: Value, meta: Value, command: &str, redact_output: bool) -> Result<(), ConfigError> {
     let data = if redact_output { redact_meta_value(data) } else { data };
     print_envelope(data, meta, command)
-}
-
-enum ReadBack {
-    None,
-}
-
-async fn run_payload_passthrough(
-    client: &reqwest::Client,
-    command: &'static str,
-    method: Method,
-    path: &'static str,
-    payload_override: Option<Value>,
-    _read_back: ReadBack,
-) -> Result<(), ConfigError> {
-    let env = ConfigEnv::from_env(command)?;
-    let payload = match payload_override {
-        Some(value) => value,
-        None => read_stdin_payload(command)?,
-    };
-    let mut payload = payload;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let data = request_json(client, &env, method, path, Some(payload), command).await?;
-    print_envelope(data, meta(Some(selectors)), command)
 }
 
 #[derive(Debug, Clone)]
@@ -1576,6 +1583,33 @@ fn take_optional_string_field(payload: &mut Value, field: &'static str) -> Optio
         .and_then(|value| value.as_str().map(str::to_owned))
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn take_required_bool_field(
+    object: &mut Map<String, Value>,
+    field: &'static str,
+    command: &str,
+) -> Result<bool, ConfigError> {
+    object.remove(field).and_then(|value| value.as_bool()).ok_or_else(|| {
+        ConfigError::new(
+            ConfigErrorCode::PayloadInvalid,
+            command,
+            "missing or invalid required field",
+        )
+        .field("field", field)
+    })
+}
+
+fn reject_remaining_fields(payload: &Value, command: &str) -> Result<(), ConfigError> {
+    let object = payload.as_object().ok_or_else(|| {
+        ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "JSON 载荷必须是对象").field("field", "stdin")
+    })?;
+    if let Some(field) = object.keys().next() {
+        return Err(
+            ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "unknown field").field("field", field.clone()),
+        );
+    }
+    Ok(())
 }
 
 fn assistant_detail_path(id: &str, locale: Option<&str>) -> String {

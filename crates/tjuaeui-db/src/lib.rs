@@ -24,10 +24,10 @@ pub use instance_lock::{DataDirInstanceGuard, instance_lock_path};
 pub use models::{
     AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, AssistantOverrideRow, AssistantPreferenceRow,
     AssistantRow, ConversationArtifactRow, ConversationAssistantSnapshotRow, CreateAssistantParams, FolderRow,
-    ProjectExplorerRow, ProjectKind, ProjectRow, Role, SkillImportRecordRow, SkillRow,
-    UpdateAgentAvailabilitySnapshotParams, UpdateAgentHandshakeParams, UpdateAssistantParams,
-    UpsertAgentMetadataParams, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
-    UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams, UpsertOverrideParams,
+    ProjectExplorerRow, ProjectKind, ProjectRow, Role, UpdateAgentAvailabilitySnapshotParams,
+    UpdateAgentHandshakeParams, UpdateAssistantParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
+    UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams,
+    UpsertOverrideParams,
 };
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
@@ -41,7 +41,6 @@ pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
-pub use repository::skill::{CreateSkillImportRecordParams, UpsertSkillParams};
 pub use repository::team::{UpdateTaskParams, UpdateTeamParams};
 pub use repository::{
     CreateAcpSessionParams, FeedbackDiagnosticsDbContext, FeedbackDiagnosticsProfile, FeedbackDiagnosticsProfileResult,
@@ -50,13 +49,13 @@ pub use repository::{
     IAssistantPreferenceRepository, IAssistantRepository, IChannelRepository, IClientPreferenceRepository,
     IConversationRepository, ICronRepository, IFeedbackDiagnosticsRepository, IMcpServerRepository,
     IOAuthTokenRepository, IProjectStore, IProviderRepository, IRemoteAgentRepository, ISettingsRepository,
-    ISkillRepository, ITeamRepository, IUserRepository, PersistedSessionState, SaveRuntimeStateParams,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
-    SqliteAssistantRepository, SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteCronRepository, SqliteFeedbackDiagnosticsRepository, SqliteMcpServerRepository, SqliteOAuthTokenRepository,
-    SqliteProjectStore, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
-    SqliteSkillRepository, SqliteTeamRepository, SqliteUserRepository, UpsertSystemSettingsParams,
+    ITeamRepository, IUserRepository, PersistedSessionState, SaveRuntimeStateParams, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
+    SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository, SqliteAssistantRepository,
+    SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteCronRepository,
+    SqliteFeedbackDiagnosticsRepository, SqliteMcpServerRepository, SqliteOAuthTokenRepository, SqliteProjectStore,
+    SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository, SqliteTeamRepository,
+    SqliteUserRepository, UpsertSystemSettingsParams,
 };
 
 // Re-export sqlx pool type for downstream crates

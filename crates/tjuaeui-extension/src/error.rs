@@ -68,9 +68,6 @@ pub enum ExtensionError {
     #[error("状态持久化失败：{0}")]
     StatePersistence(String),
 
-    #[error("不能删除内置技能：{0}")]
-    BuiltinSkillDeletion(String),
-
     #[error("找不到技能：{0}")]
     SkillNotFound(String),
 
@@ -85,22 +82,6 @@ pub enum ExtensionError {
 
     #[error("技能导入来源无效：{0}")]
     SkillImportInvalidSource(String),
-
-    #[error("技能导入不允许符号链接条目：{0}")]
-    SkillImportSymlinkEntry(String),
-
-    #[error("技能导入文件过大：{file_bytes} 字节，上限 {limit_bytes} 字节")]
-    SkillImportFileTooLarge {
-        file_path: Option<String>,
-        file_bytes: u64,
-        limit_bytes: u64,
-    },
-
-    #[error("技能导入内容过大：{total_bytes} 字节，上限 {limit_bytes} 字节")]
-    SkillImportTotalTooLarge { total_bytes: u64, limit_bytes: u64 },
-
-    #[error("技能 ZIP 压缩包无效：{0}")]
-    SkillImportInvalidZip(String),
 
     #[error("{0}")]
     Db(#[from] tjuaeui_db::DbError),
