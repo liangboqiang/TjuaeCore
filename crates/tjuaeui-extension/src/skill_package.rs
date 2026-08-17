@@ -15,7 +15,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tjuaeui_common::WorkspaceGitProvisioner;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
 
 use crate::error::ExtensionError;
@@ -27,9 +27,12 @@ const SKILL_SCHEMA_URL: &str =
 const MARKET_INDEXES_ENV: &str = "TJUAE_SKILL_MARKET_INDEX_URLS";
 const DEFAULT_MARKET_INDEX_URL: &str = "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/dist/skills.json";
 const MARKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MARKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const MARKET_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 static MARKET_CACHE: LazyLock<RwLock<HashMap<String, CachedMarketIndex>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static MARKET_REFRESHES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone)]
 struct CachedMarketIndex {
@@ -261,9 +264,40 @@ async fn fetch_market_index(url: &str) -> Result<MarketIndex, ExtensionError> {
     {
         return Ok(cached.index.clone());
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
+
+    let persisted = load_persisted_market_index(url).await;
+    if let Some((fetched_at, index)) = persisted {
+        cache_market_index(url, fetched_at, index.clone()).await;
+        if fetched_at.elapsed().is_ok_and(|age| age >= MARKET_CACHE_TTL) {
+            refresh_market_index_in_background(url.to_owned()).await;
+        }
+        return Ok(index);
+    }
+
+    let index = fetch_remote_market_index(url).await?;
+    persist_market_index(url, &index).await;
+    cache_market_index(url, SystemTime::now(), index.clone()).await;
+    Ok(index)
+}
+
+async fn refresh_market_index_in_background(url: String) {
+    if !MARKET_REFRESHES.lock().await.insert(url.clone()) {
+        return;
+    }
+    tokio::spawn(async move {
+        match fetch_remote_market_index(&url).await {
+            Ok(index) => {
+                persist_market_index(&url, &index).await;
+                cache_market_index(&url, SystemTime::now(), index).await;
+            }
+            Err(error) => warn!(%url, %error, "技能市场后台刷新失败，继续使用最近成功的本地快照"),
+        }
+        MARKET_REFRESHES.lock().await.remove(&url);
+    });
+}
+
+async fn fetch_remote_market_index(url: &str) -> Result<MarketIndex, ExtensionError> {
+    let client = tjuaeui_runtime::build_http_client(MARKET_CONNECT_TIMEOUT, MARKET_REQUEST_TIMEOUT)
         .map_err(|error| ExtensionError::Internal(format!("创建市场客户端失败：{error}")))?;
     let response = client
         .get(url)
@@ -276,14 +310,60 @@ async fn fetch_market_index(url: &str) -> Result<MarketIndex, ExtensionError> {
         .await
         .map_err(|error| ExtensionError::Internal(format!("解析技能市场失败：{error}")))?;
     validate_market_index(&index)?;
-    MARKET_CACHE.write().await.insert(
-        url.to_owned(),
-        CachedMarketIndex {
-            fetched_at: SystemTime::now(),
-            index: index.clone(),
-        },
-    );
     Ok(index)
+}
+
+async fn cache_market_index(url: &str, fetched_at: SystemTime, index: MarketIndex) {
+    MARKET_CACHE
+        .write()
+        .await
+        .insert(url.to_owned(), CachedMarketIndex { fetched_at, index });
+}
+
+fn market_cache_path(url: &str) -> Option<PathBuf> {
+    let mut digest = Sha256::new();
+    digest.update(url.as_bytes());
+    let file_name = format!("{:x}.json", digest.finalize());
+    dirs::cache_dir().map(|root| root.join("TjuaeUI").join("skill-markets").join(file_name))
+}
+
+async fn load_persisted_market_index(url: &str) -> Option<(SystemTime, MarketIndex)> {
+    let path = market_cache_path(url)?;
+    read_market_index_cache(&path).await
+}
+
+async fn persist_market_index(url: &str, index: &MarketIndex) {
+    let Some(path) = market_cache_path(url) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let result = async {
+        tokio::fs::create_dir_all(parent).await?;
+        write_market_index_cache(&path, index).await
+    }
+    .await;
+    if let Err(error) = result {
+        warn!(path = %path.display(), %error, "保存技能市场本地快照失败");
+    }
+}
+
+async fn read_market_index_cache(path: &Path) -> Option<(SystemTime, MarketIndex)> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    let fetched_at = metadata.modified().ok()?;
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let index = serde_json::from_slice::<MarketIndex>(&bytes).ok()?;
+    if let Err(error) = validate_market_index(&index) {
+        warn!(path = %path.display(), %error, "忽略无效的技能市场本地快照");
+        return None;
+    }
+    Some((fetched_at, index))
+}
+
+async fn write_market_index_cache(path: &Path, index: &MarketIndex) -> Result<(), std::io::Error> {
+    let bytes = serde_json::to_vec(index).map_err(std::io::Error::other)?;
+    tokio::fs::write(path, bytes).await
 }
 
 pub async fn install_market_skill(
@@ -1205,5 +1285,34 @@ mod tests {
             Some(("example".to_owned(), "TjuaeHub".to_owned()))
         );
         assert_eq!(github_repository_identity("https://example.com/TjuaeHub.git"), None);
+    }
+
+    #[tokio::test]
+    async fn persistent_market_cache_round_trips_a_validated_index() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("skills.json");
+        let expected = MarketIndex {
+            schema: "https://example.com/market.schema.json".to_owned(),
+            schema_version: 1,
+            market: MarketInfo {
+                id: "test-market".to_owned(),
+                name: "测试市场".to_owned(),
+            },
+            repository: "https://github.com/example/skills.git".to_owned(),
+            revision: "a".repeat(40),
+            skills: vec![MarketSkillEntry {
+                id: "example".to_owned(),
+                path: "skills/example".to_owned(),
+                name: "示例技能".to_owned(),
+                description: "用于验证本地快照。".to_owned(),
+                version: "1.0.0".to_owned(),
+                categories: vec!["测试".to_owned()],
+                digest: format!("sha256-{}", "b".repeat(64)),
+            }],
+        };
+
+        write_market_index_cache(&path, &expected).await.unwrap();
+        let (_, actual) = read_market_index_cache(&path).await.unwrap();
+        assert_eq!(actual, expected);
     }
 }
