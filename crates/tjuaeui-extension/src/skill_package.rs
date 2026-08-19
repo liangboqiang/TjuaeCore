@@ -23,7 +23,7 @@ pub const SKILL_ENTRY_FILE: &str = "SKILL.md";
 const SKILL_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json";
 const TJUAE_HUB_INDEX_ENV: &str = "TJUAE_HUB_SKILL_INDEX_URL";
-const DEFAULT_MARKET_INDEX_URL: &str = "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/dist/skills.json";
+const DEFAULT_MARKET_INDEX_URL: &str = "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/dist/skills.json";
 const MARKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MARKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const MARKET_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
