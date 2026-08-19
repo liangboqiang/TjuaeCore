@@ -399,24 +399,9 @@ pub(crate) enum ConfigSkillsCommand {
     List,
     Create,
     Import,
-    Clone,
     Delete,
-    Market(ConfigSkillsMarketArgs),
     Copy,
     Preferences,
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigSkillsMarketArgs {
-    #[command(subcommand)]
-    pub command: ConfigSkillsMarketCommand,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ConfigSkillsMarketCommand {
-    List,
-    Install,
-    Update,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -853,11 +838,7 @@ mod tests {
             &["tjuaecore", "config", "skills", "list"],
             &["tjuaecore", "config", "skills", "create"],
             &["tjuaecore", "config", "skills", "import"],
-            &["tjuaecore", "config", "skills", "clone"],
             &["tjuaecore", "config", "skills", "delete"],
-            &["tjuaecore", "config", "skills", "market", "list"],
-            &["tjuaecore", "config", "skills", "market", "install"],
-            &["tjuaecore", "config", "skills", "market", "update"],
             &["tjuaecore", "config", "skills", "copy"],
             &["tjuaecore", "config", "skills", "preferences"],
         ];

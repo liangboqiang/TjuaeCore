@@ -95,6 +95,7 @@ impl AppServices {
             runtime_base_url: self.runtime_base_url.clone(),
             runtime_token_service: self.runtime_token_service.clone(),
             project_service: self.project_service.clone(),
+            git_service: self.git_service.clone(),
         });
         self
     }
@@ -244,6 +245,7 @@ impl AppServices {
             runtime_base_url: runtime_base_url.clone(),
             runtime_token_service: runtime_token_service.clone(),
             project_service: project_service.clone(),
+            git_service: git_service.clone(),
         });
 
         Ok(Self {
@@ -300,11 +302,16 @@ struct ConversationServiceDeps<'a> {
     runtime_base_url: String,
     runtime_token_service: Arc<RuntimeTokenService>,
     project_service: ProjectService,
+    git_service: Arc<GitService>,
 }
 
 fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> ConversationService {
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         deps.skill_paths,
+        Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+            deps.database.pool().clone(),
+        )),
+        deps.git_service,
     ));
     let service = ConversationService::new(
         deps.work_dir,

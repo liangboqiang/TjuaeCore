@@ -24,7 +24,7 @@ pub use instance_lock::{DataDirInstanceGuard, instance_lock_path};
 pub use models::{
     AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, AssistantOverrideRow, AssistantPreferenceRow,
     AssistantRow, ConversationArtifactRow, ConversationAssistantSnapshotRow, CreateAssistantParams, FolderRow,
-    ProjectExplorerRow, ProjectKind, ProjectRow, Role, UpdateAgentAvailabilitySnapshotParams,
+    ProjectExplorerRow, ProjectKind, ProjectRow, Role, SkillUserPreferenceRow, UpdateAgentAvailabilitySnapshotParams,
     UpdateAgentHandshakeParams, UpdateAssistantParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
     UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams,
     UpsertOverrideParams,
@@ -49,13 +49,14 @@ pub use repository::{
     IAssistantPreferenceRepository, IAssistantRepository, IChannelRepository, IClientPreferenceRepository,
     IConversationRepository, ICronRepository, IFeedbackDiagnosticsRepository, IMcpServerRepository,
     IOAuthTokenRepository, IProjectStore, IProviderRepository, IRemoteAgentRepository, ISettingsRepository,
-    ITeamRepository, IUserRepository, PersistedSessionState, SaveRuntimeStateParams, SqliteAcpSessionRepository,
-    SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
-    SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository, SqliteAssistantRepository,
-    SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository, SqliteCronRepository,
-    SqliteFeedbackDiagnosticsRepository, SqliteMcpServerRepository, SqliteOAuthTokenRepository, SqliteProjectStore,
-    SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository, SqliteTeamRepository,
-    SqliteUserRepository, UpsertSystemSettingsParams,
+    ISkillUserPreferenceRepository, ITeamRepository, IUserRepository, PersistedSessionState, SaveRuntimeStateParams,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
+    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
+    SqliteAssistantRepository, SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    SqliteCronRepository, SqliteFeedbackDiagnosticsRepository, SqliteMcpServerRepository, SqliteOAuthTokenRepository,
+    SqliteProjectStore, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
+    SqliteSkillUserPreferenceRepository, SqliteTeamRepository, SqliteUserRepository, UpsertSkillUserPreferenceParams,
+    UpsertSystemSettingsParams,
 };
 
 // Re-export sqlx pool type for downstream crates

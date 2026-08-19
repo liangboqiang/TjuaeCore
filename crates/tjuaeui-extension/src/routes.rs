@@ -69,6 +69,7 @@ impl From<ExtensionError> for ApiError {
             ExtensionError::Internal(msg) => ApiError::Internal(msg),
             ExtensionError::Io(e) => ApiError::Internal(e.to_string()),
             ExtensionError::JsonParse(e) => ApiError::BadRequest(e.to_string()),
+            ExtensionError::Zip(e) => ApiError::BadRequest(e.to_string()),
         }
     }
 }

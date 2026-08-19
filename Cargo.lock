@@ -5209,6 +5209,7 @@ dependencies = [
  "axum",
  "dirs",
  "fs2",
+ "futures-util",
  "hex",
  "http-body-util",
  "junction",
@@ -5230,6 +5231,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "zip 2.4.2",
 ]
 
 [[package]]

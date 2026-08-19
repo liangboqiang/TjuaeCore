@@ -53,7 +53,6 @@ use crate::convert::{
 use crate::error::ConversationError;
 use crate::session_context::{SessionContextBuilder, TjuaeCliRuntimePermissionSeed};
 use crate::skill_resolver::SkillResolver;
-use crate::skill_snapshot::compute_initial_skills;
 use crate::turn_orchestrator::{ConversationTurnOrchestrator, ConversationTurnStatus, TurnStartInput};
 use std::sync::RwLock;
 
@@ -998,27 +997,22 @@ impl ConversationService {
             merged
         }
 
-        let (preset_enabled, exclude_auto_inject) = match extra.as_object_mut() {
+        let preset_enabled = match extra.as_object_mut() {
             Some(obj) => {
                 let extra_preset = take_string_array(obj, &["preset_enabled_skills"]);
-                let extra_exclude = take_string_array(obj, &["exclude_auto_inject_skills"]);
                 obj.remove("enabled_skills");
                 obj.remove("exclude_builtin_skills");
                 obj.remove("loaded_skills");
 
                 match assistant_snapshot.as_ref() {
-                    Some(snapshot) => (
-                        merge_string_lists(&snapshot.resolved_defaults.skill_ids, &extra_preset),
-                        merge_string_lists(&snapshot.resolved_defaults.disabled_builtin_skill_ids, &extra_exclude),
-                    ),
-                    None => (extra_preset, extra_exclude),
+                    Some(snapshot) => merge_string_lists(&snapshot.resolved_defaults.skill_ids, &extra_preset),
+                    None => extra_preset,
                 }
             }
-            None => (Vec::new(), Vec::new()),
+            None => Vec::new(),
         };
 
-        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
-        let initial_skills = compute_initial_skills(&auto_inject_names, &preset_enabled, &exclude_auto_inject);
+        let initial_skills = preset_enabled;
 
         // Native skill links are a runtime projection and therefore belong
         // only in TjuaeUI-owned temporary workspaces. User-selected projects

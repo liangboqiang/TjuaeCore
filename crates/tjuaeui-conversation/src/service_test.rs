@@ -57,16 +57,8 @@ use crate::{ConversationAgentTurnRequest, ConversationAgentTurnStatus, Conversat
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
 
-#[derive(Clone, Debug)]
-struct SkillLinkCall {
-    workspace: PathBuf,
-    rel_dirs: Vec<String>,
-    skill_names: Vec<String>,
-}
-
 struct RecordingSkillResolver {
-    names: Vec<String>,
-    links: Arc<Mutex<Vec<SkillLinkCall>>>,
+    links: Arc<Mutex<Vec<()>>>,
 }
 
 struct StaticAssistantDispatcher {
@@ -101,9 +93,8 @@ impl AssistantRuleDispatcher for StaticAssistantDispatcher {
 }
 
 impl RecordingSkillResolver {
-    fn new(names: Vec<String>) -> Self {
+    fn new() -> Self {
         Self {
-            names,
             links: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -111,10 +102,6 @@ impl RecordingSkillResolver {
 
 #[async_trait::async_trait]
 impl SkillResolver for RecordingSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        self.names.clone()
-    }
-
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill> {
         names
             .iter()
@@ -126,11 +113,7 @@ impl SkillResolver for RecordingSkillResolver {
     }
 
     async fn link_workspace_skills(&self, workspace: &Path, rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> usize {
-        self.links.lock().unwrap().push(SkillLinkCall {
-            workspace: workspace.to_path_buf(),
-            rel_dirs: rel_dirs.iter().map(|s| (*s).to_owned()).collect(),
-            skill_names: skills.iter().map(|skill| skill.name.clone()).collect(),
-        });
+        self.links.lock().unwrap().push(());
 
         let mut linked = 0;
         for rel_dir in rel_dirs {
@@ -6295,7 +6278,7 @@ async fn check_approval_not_found() {
 // ── Skill snapshot tests ───────────────────────────────────────────
 
 #[tokio::test]
-async fn create_writes_extra_skills_from_auto_inject_and_preset() {
+async fn create_writes_only_assistant_snapshot_and_preset_skills() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
@@ -6309,15 +6292,13 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
             "workspace": workspace,
             "backend": "claude",
             "preset_enabled_skills": ["pdf", "cron"],
-            "exclude_auto_inject_skills": ["todo-tracker"],
         },
     }))
     .unwrap();
     let resp = svc.create("user-1", req).await.unwrap();
 
-    assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
+    assert_eq!(resp.extra["skills"], json!(["pdf", "cron"]));
     assert!(resp.extra.get("preset_enabled_skills").is_none());
-    assert!(resp.extra.get("exclude_auto_inject_skills").is_none());
 }
 
 #[tokio::test]
@@ -6427,7 +6408,7 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
     assert_eq!(resp.extra["session_mode"], json!("workspace-write"));
     assert_eq!(resp.extra["current_mode_id"], json!("workspace-write"));
     assert_eq!(resp.extra["current_model_id"], json!("new-model"));
-    assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
+    assert_eq!(resp.extra["skills"], json!(["pdf"]));
     assert!(resp.extra.get("assistant_snapshot").is_none());
 
     let snapshot = repo.get_assistant_snapshot(&resp.id).await.unwrap().unwrap();
@@ -7122,7 +7103,7 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
 }
 
 #[tokio::test]
-async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
+async fn create_writes_empty_skills_when_assistant_and_preset_have_none() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
     let workspace = ensure_test_workspace_path();
@@ -7139,7 +7120,7 @@ async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
 
 #[tokio::test]
 async fn create_keeps_custom_workspace_free_of_native_skill_links() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+    let resolver = Arc::new(RecordingSkillResolver::new());
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) =
         make_service_with_resolver_and_agent_metadata_repo(resolver, Arc::new(ClaudeNativeSkillMetadataRepo));
@@ -7155,14 +7136,14 @@ async fn create_keeps_custom_workspace_free_of_native_skill_links() {
     .unwrap();
     let resp = svc.create("user-1", req).await.unwrap();
 
-    assert_eq!(resp.extra["skills"], json!(["cron"]));
+    assert_eq!(resp.extra["skills"], json!([]));
     assert!(!workspace.join(".claude").exists());
     assert!(links.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+async fn warmup_does_not_inject_global_skills_into_recreated_auto_workspace() {
+    let resolver = Arc::new(RecordingSkillResolver::new());
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
 
@@ -7173,7 +7154,7 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
     .unwrap();
     let resp = svc.create("user-1", req).await.unwrap();
     let workspace = PathBuf::from(resp.extra["workspace"].as_str().unwrap());
-    assert!(workspace.join(".tjuae/skills/cron").is_dir());
+    assert!(!workspace.join(".tjuae/skills/cron").exists());
 
     std::fs::remove_dir_all(&workspace).unwrap();
     assert!(!workspace.exists());
@@ -7183,17 +7164,13 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
         Arc::new(MockTaskManagerWithWorkspace::new(workspace.to_str().unwrap()));
     svc.warmup("user-1", &resp.id, &task_mgr).await.unwrap();
 
-    assert!(workspace.join(".tjuae/skills/cron").is_dir());
-    let calls = links.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].workspace, workspace);
-    assert_eq!(calls[0].rel_dirs, vec![".tjuae/skills"]);
-    assert_eq!(calls[0].skill_names, vec!["cron"]);
+    assert!(!workspace.join(".tjuae/skills/cron").exists());
+    assert!(links.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn warmup_keeps_custom_workspace_free_of_native_skill_links() {
-    let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
+    let resolver = Arc::new(RecordingSkillResolver::new());
     let links = resolver.links.clone();
     let (svc, _broadcaster, _repo, _task_mgr) =
         make_service_with_resolver_and_agent_metadata_repo(resolver, Arc::new(ClaudeNativeSkillMetadataRepo));
@@ -7312,7 +7289,7 @@ async fn create_ignores_and_strips_unsupported_skill_aliases() {
     .unwrap();
     let resp = svc.create("u", req).await.unwrap();
 
-    assert_eq!(resp.extra["skills"], json!(["cron"]));
+    assert_eq!(resp.extra["skills"], json!([]));
     assert!(resp.extra.get("enabled_skills").is_none());
     assert!(resp.extra.get("exclude_builtin_skills").is_none());
     assert!(resp.extra.get("loaded_skills").is_none());

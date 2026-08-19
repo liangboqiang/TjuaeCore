@@ -347,6 +347,8 @@ pub fn build_assistant_state(services: &AppServices) -> AssistantRouterState {
     // working `agent_id` from the configured provider list when
     // the caller does not supply one (ELECTRON-1J1 / 1KV).
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
+    let skill_preference_repo: Arc<dyn tjuaeui_db::ISkillUserPreferenceRepository> =
+        Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(pool.clone()));
     let builtin = Arc::new(BuiltinAssistantRegistry::load());
     // Pin user_data_dir to the runtime-resolved data directory so dev /
     // packaged / multi-instance launches all keep their assistant rule files
@@ -362,6 +364,7 @@ pub fn build_assistant_state(services: &AppServices) -> AssistantRouterState {
             repo,
             override_repo,
             provider_repo,
+            skill_preference_repo,
             builtin,
             agent_catalog: Some(Arc::new(RegistryAssistantAgentCatalog {
                 registry: services.agent_registry.clone(),
@@ -692,6 +695,10 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
     let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let skill_resolver = Arc::new(tjuaeui_conversation::skill_resolver::ExtensionSkillResolver::new(
         services.skill_paths.clone(),
+        Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+            services.database.pool().clone(),
+        )),
+        services.git_service.clone(),
     ));
     let conv_service = ConversationService::new(
         services.work_dir.clone(),
@@ -823,9 +830,15 @@ pub async fn build_extension_states(
         installer,
     };
 
+    let developer_mode =
+        cfg!(debug_assertions) || std::env::var("TJUAE_DEVELOPER_MODE").is_ok_and(|value| value == "1");
     let skill_state = SkillRouterState {
         skill_paths: services.skill_paths.as_ref().clone(),
         git: services.git_service.clone(),
+        preferences: Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+            services.database.pool().clone(),
+        )),
+        can_write_tjuae_hub: developer_mode && services.skill_paths.tjuae_hub_worktree_dir.is_some(),
         assistant_dispatcher: None,
     };
 

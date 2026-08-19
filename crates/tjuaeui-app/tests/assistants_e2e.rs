@@ -24,10 +24,11 @@ use tjuaeui_assistant::{AssistantAgentCatalogPort, AssistantRouterState, Assista
 use tjuaeui_common::AgentType;
 use tjuaeui_db::{
     IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantOverrideRepository,
-    IAssistantPreferenceRepository, IAssistantRepository, IProviderRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
-    SqliteAssistantRepository, SqliteProviderRepository, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
-    UpsertAssistantPreferenceParams, init_database_memory,
+    IAssistantPreferenceRepository, IAssistantRepository, IProviderRepository, ISkillUserPreferenceRepository,
+    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository,
+    SqliteAssistantPreferenceRepository, SqliteAssistantRepository, SqliteProviderRepository,
+    SqliteSkillUserPreferenceRepository, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
+    UpsertAssistantPreferenceParams, UpsertSkillUserPreferenceParams, init_database_memory,
 };
 use tjuaeui_extension::{
     AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionSource, ExtensionStateStore,
@@ -257,6 +258,10 @@ async fn fixture() -> Fixture {
     states.skill = SkillRouterState {
         skill_paths,
         git: services.git_service.clone(),
+        preferences: Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+            services.database.pool().clone(),
+        )),
+        can_write_tjuae_hub: true,
         assistant_dispatcher: None, // wired below once service is constructed
     };
 
@@ -299,6 +304,7 @@ async fn fixture() -> Fixture {
         .await
         .expect("seed provider");
     let builtin = Arc::new(BuiltinAssistantRegistry::load_from_dir(builtin_assets_dir.clone()));
+    let skill_preference_repo = Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(pool.clone()));
     let service = Arc::new(AssistantService::new(
         pool,
         tjuaeui_assistant::service::AssistantServiceDeps {
@@ -308,6 +314,7 @@ async fn fixture() -> Fixture {
             repo,
             override_repo,
             provider_repo,
+            skill_preference_repo,
             builtin,
             agent_catalog: Some(Arc::new(TestAgentCatalog {
                 rows: vec![
@@ -1429,6 +1436,65 @@ async fn legacy_assistant_skill_read_route_is_removed() {
     );
     let resp = fx.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn auto_inject_is_snapshotted_only_when_a_new_assistant_is_created() {
+    let fx = fixture().await;
+    let preferences = SqliteSkillUserPreferenceRepository::new(fx.services.database.pool().clone());
+    preferences
+        .upsert(UpsertSkillUserPreferenceParams {
+            source: "skillhub",
+            namespace: "alice",
+            slug: "writer",
+            selected_version: Some("1.2.0"),
+            follow_latest: false,
+            enabled: true,
+            auto_inject: true,
+        })
+        .await
+        .unwrap();
+
+    let create = json_with_token(
+        "POST",
+        "/api/assistants",
+        json!({ "id": "auto-injected", "name": "Auto injected", "agent_id": "632f31d2" }),
+        &fx.token,
+        &fx.csrf,
+    );
+    let response = fx.app.clone().oneshot(create).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    preferences
+        .upsert(UpsertSkillUserPreferenceParams {
+            source: "skillhub",
+            namespace: "alice",
+            slug: "writer",
+            selected_version: Some("1.2.0"),
+            follow_latest: false,
+            enabled: true,
+            auto_inject: false,
+        })
+        .await
+        .unwrap();
+
+    let detail = fx
+        .app
+        .clone()
+        .oneshot(get_with_token("/api/assistants/auto-injected", &fx.token))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail = body_json(detail).await;
+    assert_eq!(
+        detail["data"]["defaults"]["skills"]["value"],
+        json!([
+            "skillhub:alice:writer",
+            "tjuae-hub:official:cron",
+            "tjuae-hub:official:skill-creator",
+            "tjuae-hub:official:tjuaeui-config"
+        ])
+    );
 }
 
 #[tokio::test]

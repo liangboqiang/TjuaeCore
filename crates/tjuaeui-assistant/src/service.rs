@@ -19,8 +19,9 @@ use tjuaeui_common::{generate_prefixed_id, now_ms};
 use tjuaeui_db::{
     AssistantDefinitionRow, AssistantOverlayRow, AssistantRow, CreateAssistantParams, IAssistantDefinitionRepository,
     IAssistantOverlayRepository, IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository,
-    IProviderRepository, SqlitePool, UpdateAssistantParams, UpsertAssistantDefinitionParams,
-    UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams, resolve_agent_binding,
+    IProviderRepository, ISkillUserPreferenceRepository, SqlitePool, UpdateAssistantParams,
+    UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams,
+    resolve_agent_binding,
 };
 use tjuaeui_extension::{AssistantClassifier, AssistantRuleDispatcher, ExtensionError};
 use tracing::{debug, info, warn};
@@ -115,6 +116,7 @@ pub struct AssistantService {
     /// 1 ms on machines without the Gemini CLI (ELECTRON-1J1 / 1KV); we now
     /// pick an agent that actually matches the configured provider list.
     provider_repo: Arc<dyn IProviderRepository>,
+    skill_preference_repo: Arc<dyn ISkillUserPreferenceRepository>,
     builtin: Arc<BuiltinAssistantRegistry>,
     agent_catalog: Option<Arc<dyn AssistantAgentCatalogPort>>,
     /// Root directory holding user-authored rule/skill md files and avatars.
@@ -129,6 +131,7 @@ pub struct AssistantServiceDeps {
     pub repo: Arc<dyn IAssistantRepository>,
     pub override_repo: Arc<dyn IAssistantOverrideRepository>,
     pub provider_repo: Arc<dyn IProviderRepository>,
+    pub skill_preference_repo: Arc<dyn ISkillUserPreferenceRepository>,
     pub builtin: Arc<BuiltinAssistantRegistry>,
     pub agent_catalog: Option<Arc<dyn AssistantAgentCatalogPort>>,
 }
@@ -157,6 +160,7 @@ impl AssistantService {
             repo,
             override_repo,
             provider_repo,
+            skill_preference_repo,
             builtin,
             agent_catalog,
         } = deps;
@@ -168,6 +172,7 @@ impl AssistantService {
             repo,
             override_repo,
             provider_repo,
+            skill_preference_repo,
             builtin,
             agent_catalog,
             user_data_dir,
@@ -944,7 +949,45 @@ impl AssistantService {
     // Create / Update / Delete
     // -----------------------------------------------------------------------
 
-    pub async fn create(&self, req: CreateAssistantRequest) -> Result<AssistantResponse, AssistantError> {
+    pub async fn create(&self, mut req: CreateAssistantRequest) -> Result<AssistantResponse, AssistantError> {
+        // `autoInject` is an assistant-creation preference, never a conversation
+        // hook. Snapshot the current set into this new assistant only.
+        let injected = self
+            .skill_preference_repo
+            .list_auto_inject()
+            .await?
+            .into_iter()
+            .filter_map(|preference| {
+                let source = tjuaeui_api_types::SkillSourceResponse::parse(&preference.source)?;
+                Some(
+                    tjuaeui_api_types::SkillIdentityResponse {
+                        source,
+                        namespace: preference.namespace,
+                        slug: preference.slug,
+                    }
+                    .reference(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if !injected.is_empty() {
+            let enabled = req.enabled_skills.get_or_insert_with(Vec::new);
+            for slug in &injected {
+                if !enabled.contains(slug) {
+                    enabled.push(slug.clone());
+                }
+            }
+            let defaults = req.defaults.get_or_insert_with(Default::default);
+            let skills = defaults.skills.get_or_insert_with(|| AssistantDefaultListRequest {
+                mode: "fixed".into(),
+                value: Vec::new(),
+            });
+            skills.mode = "fixed".into();
+            for slug in injected {
+                if !skills.value.contains(&slug) {
+                    skills.value.push(slug);
+                }
+            }
+        }
         let name = req.name.trim().to_string();
         if name.is_empty() {
             return Err(AssistantError::BadRequest("name is required".into()));
@@ -1004,16 +1047,14 @@ impl AssistantService {
         match self.classify_source(id).await {
             AssistantSource::Builtin => {
                 let detail_overrides = SerializedDetailOverrides::from_update(&req)?;
-                let builtin_defaults_forbidden = req
-                    .defaults
-                    .as_ref()
-                    .is_some_and(|defaults| defaults.skills.is_some() || defaults.mcps.is_some());
+                let builtin_defaults_forbidden = req.defaults.as_ref().is_some_and(|defaults| defaults.mcps.is_some());
 
                 // Built-in rows are sourced from the embedded bundle and can't
                 // be mutated. Users may still override `agent_id`, and
                 // product-defined governance allows model/permission/thought
-                // defaults to vary per built-in assistant. Any other field on the
-                // request is rejected so callers don't silently lose data.
+                // defaults and the same default-skill selection used by every
+                // other assistant to vary per built-in assistant. Any other field
+                // on the request is rejected so callers don't silently lose data.
                 if req.name.is_some()
                     || req.description.is_some()
                     || req.avatar.is_some()
@@ -1030,7 +1071,7 @@ impl AssistantService {
                     || builtin_defaults_forbidden
                 {
                     return Err(AssistantError::Forbidden(
-                        "Only 'agent_id', 'defaults.model', 'defaults.permission', and 'defaults.thought_level' can be overridden on built-in assistants".into(),
+                        "Only 'agent_id', model/permission/thought defaults, and default skills can be overridden on built-in assistants".into(),
                     ));
                 }
 
@@ -3278,6 +3319,9 @@ mod tests {
                 repo: repo.clone(),
                 override_repo: orepo.clone(),
                 provider_repo: provider_repo.clone(),
+                skill_preference_repo: Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+                    db.pool().clone(),
+                )),
                 builtin: builtin_reg,
                 agent_catalog: Some(Arc::new(StubAgentCatalog {
                     rows: agent_rows.clone(),
@@ -4998,7 +5042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_builtin_allows_agent_model_and_permission_overrides() {
+    async fn update_builtin_uses_the_same_default_skill_selection_as_other_assistants() {
         let fx = fixture_with_builtins(vec![mk_builtin("builtin-office", "Office")]).await;
         let updated = fx
             .service
@@ -5014,6 +5058,10 @@ mod tests {
                         permission: Some(AssistantDefaultScalarRequest {
                             mode: "fixed".into(),
                             value: Some("default".into()),
+                        }),
+                        skills: Some(AssistantDefaultListRequest {
+                            mode: "fixed".into(),
+                            value: vec!["tjuae-hub:official:cron".into()],
                         }),
                         ..Default::default()
                     }),
@@ -5031,6 +5079,7 @@ mod tests {
         assert_eq!(detail.defaults.model.value.as_deref(), Some("gemini-2.5-pro"));
         assert_eq!(detail.defaults.permission.mode, "fixed");
         assert_eq!(detail.defaults.permission.value.as_deref(), Some("default"));
+        assert_eq!(detail.defaults.skills.value, vec!["tjuae-hub:official:cron"]);
     }
 
     #[tokio::test]
@@ -5450,7 +5499,16 @@ mod tests {
         assert_eq!(detail.defaults.permission.mode, "fixed");
         assert_eq!(detail.defaults.permission.value.as_deref(), Some("default"));
         assert_eq!(detail.defaults.skills.mode, "fixed");
-        assert_eq!(detail.defaults.skills.value, vec!["skill-a", "skill-b"]);
+        assert_eq!(
+            detail.defaults.skills.value,
+            vec![
+                "skill-a",
+                "skill-b",
+                "tjuae-hub:official:cron",
+                "tjuae-hub:official:skill-creator",
+                "tjuae-hub:official:tjuaeui-config",
+            ]
+        );
         assert_eq!(detail.defaults.mcps.mode, "fixed");
         assert_eq!(detail.defaults.mcps.value, vec!["mcp-a"]);
     }
@@ -6083,6 +6141,9 @@ mod tests {
                 repo,
                 override_repo: orepo,
                 provider_repo,
+                skill_preference_repo: Arc::new(tjuaeui_db::SqliteSkillUserPreferenceRepository::new(
+                    db.pool().clone(),
+                )),
                 builtin: builtin_reg,
                 agent_catalog: None,
             },

@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::warn;
 
 mod prompt_builder;
 pub use prompt_builder::*;
@@ -35,7 +35,7 @@ pub struct SkillIndex {
 /// Manages skill discovery, indexing, and on-demand loading.
 ///
 /// Skills are immediate child directories containing the canonical
-/// `.tjuae-skill.json` manifest and its `SKILL.md` entry.
+/// `_meta.json` manifest and its `SKILL.md` entry.
 /// The entry frontmatter provides `name` and `description`.
 /// The body (content after frontmatter) is loaded on demand.
 pub struct AcpSkillManager {
@@ -58,72 +58,9 @@ impl AcpSkillManager {
         })
     }
 
-    /// Discover skills via `tjuaeui_extension::list_available_skills`.
-    ///
-    /// Filtering is driven only by each package's preferences: disabled
-    /// packages are ignored, auto-injected packages are selected unless
-    /// explicitly excluded, and the remaining packages must be named by the
-    /// assistant snapshot.
-    ///
-    /// Populates the cache; subsequent `get_skill(name)` calls read body lazily.
-    pub async fn discover_skills(
-        &self,
-        selected_skills: Option<&[String]>,
-        excluded_auto_inject_skills: Option<&[String]>,
-    ) -> Vec<SkillIndex> {
-        let items = match self.list_available_skills().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "Failed to list skills via extension service");
-                Vec::new()
-            }
-        };
-
-        let mut cache = self.cache.write().await;
-        cache.clear();
-
-        for item in items {
-            let keep = item.preferences.enabled
-                && if item.preferences.auto_inject {
-                    !excluded_auto_inject_skills
-                        .is_some_and(|excluded| excluded.iter().any(|name| name == &item.slug || name == &item.id))
-                } else {
-                    selected_skills
-                        .is_some_and(|enabled| enabled.iter().any(|name| name == &item.slug || name == &item.id))
-                };
-            if !keep {
-                continue;
-            }
-
-            cache.insert(
-                item.slug.clone(),
-                SkillDefinition {
-                    name: item.slug.clone(),
-                    description: item.description.clone(),
-                    location: item.path.clone(),
-                    body: None,
-                },
-            );
-        }
-
-        let mut discovered = self.discovered.write().await;
-        *discovered = true;
-
-        let index: Vec<SkillIndex> = cache
-            .values()
-            .map(|d| SkillIndex {
-                name: d.name.clone(),
-                description: d.description.clone(),
-            })
-            .collect();
-
-        debug!(count = index.len(), "Skills discovered");
-        index
-    }
-
-    /// Populate the cache with only the named skills (no filtering by
-    /// auto-inject/opt-in). Returns the resulting index. Used by the
-    /// snapshot-driven first-message injector.
+    /// Populate the cache with only the skills already captured by the
+    /// assistant snapshot. Automatic injection is resolved once, when a new
+    /// assistant is created; conversations never reinterpret that preference.
     pub async fn discover_by_names(&self, names: &[String]) -> Vec<SkillIndex> {
         // Always reset state so repeated calls produce a deterministic cache.
         if names.is_empty() {

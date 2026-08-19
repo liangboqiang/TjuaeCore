@@ -54,33 +54,24 @@ const SKILL_SCHEMA_URL: &str =
 struct ValidatedSkillManifest {
     #[serde(rename = "$schema")]
     schema: String,
-    schema_version: u32,
+    format: String,
+    format_version: u32,
     id: String,
     version: String,
     categories: Vec<String>,
-    enabled: bool,
-    auto_inject: bool,
-    source: ValidatedSkillSource,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-enum ValidatedSkillSource {
-    Local,
-    Market {
-        #[serde(rename = "marketId")]
-        market_id: String,
-        repository: String,
-        path: String,
-        revision: Option<String>,
-    },
+    tags: Vec<String>,
+    compatibility: serde_json::Map<String, serde_json::Value>,
+    requirements: Vec<String>,
+    content_hash: String,
+    extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 fn validate_tjuae_manifest_write(path: &Path, data: &[u8]) -> Result<(), FileError> {
     let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
         return Ok(());
     };
-    if !file_name.starts_with(".tjuae-") || !file_name.ends_with(".json") {
+    let is_tjuae_json = file_name.starts_with(".tjuae-") && file_name.ends_with(".json");
+    if file_name != "_meta.json" && !is_tjuae_json {
         return Ok(());
     }
     let value: serde_json::Value = serde_json::from_slice(data)
@@ -90,7 +81,7 @@ fn validate_tjuae_manifest_write(path: &Path, data: &[u8]) -> Result<(), FileErr
             "TJUAE_MANIFEST_INVALID: Tjuae 清单根节点必须是对象".to_owned(),
         ));
     }
-    if file_name != ".tjuae-skill.json" {
+    if file_name != "_meta.json" {
         return Ok(());
     }
     let manifest: ValidatedSkillManifest = serde_json::from_value(value)
@@ -100,7 +91,7 @@ fn validate_tjuae_manifest_write(path: &Path, data: &[u8]) -> Result<(), FileErr
         .and_then(Path::file_name)
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    if manifest.schema != SKILL_SCHEMA_URL || manifest.schema_version != 1 {
+    if manifest.schema != SKILL_SCHEMA_URL || manifest.format != "agent-skill" || manifest.format_version != 1 {
         return Err(FileError::BadRequest(
             "TJUAE_MANIFEST_INVALID: 技能必须使用 Tjuae v1 清单".to_owned(),
         ));
@@ -130,28 +121,22 @@ fn validate_tjuae_manifest_write(path: &Path, data: &[u8]) -> Result<(), FileErr
             "TJUAE_MANIFEST_INVALID: 技能分类不能为空或重复".to_owned(),
         ));
     }
-    if manifest.auto_inject && !manifest.enabled {
+    let mut tags = HashSet::new();
+    if manifest.tags.iter().any(|tag| {
+        let tag = tag.trim();
+        tag.is_empty() || !tags.insert(tag)
+    }) {
         return Err(FileError::BadRequest(
-            "TJUAE_MANIFEST_INVALID: 未启用的技能不能自动注入".to_owned(),
+            "TJUAE_MANIFEST_INVALID: 技能标签不能为空或重复".to_owned(),
         ));
     }
-    if let ValidatedSkillSource::Market {
-        market_id,
-        repository,
-        path: market_path,
-        revision,
-    } = manifest.source
-        && (market_id.trim().is_empty()
-            || repository.trim().is_empty()
-            || market_path != format!("skills/{}", manifest.id)
-            || revision.as_deref().is_some_and(|value| {
-                !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
-            }))
-    {
+    let digest = manifest.content_hash.strip_prefix("sha256-").unwrap_or_default();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(FileError::BadRequest(
-            "TJUAE_MANIFEST_INVALID: 市场来源关联无效".to_owned(),
+            "TJUAE_MANIFEST_INVALID: contentHash 必须是 sha256 摘要".to_owned(),
         ));
     }
+    let _ = (manifest.compatibility, manifest.requirements, manifest.extensions);
     Ok(())
 }
 
@@ -2006,26 +1991,29 @@ mod tests {
     fn valid_skill_manifest() -> serde_json::Value {
         serde_json::json!({
             "$schema": "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json",
-            "schemaVersion": 1,
+            "format": "agent-skill",
+            "formatVersion": 1,
             "id": "test-skill",
             "version": "1.2.3",
             "categories": ["development"],
-            "enabled": true,
-            "autoInject": false,
-            "source": { "kind": "local" }
+            "tags": ["test"],
+            "compatibility": {},
+            "requirements": [],
+            "contentHash": format!("sha256-{}", "a".repeat(64)),
+            "extensions": {}
         })
     }
 
     #[test]
     fn tjuae_skill_manifest_accepts_the_canonical_schema() {
-        let path = Path::new("test-skill/.tjuae-skill.json");
+        let path = Path::new("test-skill/_meta.json");
         let data = serde_json::to_vec(&valid_skill_manifest()).unwrap();
         validate_tjuae_manifest_write(path, &data).unwrap();
     }
 
     #[test]
     fn tjuae_skill_manifest_rejects_unknown_fields() {
-        let path = Path::new("test-skill/.tjuae-skill.json");
+        let path = Path::new("test-skill/_meta.json");
         let mut manifest = valid_skill_manifest();
         manifest["legacyType"] = serde_json::json!("official");
         let error = validate_tjuae_manifest_write(path, &serde_json::to_vec(&manifest).unwrap()).unwrap_err();
@@ -2033,13 +2021,12 @@ mod tests {
     }
 
     #[test]
-    fn tjuae_skill_manifest_rejects_auto_inject_when_disabled() {
-        let path = Path::new("test-skill/.tjuae-skill.json");
+    fn tjuae_skill_manifest_rejects_runtime_preferences() {
+        let path = Path::new("test-skill/_meta.json");
         let mut manifest = valid_skill_manifest();
-        manifest["enabled"] = serde_json::json!(false);
         manifest["autoInject"] = serde_json::json!(true);
         let error = validate_tjuae_manifest_write(path, &serde_json::to_vec(&manifest).unwrap()).unwrap_err();
-        assert!(error.to_string().contains("未启用的技能不能自动注入"));
+        assert!(error.to_string().contains("字段无效"));
     }
 
     #[test]

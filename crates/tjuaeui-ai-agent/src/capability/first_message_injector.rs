@@ -53,8 +53,32 @@ pub async fn inject_first_message_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use tempfile::TempDir;
-    use tjuaeui_extension::resolve_skill_paths;
+    use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner};
+    use tjuaeui_extension::{create_skill, resolve_skill_paths};
+
+    struct TestGit;
+
+    #[async_trait]
+    impl WorkspaceGitProvisioner for TestGit {
+        async fn ensure_workspace_git(&self, workspace: &std::path::Path) -> Result<WorkspaceGitProvision, String> {
+            Ok(WorkspaceGitProvision {
+                repository_root: workspace.display().to_string(),
+                workspace_path: workspace.display().to_string(),
+                branch: "main".to_owned(),
+                head_commit: "test".to_owned(),
+            })
+        }
+
+        async fn commit_workspace_snapshot(
+            &self,
+            _workspace: &std::path::Path,
+            _message: &str,
+        ) -> Result<String, String> {
+            Ok("test".to_owned())
+        }
+    }
 
     fn test_mgr(base: &std::path::Path) -> Arc<AcpSkillManager> {
         let paths = Arc::new(resolve_skill_paths(base, base));
@@ -144,28 +168,11 @@ mod tests {
         // Set up two canonical packages; pass only one in `skills`.
         let tmp = TempDir::new().unwrap();
         let skills = tmp.path().join("skills");
-        std::fs::create_dir_all(skills.join("cron")).unwrap();
-        std::fs::write(
-            skills.join("cron").join(".tjuae-skill.json"),
-            r#"{"$schema":"https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json","schemaVersion":1,"id":"cron","version":"1.0.0","categories":[],"enabled":true,"autoInject":false,"source":{"kind":"local"}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            skills.join("cron").join("SKILL.md"),
-            "---\nname: cron\ndescription: Schedule stuff\n---\nBody.",
-        )
-        .unwrap();
-        std::fs::create_dir_all(skills.join("pdf")).unwrap();
-        std::fs::write(
-            skills.join("pdf").join(".tjuae-skill.json"),
-            r#"{"$schema":"https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json","schemaVersion":1,"id":"pdf","version":"1.0.0","categories":[],"enabled":true,"autoInject":false,"source":{"kind":"local"}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            skills.join("pdf").join("SKILL.md"),
-            "---\nname: pdf\ndescription: Render PDFs\n---\nBody.",
-        )
-        .unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        create_skill(&skills, "cron", "cron", "Schedule stuff", git.clone())
+            .await
+            .unwrap();
+        create_skill(&skills, "pdf", "pdf", "Render PDFs", git).await.unwrap();
         let mgr = test_mgr(tmp.path());
 
         let out = inject_first_message_prefix(

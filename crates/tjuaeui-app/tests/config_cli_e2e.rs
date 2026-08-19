@@ -241,28 +241,33 @@ async fn fake_provider_update(
     }))
 }
 
-async fn fake_market_skills_list() -> axum::Json<serde_json::Value> {
+async fn fake_skill_catalog_list() -> axum::Json<serde_json::Value> {
     axum::Json(json!({
         "success": true,
-        "data": [{
-            "slug": "cron",
-            "name": "cron",
-            "installed": false
-        }]
+        "data": {
+            "items": [{
+                "slug": "cron",
+                "name": "cron",
+                "identity": { "source": "skillhub", "namespace": "alice", "slug": "cron" }
+            }],
+            "total": 1
+        }
     }))
 }
 
-async fn fake_market_skill_install(
+async fn fake_skill_preferences(
     State(capture): State<SharedCapture>,
-    Path((_market_id, slug)): Path<(String, String)>,
+    Path((source, namespace, slug)): Path<(String, String, String)>,
+    axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> axum::Json<serde_json::Value> {
     *capture.lock().unwrap() = Some(Capture {
-        resource_id: Some(slug.clone()),
+        resource_id: Some(format!("{source}/{namespace}/{slug}")),
+        payload: Some(payload.clone()),
         ..Capture::default()
     });
     axum::Json(json!({
         "success": true,
-        "data": { "slug": slug }
+        "data": payload
     }))
 }
 
@@ -381,10 +386,10 @@ async fn spawn_config_probe_server(capture: SharedCapture) -> (String, tokio::ta
         .route("/api/mcp/oauth/logout", post(fake_mcp_oauth_logout))
         .route("/api/providers", get(fake_provider_list).post(fake_provider_create))
         .route("/api/providers/{provider_id}", put(fake_provider_update))
-        .route("/api/skills/market", get(fake_market_skills_list))
+        .route("/api/skills/catalog", get(fake_skill_catalog_list))
         .route(
-            "/api/skills/market/{market_id}/{slug}/install",
-            post(fake_market_skill_install),
+            "/api/skills/catalog/{source}/{namespace}/{slug}/preferences",
+            put(fake_skill_preferences),
         )
         .route("/api/agents/management", get(fake_agent_management_list))
         .route("/api/agents/custom/{agent_id}", put(fake_agent_custom_update))
@@ -544,8 +549,8 @@ async fn config_provider_update_reads_collection_before_and_after_write() {
     assert!(!stdout_text.contains("sk-input-secret"));
     assert!(!stdout_text.contains("sk-provider-secret"));
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(stdout["meta"]["before"].is_array());
-    assert!(stdout["meta"]["after"].is_array());
+    assert!(stdout["meta"]["before"].is_object());
+    assert!(stdout["meta"]["after"].is_object());
 }
 
 #[tokio::test]
@@ -598,12 +603,12 @@ async fn config_conversation_rename_patches_name_and_reads_resource_before_and_a
 }
 
 #[tokio::test]
-async fn config_market_install_reads_collection_before_and_after_write() {
+async fn config_skill_preferences_keep_provider_identity_and_new_assistant_semantics() {
     let capture = Arc::new(Mutex::new(None));
     let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
 
     let mut child = config_command()
-        .args(["skills", "market", "install"])
+        .args(["skills", "preferences"])
         .env("TJUAE_BASE_URL", &base_url)
         .env("TJUAE_CONVERSATION_ID", "conv-skill")
         .env("TJUAE_USER_ID", "user-skill")
@@ -616,7 +621,17 @@ async fn config_market_install_reads_collection_before_and_after_write() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(br#"{ "market_id": "tjuae-hub", "slug": "cron" }"#)
+        .write_all(
+            br#"{
+                "source": "skillhub",
+                "namespace": "alice",
+                "slug": "cron",
+                "selected_version": "2.0.0",
+                "follow_latest": false,
+                "enabled": true,
+                "auto_inject": true
+            }"#,
+        )
         .await
         .unwrap();
     drop(child.stdin.take());
@@ -626,18 +641,21 @@ async fn config_market_install_reads_collection_before_and_after_write() {
     handle.abort();
     assert!(
         output.status.success(),
-        "Market skill install failed\nstdout:\n{}\nstderr:\n{}",
+        "Skill preferences failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(stdout["meta"]["before"].is_array());
-    assert!(stdout["meta"]["after"].is_array());
+    assert!(stdout["meta"]["before"].is_object());
+    assert!(stdout["meta"]["after"].is_object());
     let captured = capture.lock().unwrap();
     assert_eq!(
         captured.as_ref().and_then(|value| value.resource_id.as_deref()),
-        Some("cron")
+        Some("skillhub/alice/cron")
     );
+    let payload = captured.as_ref().and_then(|value| value.payload.as_ref()).unwrap();
+    assert_eq!(payload["selectedVersion"], "2.0.0");
+    assert_eq!(payload["autoInject"], true);
 }
 
 #[tokio::test]

@@ -46,10 +46,6 @@ struct NoopSkillResolver;
 
 #[async_trait]
 impl SkillResolver for NoopSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     async fn resolve_skills(&self, _names: &[String]) -> Vec<ResolvedAgentSkill> {
         Vec::new()
     }

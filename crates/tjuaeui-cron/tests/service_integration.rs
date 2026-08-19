@@ -797,10 +797,6 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
     struct StubSkillResolver;
     #[async_trait::async_trait]
     impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
         async fn resolve_skills(
             &self,
             _names: &[String],
@@ -899,10 +895,6 @@ async fn setup_with_assistant_repos() -> (
     struct StubSkillResolver;
     #[async_trait::async_trait]
     impl tjuaeui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
         async fn resolve_skills(
             &self,
             _names: &[String],

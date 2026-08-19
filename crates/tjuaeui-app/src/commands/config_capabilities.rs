@@ -79,14 +79,10 @@ pub(crate) fn data() -> Value {
             domain("skills", &[
                 no_input(&["skills", "list"], "列出可用技能。", false),
                 stdin(&["skills", "create"], "新建本地技能工作区。", &["slug", "name", "description"], &[], true, false),
-                stdin(&["skills", "import"], "导入技能。", &["skill_path"], &[], true, false),
-                stdin(&["skills", "clone"], "从 Git 仓库克隆技能。", &["repository_url"], &[], true, false),
-                stdin(&["skills", "delete"], "删除技能。", &["skill_name"], &[], true, true),
-                no_input(&["skills", "market", "list"], "列出配置的技能市场。", false),
-                stdin(&["skills", "market", "install"], "从市场安装技能。", &["market_id", "slug"], &[], true, false),
-                stdin(&["skills", "market", "update"], "从市场更新已安装技能。", &["market_id", "slug"], &[], true, false),
-                stdin(&["skills", "copy"], "创建独立的本地技能副本。", &["slug", "target_slug"], &[], true, false),
-                stdin(&["skills", "preferences"], "更新技能启用和自动注入偏好。", &["slug", "enabled", "auto_inject"], &[], true, false),
+                stdin(&["skills", "import"], "将公共技能 ZIP 导入我的技能。", &["archive_path"], &[], true, false),
+                stdin(&["skills", "delete"], "删除我的技能。", &["source", "namespace", "slug"], &[], true, true),
+                stdin(&["skills", "copy"], "将准确来源版本复制到我的技能。", &["source", "namespace", "slug", "version", "target_slug"], &[], true, false),
+                stdin(&["skills", "preferences"], "更新技能启用和新助手初始技能偏好。", &["source", "namespace", "slug", "selected_version", "follow_latest", "enabled", "auto_inject"], &[], true, false),
             ]),
             domain("mcp", &[
                 no_input_redacted(&["mcp", "servers", "list"], "列出 MCP 服务。", false, &["transport.headers", "transport.env"]),

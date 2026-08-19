@@ -145,11 +145,12 @@ pub use shell::{
     SpeechToTextProvider, SpeechToTextResult, SttStreamClientMessage, SttStreamServerMessage, ToolType,
 };
 pub use skill::{
-    CloneSkillRequest, CopySkillRequest, CreateSkillRequest, ImportSkillRequest, MarketFileComparisonResponse,
-    MarketInfoResponse, MarketSkillComparisonResponse, MarketSkillResponse, MarketSyncStateResponse,
-    MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef, PublishMarketSkillRequest,
-    PublishMarketSkillResponse, ReadAssistantRuleRequest, SkillGitStatusResponse, SkillPreferencesResponse,
-    SkillSourceResponse, SkillWorkspaceResponse, UpdateSkillPreferencesRequest, WriteAssistantRuleRequest,
+    CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest, ImportSkillRequest,
+    ReadAssistantRuleRequest, SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse,
+    SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
+    SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
+    SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
+    UpdateSkillPreferencesRequest, WriteAssistantRuleRequest,
 };
 pub use system::{
     ClientPreferencesResponse, DEFAULT_NETWORK_PROXY_BYPASS, FeedbackDiagnosticsContextResponse,

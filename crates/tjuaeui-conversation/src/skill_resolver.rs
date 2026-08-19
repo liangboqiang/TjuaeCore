@@ -1,11 +1,13 @@
-//! Abstraction over "what are the auto-inject skill names right now?" so
-//! `ConversationService` can compute the initial snapshot without forcing
-//! every test setup to stand up a real `SkillPaths` and skill repository.
+//! Runtime resolution for skill references already captured on an assistant.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tjuaeui_api_types::SkillIdentityResponse;
+use tjuaeui_common::WorkspaceGitProvisioner;
+use tjuaeui_db::ISkillUserPreferenceRepository;
 pub use tjuaeui_extension::ResolvedAgentSkill;
 use tracing::warn;
 
@@ -17,9 +19,6 @@ pub struct LoadedAgentSkill {
 
 #[async_trait]
 pub trait SkillResolver: Send + Sync {
-    /// Returns the sorted list of enabled auto-inject skill names.
-    async fn auto_inject_names(&self) -> Vec<String>;
-
     /// Resolve each skill name to its on-disk source directory, using the
     /// same search order as `materialize_skills_for_agent`.
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill>;
@@ -41,11 +40,21 @@ pub trait SkillResolver: Send + Sync {
 /// Production adapter backed by the canonical local skill workspaces.
 pub struct ExtensionSkillResolver {
     paths: Arc<tjuaeui_extension::SkillPaths>,
+    preferences: Arc<dyn ISkillUserPreferenceRepository>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
 }
 
 impl ExtensionSkillResolver {
-    pub fn new(paths: Arc<tjuaeui_extension::SkillPaths>) -> Self {
-        Self { paths }
+    pub fn new(
+        paths: Arc<tjuaeui_extension::SkillPaths>,
+        preferences: Arc<dyn ISkillUserPreferenceRepository>,
+        git: Arc<dyn WorkspaceGitProvisioner>,
+    ) -> Self {
+        Self {
+            paths,
+            preferences,
+            git,
+        }
     }
 }
 
@@ -86,43 +95,75 @@ fn extract_skill_body(content: &str) -> String {
     }
 }
 
-#[async_trait]
-impl SkillResolver for ExtensionSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        match tjuaeui_extension::list_installed_skills(&self.paths.user_skills_dir).await {
-            Ok(items) => {
-                let mut names: Vec<String> = items
-                    .into_iter()
-                    .filter(|item| item.preferences.enabled && item.preferences.auto_inject)
-                    .map(|item| item.slug)
-                    .collect();
-                names.sort();
-                names
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "auto_inject_names: skill catalog lookup failed, falling back to empty"
-                );
-                Vec::new()
-            }
+/// Encode a canonical skill reference as one portable directory name.
+/// Encoding unsafe UTF-8 bytes rather than replacing characters avoids
+/// collisions between namespaces such as `alice/team` and `alice:team`.
+fn runtime_skill_name(reference: &str) -> String {
+    let mut name = String::with_capacity(reference.len());
+    for byte in reference.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            name.push(char::from(byte));
+        } else {
+            write!(&mut name, "_{byte:02x}").expect("writing to a String cannot fail");
         }
     }
+    name
+}
 
+#[async_trait]
+impl SkillResolver for ExtensionSkillResolver {
     async fn resolve_skills(&self, names: &[String]) -> Vec<ResolvedAgentSkill> {
         if names.is_empty() {
             return Vec::new();
         }
         let mut resolved = Vec::new();
-        for name in names {
-            match tjuaeui_extension::resolve_installed_skill(&self.paths.user_skills_dir, name).await {
-                Ok(Some(skill)) if skill.preferences.enabled => resolved.push(ResolvedAgentSkill {
-                    name: skill.slug,
-                    source_path: skill.path,
-                }),
-                Ok(_) => {}
+        for reference in names {
+            let Some(identity) = SkillIdentityResponse::parse_reference(reference) else {
+                tracing::warn!(skill = %reference, "assistant skill reference is not canonical");
+                continue;
+            };
+            let source = identity.source.as_str();
+            let preference = match self.preferences.get(source, &identity.namespace, &identity.slug).await {
+                Ok(Some(preference)) if preference.enabled => preference,
+                Ok(_) => {
+                    tracing::warn!(skill = %reference, "assistant skill is not enabled");
+                    continue;
+                }
                 Err(error) => {
-                    tracing::warn!(skill = %name, %error, "resolve_skills failed for managed skill");
+                    tracing::warn!(skill = %reference, %error, "resolve_skills failed to read skill preference");
+                    continue;
+                }
+            };
+            let Some(version) = preference.selected_version.as_deref() else {
+                tracing::warn!(skill = %reference, "enabled skill has no selected version");
+                continue;
+            };
+            let space = match tjuaeui_extension::SkillSpace::parse(source) {
+                Ok(space) => space,
+                Err(error) => {
+                    tracing::warn!(skill = %reference, %error, "enabled skill source is invalid");
+                    continue;
+                }
+            };
+            match tjuaeui_extension::ensure_runtime_snapshot(
+                &self.paths.user_skills_dir,
+                &self.paths.runtime_cache_dir,
+                space,
+                &preference.namespace,
+                &preference.slug,
+                version,
+                self.git.clone(),
+            )
+            .await
+            {
+                Ok(source_path) => {
+                    resolved.push(ResolvedAgentSkill {
+                        name: runtime_skill_name(reference),
+                        source_path,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(skill = %reference, %error, "enabled skill snapshot could not be prepared")
                 }
             }
         }
@@ -156,10 +197,6 @@ pub struct FixedSkillResolver {
 #[cfg(test)]
 #[async_trait]
 impl SkillResolver for FixedSkillResolver {
-    async fn auto_inject_names(&self) -> Vec<String> {
-        self.names.clone()
-    }
-
     async fn resolve_skills(&self, _names: &[String]) -> Vec<ResolvedAgentSkill> {
         Vec::new()
     }
@@ -183,11 +220,19 @@ mod tests {
         assert_eq!(extract_skill_body(content), "Cron body");
     }
 
-    #[tokio::test]
-    async fn extension_resolver_reads_auto_inject_names_from_manifests() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let paths = Arc::new(tjuaeui_extension::resolve_skill_paths(tmp.path(), tmp.path()));
-        let resolver = ExtensionSkillResolver::new(paths);
-        assert!(resolver.auto_inject_names().await.is_empty());
+    #[test]
+    fn runtime_skill_name_is_portable_and_preserves_identity() {
+        assert_eq!(
+            runtime_skill_name("skillhub:alice/team:writer"),
+            "skillhub_3aalice_2fteam_3awriter"
+        );
+        assert_eq!(
+            runtime_skill_name(r"skillhub:alice\team:writer"),
+            "skillhub_3aalice_5cteam_3awriter"
+        );
+        assert_ne!(
+            runtime_skill_name("skillhub:alice/team:writer"),
+            runtime_skill_name("skillhub:alice:team:writer")
+        );
     }
 }

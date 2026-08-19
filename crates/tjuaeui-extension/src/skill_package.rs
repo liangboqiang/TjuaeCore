@@ -1,10 +1,8 @@
-//! One skill model: every installed skill is one local workspace.
+//! Pure skill packages and the TjuaeHub static index.
 //!
-//! Markets only publish a static index that points at immutable directories in
-//! Git repositories. Installing a market entry materializes that directory,
-//! verifies it, records the optional market link in the manifest, and then
-//! initializes an independent local Git repository. Runtime loading never
-//! reads a market, archive, extension, or embedded fallback.
+//! A package contains only `SKILL.md`, `_meta.json`, and optional public files.
+//! Provider identity, enablement, automatic assistant injection, selected
+//! version, Git state, and cache state deliberately live outside the package.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -20,11 +18,11 @@ use tracing::warn;
 
 use crate::error::ExtensionError;
 
-pub const SKILL_PACKAGE_MANIFEST: &str = ".tjuae-skill.json";
+pub const SKILL_PACKAGE_MANIFEST: &str = "_meta.json";
 pub const SKILL_ENTRY_FILE: &str = "SKILL.md";
 const SKILL_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json";
-const MARKET_INDEXES_ENV: &str = "TJUAE_SKILL_MARKET_INDEX_URLS";
+const TJUAE_HUB_INDEX_ENV: &str = "TJUAE_HUB_SKILL_INDEX_URL";
 const DEFAULT_MARKET_INDEX_URL: &str = "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/dist/skills.json";
 const MARKET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MARKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -45,34 +43,16 @@ struct CachedMarketIndex {
 pub struct SkillManifest {
     #[serde(rename = "$schema")]
     pub schema: String,
-    pub schema_version: u32,
+    pub format: String,
+    pub format_version: u32,
     pub id: String,
     pub version: String,
     pub categories: Vec<String>,
-    pub enabled: bool,
-    pub auto_inject: bool,
-    pub source: SkillSource,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-pub enum SkillSource {
-    Local,
-    Market {
-        #[serde(rename = "marketId")]
-        market_id: String,
-        repository: String,
-        path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        revision: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SkillPreferences {
-    pub enabled: bool,
-    pub auto_inject: bool,
+    pub tags: Vec<String>,
+    pub compatibility: BTreeMap<String, serde_json::Value>,
+    pub requirements: Vec<String>,
+    pub content_hash: String,
+    pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,9 +64,8 @@ pub struct InstalledSkill {
     pub description: String,
     pub version: String,
     pub path: PathBuf,
-    pub source: SkillSource,
     pub categories: Vec<String>,
-    pub preferences: SkillPreferences,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,43 +94,38 @@ pub struct MarketSkillEntry {
     pub path: String,
     pub name: String,
     pub description: String,
-    pub version: String,
     pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub latest_version: String,
+    pub versions: Vec<MarketSkillVersion>,
+}
+
+impl MarketSkillEntry {
+    pub fn version(&self, version: &str) -> Option<&MarketSkillVersion> {
+        self.versions.iter().find(|candidate| candidate.version == version)
+    }
+
+    pub fn latest(&self) -> Option<&MarketSkillVersion> {
+        self.version(&self.latest_version)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MarketSkillVersion {
+    pub version: String,
+    pub revision: String,
     pub digest: String,
+    pub readme: String,
+    pub files: Vec<MarketSkillFile>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarketSyncState {
-    NotInstalled,
-    Synced,
-    LocalChanged,
-    UpdateAvailable,
-    Diverged,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarketFileComparison {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MarketSkillFile {
     pub path: String,
-    pub status: String,
-    pub binary: bool,
-    pub local_content: Option<String>,
-    pub remote_content: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarketSkillComparison {
-    pub slug: String,
-    pub base_revision: String,
-    pub remote_revision: String,
-    pub sync_state: MarketSyncState,
-    pub files: Vec<MarketFileComparison>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarketSkillPublication {
-    pub branch: String,
-    pub commit: String,
-    pub compare_url: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -188,74 +162,31 @@ pub async fn create_skill(
         frontmatter.trim_start_matches("---\n")
     );
     tokio::fs::write(target.join(SKILL_ENTRY_FILE), entry).await?;
-    normalize_skill_workspace(
-        &target,
-        slug,
-        SkillSource::Local,
-        None,
-        git,
-        "chore(skill): 初始化技能工作区",
-    )
-    .await
+    normalize_skill_workspace(&target, slug, git, "chore(skill): 初始化技能工作区").await
 }
 
-pub async fn clone_skill(
-    root: &Path,
-    repository_url: &str,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<InstalledSkill, ExtensionError> {
-    tokio::fs::create_dir_all(root).await?;
-    let provision = git
-        .clone_workspace_repository(repository_url, root)
-        .await
-        .map_err(ExtensionError::Internal)?;
-    let mut target = PathBuf::from(provision.workspace_path);
-    if !target.join(SKILL_ENTRY_FILE).is_file() {
-        return Err(ExtensionError::SkillImportNoSkillFound(target.display().to_string()));
-    }
-    let slug = read_manifest(&target)
-        .await
+pub async fn tjuae_hub_index() -> Result<MarketIndex, ExtensionError> {
+    let configured_url = std::env::var(TJUAE_HUB_INDEX_ENV)
         .ok()
-        .map(|manifest| manifest.id)
-        .or_else(|| target.file_name().and_then(|name| name.to_str()).map(str::to_owned))
-        .ok_or_else(|| ExtensionError::InvalidSkillPath(target.display().to_string()))?;
-    validate_slug(&slug)?;
-    if target.file_name().and_then(|name| name.to_str()) != Some(&slug) {
-        let renamed = root.join(&slug);
-        if renamed.exists() {
-            return Err(ExtensionError::InvalidRequest(format!("技能 {slug} 已存在")));
-        }
-        tokio::fs::rename(&target, &renamed).await?;
-        target = renamed;
+        .filter(|value| !value.trim().is_empty());
+    let index = if let Some(url) = configured_url {
+        fetch_market_index(url.trim()).await?
+    } else if let Some(path) = crate::skill_storage::resolve_tjuae_hub_worktree()
+        .map(|root| root.join("dist").join("skills.json"))
+        .filter(|path| path.is_file())
+    {
+        let index: MarketIndex = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+        validate_market_index(&index)?;
+        index
+    } else {
+        fetch_market_index(DEFAULT_MARKET_INDEX_URL).await?
+    };
+    if index.market.id != "tjuae-hub" {
+        return Err(ExtensionError::ManifestValidation(
+            "TjuaeHub 技能索引标识必须是 tjuae-hub".to_owned(),
+        ));
     }
-    normalize_skill_workspace(
-        &target,
-        &slug,
-        SkillSource::Local,
-        None,
-        git,
-        "chore(skill): 接入 Tjuae 技能工作区",
-    )
-    .await
-}
-
-pub async fn market_indexes() -> Result<Vec<MarketIndex>, ExtensionError> {
-    let default = fetch_market_index(DEFAULT_MARKET_INDEX_URL).await?;
-    let mut indexes = vec![default];
-    let mut ids = HashSet::from([indexes[0].market.id.clone()]);
-    if let Ok(configured) = std::env::var(MARKET_INDEXES_ENV) {
-        for url in configured.split(';').map(str::trim).filter(|value| !value.is_empty()) {
-            if url == DEFAULT_MARKET_INDEX_URL {
-                continue;
-            }
-            match fetch_market_index(url).await {
-                Ok(index) if ids.insert(index.market.id.clone()) => indexes.push(index),
-                Ok(index) => warn!(market_id = %index.market.id, %url, "忽略 ID 重复的外部技能市场"),
-                Err(error) => warn!(%url, %error, "忽略暂时不可用的外部技能市场"),
-            }
-        }
-    }
-    Ok(indexes)
+    Ok(index)
 }
 
 async fn fetch_market_index(url: &str) -> Result<MarketIndex, ExtensionError> {
@@ -366,236 +297,6 @@ async fn write_market_index_cache(path: &Path, index: &MarketIndex) -> Result<()
     tokio::fs::write(path, bytes).await
 }
 
-pub async fn install_market_skill(
-    root: &Path,
-    market_id: &str,
-    slug: &str,
-    replace: bool,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<InstalledSkill, ExtensionError> {
-    validate_slug(slug)?;
-    let index = market_indexes()
-        .await?
-        .into_iter()
-        .find(|index| index.market.id == market_id)
-        .ok_or_else(|| ExtensionError::InvalidRequest(format!("找不到技能市场：{market_id}")))?;
-    let entry = index
-        .skills
-        .iter()
-        .find(|entry| entry.id == slug)
-        .ok_or_else(|| ExtensionError::SkillNotFound(slug.to_owned()))?
-        .clone();
-    let target = root.join(slug);
-    let previous = if target.exists() {
-        let installed = load_installed_skill(&target).await?;
-        if !replace {
-            return match &installed.source {
-                SkillSource::Market { market_id, path, .. } if market_id == &index.market.id && path == &entry.path => {
-                    Ok(installed)
-                }
-                _ => Err(ExtensionError::InvalidRequest(format!("本地技能 {slug} 已存在"))),
-            };
-        }
-        match &installed.source {
-            SkillSource::Market { market_id, path, .. } if market_id == &index.market.id && path == &entry.path => {
-                if !git
-                    .workspace_matches_market_baseline(&target)
-                    .await
-                    .map_err(ExtensionError::Internal)?
-                {
-                    return Err(ExtensionError::InvalidRequest(format!(
-                        "本地技能 {slug} 有尚未发布或比较的修改，不能直接覆盖更新"
-                    )));
-                }
-                Some(installed.preferences)
-            }
-            _ => {
-                return Err(ExtensionError::InvalidRequest(format!(
-                    "本地技能 {slug} 未关联当前市场，不能用市场内容覆盖"
-                )));
-            }
-        }
-    } else {
-        None
-    };
-    tokio::fs::create_dir_all(root).await?;
-    let staging = root.join(format!(".installing-{slug}"));
-    if staging.exists() {
-        tokio::fs::remove_dir_all(&staging).await?;
-    }
-    git.materialize_repository_path(&index.repository, &index.revision, &entry.path, &staging)
-        .await
-        .map_err(ExtensionError::Internal)?;
-    verify_workspace_digest(&staging, &entry.digest)?;
-    let mut manifest = read_manifest(&staging).await?;
-    validate_manifest_identity(&manifest, slug)?;
-    match &manifest.source {
-        SkillSource::Market {
-            market_id,
-            repository,
-            path,
-            ..
-        } if market_id == &index.market.id && repository == &index.repository && path == &entry.path => {}
-        _ => {
-            return Err(ExtensionError::ManifestValidation(
-                "市场目录中的技能清单未指向当前市场条目".to_owned(),
-            ));
-        }
-    }
-    manifest.version = entry.version.clone();
-    manifest.categories = entry.categories.clone();
-    let market_source = SkillSource::Market {
-        market_id: index.market.id.clone(),
-        repository: index.repository.clone(),
-        path: entry.path.clone(),
-        revision: Some(index.revision.clone()),
-    };
-    if let Some(preferences) = previous {
-        manifest.enabled = preferences.enabled;
-        manifest.auto_inject = preferences.auto_inject;
-    }
-    manifest.source = market_source.clone();
-    write_manifest(&staging.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
-    if target.exists() {
-        git.commit_workspace_snapshot(&target, &format!("chore(skill): 保存 {slug} 更新前状态"))
-            .await
-            .map_err(ExtensionError::Internal)?;
-        replace_worktree_contents(&target, &staging).await?;
-        tokio::fs::remove_dir_all(&staging).await?;
-    } else {
-        rename_installed_directory(&staging, &target).await?;
-    }
-    let installed = normalize_skill_workspace(
-        &target,
-        slug,
-        market_source,
-        previous,
-        git.clone(),
-        &format!("chore(skill): 同步 {slug} 至 {}", entry.version),
-    )
-    .await?;
-    git.mark_market_baseline(&target)
-        .await
-        .map_err(ExtensionError::Internal)?;
-    Ok(installed)
-}
-
-pub async fn market_sync_state(
-    installed: Option<&InstalledSkill>,
-    index: &MarketIndex,
-    entry: &MarketSkillEntry,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<MarketSyncState, ExtensionError> {
-    let Some(installed) = installed else {
-        return Ok(MarketSyncState::NotInstalled);
-    };
-    let SkillSource::Market {
-        market_id,
-        repository,
-        path,
-        revision,
-    } = &installed.source
-    else {
-        return Ok(MarketSyncState::NotInstalled);
-    };
-    if market_id != &index.market.id || repository != &index.repository || path != &entry.path {
-        return Ok(MarketSyncState::NotInstalled);
-    }
-    let local_changed = !git
-        .workspace_matches_market_baseline(&installed.path)
-        .await
-        .map_err(ExtensionError::Internal)?;
-    let remote_changed = revision.as_deref() != Some(index.revision.as_str());
-    Ok(match (local_changed, remote_changed) {
-        (false, false) => MarketSyncState::Synced,
-        (true, false) => MarketSyncState::LocalChanged,
-        (false, true) => MarketSyncState::UpdateAvailable,
-        (true, true) => MarketSyncState::Diverged,
-    })
-}
-
-pub async fn compare_market_skill(
-    root: &Path,
-    market_id: &str,
-    slug: &str,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<MarketSkillComparison, ExtensionError> {
-    validate_slug(slug)?;
-    let (index, entry) = find_market_entry(market_id, slug).await?;
-    let installed = load_installed_skill(&root.join(slug)).await?;
-    ensure_market_link(&installed, &index, &entry)?;
-    let sync_state = market_sync_state(Some(&installed), &index, &entry, git.clone()).await?;
-    let base_revision = match &installed.source {
-        SkillSource::Market { revision, .. } => revision.clone().unwrap_or_default(),
-        SkillSource::Local => String::new(),
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ExtensionError::Internal(error.to_string()))?
-        .as_nanos();
-    let remote = root.join(format!(".comparing-{slug}-{nonce}"));
-    let result = async {
-        git.materialize_repository_path(&index.repository, &index.revision, &entry.path, &remote)
-            .await
-            .map_err(ExtensionError::Internal)?;
-        verify_workspace_digest(&remote, &entry.digest)?;
-        compare_skill_trees(&installed.path, &remote)
-    }
-    .await;
-    let _ = tokio::fs::remove_dir_all(&remote).await;
-    Ok(MarketSkillComparison {
-        slug: slug.to_owned(),
-        base_revision,
-        remote_revision: index.revision,
-        sync_state,
-        files: result?,
-    })
-}
-
-pub async fn publish_market_skill(
-    root: &Path,
-    market_id: &str,
-    slug: &str,
-    fork_repository_url: &str,
-    message: &str,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<MarketSkillPublication, ExtensionError> {
-    validate_slug(slug)?;
-    let (index, entry) = find_market_entry(market_id, slug).await?;
-    if index.market.id != "tjuae-hub" {
-        return Err(ExtensionError::InvalidRequest("外部市场只读，不支持发布".to_owned()));
-    }
-    let installed = load_installed_skill(&root.join(slug)).await?;
-    ensure_market_link(&installed, &index, &entry)?;
-    let (upstream_owner, upstream_repo) = github_repository_identity(&index.repository)
-        .ok_or_else(|| ExtensionError::InvalidRequest("TjuaeHub 仓库地址无效".to_owned()))?;
-    let (fork_owner, fork_repo) = github_repository_identity(fork_repository_url)
-        .ok_or_else(|| ExtensionError::InvalidRequest("请输入 TjuaeHub Fork 的 GitHub 仓库地址".to_owned()))?;
-    if !fork_repo.eq_ignore_ascii_case(&upstream_repo) {
-        return Err(ExtensionError::InvalidRequest(format!(
-            "Fork 仓库必须与 {upstream_repo} 同名"
-        )));
-    }
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ExtensionError::Internal(error.to_string()))?
-        .as_secs();
-    let branch = format!("tjuae/skill-{slug}-{timestamp}");
-    let published = git
-        .publish_workspace_path(&installed.path, fork_repository_url, &entry.path, &branch, message)
-        .await
-        .map_err(ExtensionError::Internal)?;
-    let compare_url = format!(
-        "https://github.com/{upstream_owner}/{upstream_repo}/compare/main...{fork_owner}:{}?expand=1",
-        published.branch
-    );
-    Ok(MarketSkillPublication {
-        branch: published.branch,
-        commit: published.commit,
-        compare_url,
-    })
-}
-
 pub async fn list_installed_skills(root: &Path) -> Result<Vec<InstalledSkill>, ExtensionError> {
     if !root.exists() {
         return Ok(Vec::new());
@@ -604,6 +305,13 @@ pub async fn list_installed_skills(root: &Path) -> Result<Vec<InstalledSkill>, E
     let mut entries = tokio::fs::read_dir(root).await?;
     while let Some(entry) = entries.next_entry().await? {
         if !entry.file_type().await?.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // A directory without the one public manifest is not a skill in the
+        // current protocol. Ignore it before validation so unrelated folders
+        // and unsupported legacy packages do not emit a warning on every
+        // catalog refresh; no legacy manifest is read or migrated here.
+        if !entry.path().join(SKILL_PACKAGE_MANIFEST).is_file() {
             continue;
         }
         match load_installed_skill(&entry.path()).await {
@@ -617,8 +325,21 @@ pub async fn list_installed_skills(root: &Path) -> Result<Vec<InstalledSkill>, E
 
 pub async fn load_installed_skill(directory: &Path) -> Result<InstalledSkill, ExtensionError> {
     let directory = canonical_directory(directory)?;
+    let slug = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExtensionError::InvalidSkillPath(directory.display().to_string()))?;
+    load_skill_from_directory(&directory, slug).await
+}
+
+pub(crate) async fn load_skill_from_directory(
+    directory: &Path,
+    expected_slug: &str,
+) -> Result<InstalledSkill, ExtensionError> {
+    let directory = canonical_directory(directory)?;
     let manifest = read_manifest(&directory).await?;
-    validate_manifest(&manifest, &directory)?;
+    validate_manifest_identity(&manifest, expected_slug)?;
+    verify_workspace_digest(&directory, &manifest.content_hash)?;
     let entry_path = directory.join(SKILL_ENTRY_FILE);
     let source = tokio::fs::read_to_string(&entry_path).await?;
     let frontmatter = parse_frontmatter(&source, &entry_path)?;
@@ -629,12 +350,8 @@ pub async fn load_installed_skill(directory: &Path) -> Result<InstalledSkill, Ex
         description: frontmatter.description,
         version: manifest.version,
         path: directory,
-        source: manifest.source,
         categories: manifest.categories,
-        preferences: SkillPreferences {
-            enabled: manifest.enabled,
-            auto_inject: manifest.auto_inject,
-        },
+        tags: manifest.tags,
     })
 }
 
@@ -669,80 +386,6 @@ pub async fn ensure_skill_repositories(
     Ok(skills)
 }
 
-pub async fn import_skill(
-    root: &Path,
-    source: &Path,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<InstalledSkill, ExtensionError> {
-    let source = canonical_directory(source)?;
-    if !source.join(SKILL_ENTRY_FILE).is_file() {
-        return Err(ExtensionError::SkillImportNoSkillFound(source.display().to_string()));
-    }
-    let source_manifest = read_manifest(&source).await.ok();
-    let slug = source_manifest
-        .as_ref()
-        .map(|manifest| manifest.id.clone())
-        .or_else(|| source.file_name().and_then(|name| name.to_str()).map(str::to_owned))
-        .ok_or_else(|| ExtensionError::InvalidSkillPath(source.display().to_string()))?;
-    validate_slug(&slug)?;
-    let target = root.join(&slug);
-    if target.exists() {
-        return Err(ExtensionError::InvalidRequest(format!("技能 {slug} 已存在")));
-    }
-    copy_tree(&source, &target).await?;
-    normalize_skill_workspace(
-        &target,
-        &slug,
-        SkillSource::Local,
-        None,
-        git,
-        "chore(skill): 导入技能工作区",
-    )
-    .await
-}
-
-pub async fn copy_skill(
-    root: &Path,
-    source_slug: &str,
-    target_slug: &str,
-    git: Arc<dyn WorkspaceGitProvisioner>,
-) -> Result<InstalledSkill, ExtensionError> {
-    validate_slug(source_slug)?;
-    validate_slug(target_slug)?;
-    let source = load_installed_skill(&root.join(source_slug)).await?;
-    let target = root.join(target_slug);
-    if target.exists() {
-        return Err(ExtensionError::InvalidRequest(format!("技能 {target_slug} 已存在")));
-    }
-    copy_tree(&source.path, &target).await?;
-    normalize_skill_workspace(
-        &target,
-        target_slug,
-        SkillSource::Local,
-        Some(source.preferences),
-        git,
-        "chore(skill): 创建技能副本",
-    )
-    .await
-}
-
-pub async fn update_skill_preferences(
-    root: &Path,
-    slug: &str,
-    preferences: SkillPreferences,
-) -> Result<InstalledSkill, ExtensionError> {
-    validate_slug(slug)?;
-    if preferences.auto_inject && !preferences.enabled {
-        return Err(ExtensionError::InvalidRequest("未启用的技能不能自动注入".to_owned()));
-    }
-    let directory = root.join(slug);
-    let mut manifest = read_manifest(&directory).await?;
-    manifest.enabled = preferences.enabled;
-    manifest.auto_inject = preferences.auto_inject;
-    write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
-    load_installed_skill(&directory).await
-}
-
 pub async fn delete_installed_skill(root: &Path, slug: &str) -> Result<(), ExtensionError> {
     validate_slug(slug)?;
     let target = root.join(slug);
@@ -753,26 +396,265 @@ pub async fn delete_installed_skill(root: &Path, slug: &str) -> Result<(), Exten
     Ok(())
 }
 
+pub async fn export_skill_archive(root: &Path, slug: &str, output_path: &Path) -> Result<(), ExtensionError> {
+    let skill = load_installed_skill(&root.join(slug)).await?;
+    export_skill_directory_archive(&skill.path, output_path).await
+}
+
+pub async fn export_skill_directory_archive(directory: &Path, output_path: &Path) -> Result<(), ExtensionError> {
+    let skill = load_installed_skill(directory).await?;
+    let source = skill.path;
+    let output = output_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(), ExtensionError> {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(&output)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let files = archive_files(&source)?;
+        for relative in files {
+            let name = relative.to_string_lossy().replace('\\', "/");
+            archive.start_file(name, options)?;
+            std::io::copy(&mut std::fs::File::open(source.join(relative))?, &mut archive)?;
+        }
+        archive.finish()?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| ExtensionError::Internal(error.to_string()))??;
+    Ok(())
+}
+
+pub async fn import_skill_archive(
+    root: &Path,
+    archive_path: &Path,
+    git: Arc<dyn WorkspaceGitProvisioner>,
+) -> Result<InstalledSkill, ExtensionError> {
+    let root = root.to_path_buf();
+    let archive_path = archive_path.to_path_buf();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ExtensionError::Internal(error.to_string()))?
+        .as_nanos();
+    let staging = root.join(format!(".importing-{nonce}"));
+    tokio::fs::create_dir_all(&staging).await?;
+    let result = async {
+        let extract_target = staging.clone();
+        tokio::task::spawn_blocking(move || extract_skill_archive(&archive_path, &extract_target))
+            .await
+            .map_err(|error| ExtensionError::Internal(error.to_string()))??;
+        let package_root = detect_package_root(&staging)?;
+        let manifest = read_manifest(&package_root).await?;
+        if package_root == staging {
+            // Tjuae exports a rootless archive. Its extraction directory is an
+            // implementation-only nonce, so validate the public identity
+            // against the manifest and the digest against extracted files. A
+            // wrapped third-party archive still has to match its directory.
+            validate_manifest_identity(&manifest, &manifest.id)?;
+            verify_workspace_digest(&package_root, &manifest.content_hash)?;
+        } else {
+            validate_manifest(&manifest, &package_root)?;
+        }
+        let target = root.join(&manifest.id);
+        if target.exists() {
+            return Err(ExtensionError::InvalidRequest(format!("技能 {} 已存在", manifest.id)));
+        }
+        rename_installed_directory(&package_root, &target).await?;
+        match normalize_skill_workspace(&target, &manifest.id, git, "chore(skill): 导入纯技能包").await {
+            Ok(skill) => Ok(skill),
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&target).await;
+                Err(error)
+            }
+        }
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    result
+}
+
+fn archive_files(root: &Path) -> Result<Vec<PathBuf>, ExtensionError> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), ExtensionError> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".git" | "node_modules" | ".DS_Store" | "__MACOSX" | "Thumbs.db"
+            ) || name.starts_with("._")
+            {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(ExtensionError::SkillImportInvalidSource(format!(
+                    "技能包不能包含符号链接：{}",
+                    entry.path().display()
+                )));
+            }
+            if kind.is_dir() {
+                visit(root, &entry.path(), files)?;
+            } else {
+                files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
+            }
+            if files.len() > 2_000 {
+                return Err(ExtensionError::InvalidRequest("技能包文件数量超过 2000".into()));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(root, root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn extract_skill_archive(archive_path: &Path, target: &Path) -> Result<(), ExtensionError> {
+    const MAX_PACKAGE_BYTES: u64 = 20 * 1024 * 1024;
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    if archive.len() > 2_000 {
+        return Err(ExtensionError::InvalidRequest("技能包文件数量超过 2000".into()));
+    }
+    let mut total = 0_u64;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index)?;
+        let enclosed = file
+            .enclosed_name()
+            .ok_or_else(|| ExtensionError::SkillImportInvalidSource(format!("技能包路径越界：{}", file.name())))?;
+        if file.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000) {
+            return Err(ExtensionError::SkillImportInvalidSource(format!(
+                "技能包不能包含符号链接：{}",
+                file.name()
+            )));
+        }
+        total = total.saturating_add(file.size());
+        if total > MAX_PACKAGE_BYTES {
+            return Err(ExtensionError::InvalidRequest("技能包解压后超过 20 MB".into()));
+        }
+        let destination = target.join(enclosed);
+        if file.is_dir() {
+            std::fs::create_dir_all(&destination)?;
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::io::copy(&mut file, &mut std::fs::File::create(destination)?)?;
+    }
+    Ok(())
+}
+
+fn detect_package_root(staging: &Path) -> Result<PathBuf, ExtensionError> {
+    if staging.join(SKILL_ENTRY_FILE).is_file() && staging.join(SKILL_PACKAGE_MANIFEST).is_file() {
+        return Ok(staging.to_path_buf());
+    }
+    let directories = std::fs::read_dir(staging)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .collect::<Vec<_>>();
+    if directories.len() == 1 {
+        let root = directories[0].path();
+        if root.join(SKILL_ENTRY_FILE).is_file() && root.join(SKILL_PACKAGE_MANIFEST).is_file() {
+            return Ok(root);
+        }
+    }
+    Err(ExtensionError::SkillImportNoSkillFound(staging.display().to_string()))
+}
+
 fn local_manifest(slug: &str, version: &str) -> SkillManifest {
     SkillManifest {
         schema: SKILL_SCHEMA_URL.to_owned(),
-        schema_version: 1,
+        format: "agent-skill".to_owned(),
+        format_version: 1,
         id: slug.to_owned(),
         version: version.to_owned(),
         categories: Vec::new(),
-        enabled: true,
-        auto_inject: false,
-        source: SkillSource::Local,
+        tags: Vec::new(),
+        compatibility: BTreeMap::new(),
+        requirements: Vec::new(),
+        content_hash: String::new(),
+        extensions: BTreeMap::new(),
     }
+}
+
+/// Validate and seal a pure public skill package without adding any runtime
+/// preference, provider provenance, Git metadata, or application state.
+pub(crate) async fn seal_skill_package(
+    directory: &Path,
+    slug: &str,
+    version: &str,
+    categories: Vec<String>,
+    tags: Vec<String>,
+) -> Result<InstalledSkill, ExtensionError> {
+    validate_slug(slug)?;
+    if !directory.join(SKILL_ENTRY_FILE).is_file() {
+        return Err(ExtensionError::SkillImportNoSkillFound(directory.display().to_string()));
+    }
+    let version = Version::parse(version)
+        .map_err(|error| ExtensionError::InvalidVersion {
+            version: version.to_owned(),
+            reason: error.to_string(),
+        })?
+        .to_string();
+    let mut manifest = local_manifest(slug, &version);
+    manifest.categories = unique_values(categories);
+    manifest.tags = unique_values(tags);
+    manifest.content_hash = workspace_digest(directory)?;
+    write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
+    load_skill_from_directory(directory, slug).await
+}
+
+pub(crate) async fn reseal_skill_package(directory: &Path) -> Result<InstalledSkill, ExtensionError> {
+    let mut manifest = read_manifest(directory).await?;
+    validate_manifest_identity(
+        &manifest,
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ExtensionError::InvalidSkillPath(directory.display().to_string()))?,
+    )?;
+    manifest.content_hash = workspace_digest(directory)?;
+    write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
+    load_installed_skill(directory).await
+}
+
+pub(crate) async fn save_skill_manifest_content(
+    directory: &Path,
+    content: &str,
+) -> Result<InstalledSkill, ExtensionError> {
+    let mut manifest: SkillManifest = serde_json::from_str(content)?;
+    let slug = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExtensionError::InvalidSkillPath(directory.display().to_string()))?;
+    validate_manifest_identity(&manifest, slug)?;
+    manifest.schema = SKILL_SCHEMA_URL.to_owned();
+    manifest.format = "agent-skill".to_owned();
+    manifest.format_version = 1;
+    manifest.categories = unique_values(manifest.categories);
+    manifest.tags = unique_values(manifest.tags);
+    manifest.content_hash = workspace_digest(directory)?;
+    write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
+    load_installed_skill(directory).await
+}
+
+fn unique_values(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
 }
 
 /// The only normalization/write boundary shared by manual creation, Butler,
 /// folder import, Git clone, copy, and market materialization.
-async fn normalize_skill_workspace(
+pub(crate) async fn normalize_skill_workspace(
     directory: &Path,
     slug: &str,
-    source: SkillSource,
-    preferences: Option<SkillPreferences>,
     git: Arc<dyn WorkspaceGitProvisioner>,
     commit_message: &str,
 ) -> Result<InstalledSkill, ExtensionError> {
@@ -784,7 +666,8 @@ async fn normalize_skill_workspace(
         .await
         .unwrap_or_else(|_| local_manifest(slug, "0.1.0"));
     manifest.schema = SKILL_SCHEMA_URL.to_owned();
-    manifest.schema_version = 1;
+    manifest.format = "agent-skill".to_owned();
+    manifest.format_version = 1;
     manifest.id = slug.to_owned();
     if Version::parse(&manifest.version).is_err() {
         manifest.version = "0.1.0".to_owned();
@@ -793,11 +676,7 @@ async fn normalize_skill_workspace(
     manifest
         .categories
         .retain(|category| !category.trim().is_empty() && seen.insert(category.clone()));
-    manifest.source = source;
-    if let Some(preferences) = preferences {
-        manifest.enabled = preferences.enabled;
-        manifest.auto_inject = preferences.auto_inject;
-    }
+    manifest.content_hash = workspace_digest(directory)?;
     write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
     git.ensure_workspace_git(directory)
         .await
@@ -805,7 +684,7 @@ async fn normalize_skill_workspace(
     git.commit_workspace_snapshot(directory, commit_message)
         .await
         .map_err(ExtensionError::Internal)?;
-    load_installed_skill(directory).await
+    load_skill_from_directory(directory, slug).await
 }
 
 async fn read_manifest(directory: &Path) -> Result<SkillManifest, ExtensionError> {
@@ -829,11 +708,13 @@ fn validate_manifest(manifest: &SkillManifest, directory: &Path) -> Result<(), E
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| ExtensionError::InvalidSkillPath(directory.display().to_string()))?,
-    )
+    )?;
+    verify_workspace_digest(directory, &manifest.content_hash)?;
+    Ok(())
 }
 
 fn validate_manifest_identity(manifest: &SkillManifest, slug: &str) -> Result<(), ExtensionError> {
-    if manifest.schema != SKILL_SCHEMA_URL || manifest.schema_version != 1 {
+    if manifest.schema != SKILL_SCHEMA_URL || manifest.format != "agent-skill" || manifest.format_version != 1 {
         return Err(ExtensionError::ManifestValidation(
             "技能必须使用唯一的 Tjuae v1 清单".to_owned(),
         ));
@@ -856,163 +737,21 @@ fn validate_manifest_identity(manifest: &SkillManifest, slug: &str) -> Result<()
     }) {
         return Err(ExtensionError::ManifestValidation("技能分类不能为空或重复".to_owned()));
     }
-    if let SkillSource::Market {
-        market_id,
-        repository,
-        path,
-        revision,
-    } = &manifest.source
-    {
-        if market_id.trim().is_empty() || repository.trim().is_empty() {
-            return Err(ExtensionError::ManifestValidation("市场关联缺少市场或仓库".to_owned()));
-        }
-        validate_repository_path(path, slug)?;
-        if revision.as_deref().is_some_and(|value| !is_revision(value)) {
-            return Err(ExtensionError::ManifestValidation("市场修订号无效".to_owned()));
-        }
+    let mut tags = HashSet::new();
+    if manifest.tags.iter().any(|tag| {
+        let tag = tag.trim();
+        tag.is_empty() || !tags.insert(tag)
+    }) {
+        return Err(ExtensionError::ManifestValidation("技能标签不能为空或重复".to_owned()));
+    }
+    let mut requirements = HashSet::new();
+    if manifest.requirements.iter().any(|requirement| {
+        let requirement = requirement.trim();
+        requirement.is_empty() || !requirements.insert(requirement)
+    }) {
+        return Err(ExtensionError::ManifestValidation("技能依赖不能为空或重复".to_owned()));
     }
     Ok(())
-}
-
-async fn find_market_entry(market_id: &str, slug: &str) -> Result<(MarketIndex, MarketSkillEntry), ExtensionError> {
-    let index = market_indexes()
-        .await?
-        .into_iter()
-        .find(|index| index.market.id == market_id)
-        .ok_or_else(|| ExtensionError::InvalidRequest(format!("找不到技能市场：{market_id}")))?;
-    let entry = index
-        .skills
-        .iter()
-        .find(|entry| entry.id == slug)
-        .cloned()
-        .ok_or_else(|| ExtensionError::SkillNotFound(slug.to_owned()))?;
-    Ok((index, entry))
-}
-
-fn ensure_market_link(
-    installed: &InstalledSkill,
-    index: &MarketIndex,
-    entry: &MarketSkillEntry,
-) -> Result<(), ExtensionError> {
-    match &installed.source {
-        SkillSource::Market {
-            market_id,
-            repository,
-            path,
-            ..
-        } if market_id == &index.market.id && repository == &index.repository && path == &entry.path => Ok(()),
-        _ => Err(ExtensionError::InvalidRequest(format!(
-            "本地技能 {} 未关联当前市场条目",
-            installed.slug
-        ))),
-    }
-}
-
-fn compare_skill_trees(local: &Path, remote: &Path) -> Result<Vec<MarketFileComparison>, ExtensionError> {
-    let local_files = read_comparison_tree(local)?;
-    let remote_files = read_comparison_tree(remote)?;
-    let mut paths = local_files
-        .keys()
-        .chain(remote_files.keys())
-        .cloned()
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    let mut changes = Vec::new();
-    for path in paths {
-        let local_bytes = local_files.get(&path);
-        let remote_bytes = remote_files.get(&path);
-        if local_bytes == remote_bytes {
-            continue;
-        }
-        let status = match (local_bytes, remote_bytes) {
-            (None, Some(_)) => "added",
-            (Some(_), None) => "deleted",
-            (Some(_), Some(_)) => "modified",
-            (None, None) => continue,
-        };
-        let local_content = local_bytes.and_then(|bytes| String::from_utf8(bytes.clone()).ok());
-        let remote_content = remote_bytes.and_then(|bytes| String::from_utf8(bytes.clone()).ok());
-        let binary = local_bytes.is_some_and(|bytes| local_content.is_none() && !bytes.is_empty())
-            || remote_bytes.is_some_and(|bytes| remote_content.is_none() && !bytes.is_empty());
-        changes.push(MarketFileComparison {
-            path,
-            status: status.to_owned(),
-            binary,
-            local_content,
-            remote_content,
-        });
-    }
-    Ok(changes)
-}
-
-fn read_comparison_tree(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, ExtensionError> {
-    const MAX_FILES: usize = 2_000;
-    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-
-    fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), ExtensionError> {
-        for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if matches!(name.as_ref(), ".git" | "node_modules" | ".DS_Store" | "__MACOSX") {
-                continue;
-            }
-            let file_type = entry.file_type()?;
-            if file_type.is_symlink() {
-                return Err(ExtensionError::SkillImportInvalidSource(format!(
-                    "技能目录不能包含符号链接：{}",
-                    entry.path().display()
-                )));
-            }
-            if file_type.is_dir() {
-                visit(root, &entry.path(), files)?;
-                continue;
-            }
-            if files.len() >= MAX_FILES {
-                return Err(ExtensionError::InvalidRequest("技能文件数量超过比较上限".to_owned()));
-            }
-            let metadata = entry.metadata()?;
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .map_err(|error| ExtensionError::Internal(error.to_string()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes = if metadata.len() > MAX_FILE_BYTES {
-                vec![0]
-            } else {
-                std::fs::read(entry.path())?
-            };
-            files.insert(relative, bytes);
-        }
-        Ok(())
-    }
-
-    let mut files = BTreeMap::new();
-    visit(root, root, &mut files)?;
-    Ok(files)
-}
-
-fn github_repository_identity(repository_url: &str) -> Option<(String, String)> {
-    let value = repository_url.trim().trim_end_matches('/');
-    let path = if let Some(path) = value.strip_prefix("git@github.com:") {
-        path
-    } else if let Some(path) = value.strip_prefix("ssh://git@github.com/") {
-        path
-    } else if let Some(path) = value.strip_prefix("https://github.com/") {
-        path
-    } else {
-        value.strip_prefix("http://github.com/")?
-    };
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let mut segments = path.split('/');
-    let owner = segments.next()?.trim();
-    let repository = segments.next()?.trim();
-    if owner.is_empty() || repository.is_empty() || segments.next().is_some() {
-        return None;
-    }
-    Some((owner.to_owned(), repository.to_owned()))
 }
 
 fn validate_market_index(index: &MarketIndex) -> Result<(), ExtensionError> {
@@ -1028,16 +767,53 @@ fn validate_market_index(index: &MarketIndex) -> Result<(), ExtensionError> {
     for entry in &index.skills {
         validate_slug(&entry.id)?;
         validate_repository_path(&entry.path, &entry.id)?;
-        Version::parse(&entry.version).map_err(|error| ExtensionError::InvalidVersion {
-            version: entry.version.clone(),
-            reason: error.to_string(),
-        })?;
-        if !ids.insert(&entry.id) || !is_sha256(&entry.digest) {
+        if !ids.insert(&entry.id) || entry.versions.is_empty() || entry.latest().is_none() {
             return Err(ExtensionError::ManifestValidation(format!(
-                "技能市场条目 {} 重复或摘要无效",
+                "技能市场条目 {} 重复、缺少版本或 latestVersion 无效",
                 entry.id
             )));
         }
+        let mut versions = HashSet::new();
+        for version in &entry.versions {
+            Version::parse(&version.version).map_err(|error| ExtensionError::InvalidVersion {
+                version: version.version.clone(),
+                reason: error.to_string(),
+            })?;
+            if !versions.insert(&version.version)
+                || !is_revision(&version.revision)
+                || !is_sha256(&version.digest)
+                || version.readme.trim().is_empty()
+                || version.files.is_empty()
+            {
+                return Err(ExtensionError::ManifestValidation(format!(
+                    "技能市场条目 {} 的版本索引无效",
+                    entry.id
+                )));
+            }
+            for file in &version.files {
+                validate_relative_file_path(&file.path)?;
+                if file.sha256.len() != 64 || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(ExtensionError::ManifestValidation(format!(
+                        "技能市场条目 {} 的文件摘要无效",
+                        entry.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_file_path(path: &str) -> Result<(), ExtensionError> {
+    let value = Path::new(path);
+    if path.is_empty()
+        || path.contains('\\')
+        || value.is_absolute()
+        || value
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ExtensionError::ManifestValidation(format!("技能文件路径无效：{path}")));
     }
     Ok(())
 }
@@ -1120,7 +896,11 @@ fn workspace_digest(directory: &Path) -> Result<String, ExtensionError> {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if matches!(name.as_ref(), ".git" | "node_modules" | ".DS_Store" | "__MACOSX") {
+            if matches!(
+                name.as_ref(),
+                ".git" | "node_modules" | ".DS_Store" | "__MACOSX" | "Thumbs.db" | "_meta.json"
+            ) || name.starts_with("._")
+            {
                 continue;
             }
             if entry.file_type()?.is_dir() {
@@ -1165,52 +945,12 @@ async fn rename_installed_directory(source: &Path, target: &Path) -> Result<(), 
     Err(last_error.expect("rename retry records an error").into())
 }
 
-async fn replace_worktree_contents(target: &Path, source: &Path) -> Result<(), ExtensionError> {
-    let mut existing = tokio::fs::read_dir(target).await?;
-    while let Some(entry) = existing.next_entry().await? {
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        if entry.file_type().await?.is_dir() {
-            tokio::fs::remove_dir_all(entry.path()).await?;
-        } else {
-            tokio::fs::remove_file(entry.path()).await?;
-        }
-    }
-    let mut incoming = tokio::fs::read_dir(source).await?;
-    while let Some(entry) = incoming.next_entry().await? {
-        tokio::fs::rename(entry.path(), target.join(entry.file_name())).await?;
-    }
-    Ok(())
-}
-
-async fn copy_tree(source: &Path, target: &Path) -> Result<(), ExtensionError> {
-    tokio::fs::create_dir_all(target).await?;
-    let mut entries = tokio::fs::read_dir(source).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        if entry.file_type().await?.is_symlink() {
-            return Err(ExtensionError::SkillImportInvalidSource(format!(
-                "技能目录不能包含符号链接：{}",
-                entry.path().display()
-            )));
-        }
-        let child_target = target.join(entry.file_name());
-        if entry.file_type().await?.is_dir() {
-            Box::pin(copy_tree(&entry.path(), &child_target)).await?;
-        } else {
-            tokio::fs::copy(entry.path(), child_target).await?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::collections::BTreeSet;
+    use std::io::Write;
     use tempfile::TempDir;
     use tjuaeui_common::WorkspaceGitProvision;
 
@@ -1233,17 +973,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_list_and_copy_use_one_workspace_model() {
+    async fn create_and_list_use_one_pure_package_model() {
         let temp = TempDir::new().unwrap();
         let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
         let created = create_skill(temp.path(), "cron", "cron", "test", git.clone())
             .await
             .unwrap();
-        assert_eq!(created.source, SkillSource::Local);
+        assert!(created.path.join(SKILL_PACKAGE_MANIFEST).is_file());
         assert_eq!(list_installed_skills(temp.path()).await.unwrap().len(), 1);
-        let copied = copy_skill(temp.path(), "cron", "cron-copy", git).await.unwrap();
-        assert_eq!(copied.id, "cron-copy");
-        assert_eq!(copied.source, SkillSource::Local);
+    }
+
+    #[tokio::test]
+    async fn legacy_or_unrelated_directories_are_not_catalog_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("legacy");
+        tokio::fs::create_dir_all(&legacy).await.unwrap();
+        tokio::fs::write(legacy.join(SKILL_ENTRY_FILE), "# Legacy\n")
+            .await
+            .unwrap();
+        tokio::fs::write(legacy.join(".tjuae-skill.json"), "{}").await.unwrap();
+
+        assert!(list_installed_skills(temp.path()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn normalization_uses_public_slug_in_an_internal_staging_directory() {
+        let temp = TempDir::new().unwrap();
+        let staging = temp.path().join(".runtime-portable-nonce");
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        tokio::fs::write(
+            staging.join(SKILL_ENTRY_FILE),
+            "---\nname: portable\ndescription: test\n---\n\n# portable\n",
+        )
+        .await
+        .unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+
+        let skill = normalize_skill_workspace(&staging, "portable", git, "test")
+            .await
+            .unwrap();
+
+        assert_eq!(skill.slug, "portable");
+        assert_eq!(skill.path, std::fs::canonicalize(staging).unwrap());
+    }
+
+    #[tokio::test]
+    async fn export_contains_only_public_skill_package_data() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "portable", "portable", "test", git)
+            .await
+            .unwrap();
+        std::fs::create_dir_all(created.path.join(".git")).unwrap();
+        std::fs::write(created.path.join(".git/config"), "private git state").unwrap();
+
+        let output = temp.path().join("portable.zip");
+        export_skill_archive(temp.path(), "portable", &output).await.unwrap();
+
+        let file = std::fs::File::open(output).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names = archive.file_names().map(str::to_owned).collect::<BTreeSet<_>>();
+        assert_eq!(
+            names,
+            BTreeSet::from([SKILL_PACKAGE_MANIFEST.to_owned(), SKILL_ENTRY_FILE.to_owned()])
+        );
+
+        let manifest: serde_json::Value =
+            serde_json::from_reader(archive.by_name(SKILL_PACKAGE_MANIFEST).unwrap()).unwrap();
+        assert!(manifest.get("enabled").is_none());
+        assert!(manifest.get("autoInject").is_none());
+        assert!(manifest.get("source").is_none());
+    }
+
+    #[tokio::test]
+    async fn exported_rootless_package_imports_again() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "portable", "portable", "test", git.clone())
+            .await
+            .unwrap();
+        let output = temp.path().join("portable.zip");
+        export_skill_archive(temp.path(), "portable", &output).await.unwrap();
+        tokio::fs::remove_dir_all(created.path).await.unwrap();
+
+        let imported = import_skill_archive(temp.path(), &output, git).await.unwrap();
+
+        assert_eq!(imported.slug, "portable");
+        assert!(imported.path.join(SKILL_PACKAGE_MANIFEST).is_file());
+        assert!(imported.path.join(SKILL_ENTRY_FILE).is_file());
+    }
+
+    #[tokio::test]
+    async fn rejected_import_removes_its_staging_directory() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("invalid.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file(SKILL_PACKAGE_MANIFEST, options).unwrap();
+        archive.write_all(b"{}").unwrap();
+        archive.start_file(SKILL_ENTRY_FILE, options).unwrap();
+        archive.write_all(b"# invalid").unwrap();
+        archive.finish().unwrap();
+
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        assert!(import_skill_archive(temp.path(), &archive_path, git).await.is_err());
+        assert!(
+            std::fs::read_dir(temp.path())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".importing-"))
+        );
     }
 
     #[test]
@@ -1253,38 +1093,6 @@ mod tests {
         std::fs::create_dir(temp.path().join("b")).unwrap();
         std::fs::write(temp.path().join("b/c.txt"), b"two").unwrap();
         assert_eq!(workspace_digest(temp.path()).unwrap().len(), 71);
-    }
-
-    #[test]
-    fn comparison_reports_only_real_file_differences() {
-        let local = TempDir::new().unwrap();
-        let remote = TempDir::new().unwrap();
-        std::fs::write(local.path().join("same.md"), b"same").unwrap();
-        std::fs::write(remote.path().join("same.md"), b"same").unwrap();
-        std::fs::write(local.path().join("local.md"), b"local").unwrap();
-        std::fs::write(remote.path().join("remote.md"), b"remote").unwrap();
-        std::fs::write(local.path().join("changed.md"), b"before").unwrap();
-        std::fs::write(remote.path().join("changed.md"), b"after").unwrap();
-
-        let changes = compare_skill_trees(local.path(), remote.path()).unwrap();
-        assert_eq!(changes.len(), 3);
-        assert_eq!(changes[0].path, "changed.md");
-        assert_eq!(changes[0].status, "modified");
-        assert_eq!(changes[1].status, "deleted");
-        assert_eq!(changes[2].status, "added");
-    }
-
-    #[test]
-    fn github_fork_parser_accepts_git_and_https_urls_only() {
-        assert_eq!(
-            github_repository_identity("https://github.com/example/TjuaeHub.git"),
-            Some(("example".to_owned(), "TjuaeHub".to_owned()))
-        );
-        assert_eq!(
-            github_repository_identity("git@github.com:example/TjuaeHub.git"),
-            Some(("example".to_owned(), "TjuaeHub".to_owned()))
-        );
-        assert_eq!(github_repository_identity("https://example.com/TjuaeHub.git"), None);
     }
 
     #[tokio::test]
@@ -1305,9 +1113,27 @@ mod tests {
                 path: "skills/example".to_owned(),
                 name: "示例技能".to_owned(),
                 description: "用于验证本地快照。".to_owned(),
-                version: "1.0.0".to_owned(),
                 categories: vec!["测试".to_owned()],
-                digest: format!("sha256-{}", "b".repeat(64)),
+                tags: vec!["示例".to_owned()],
+                latest_version: "1.0.0".to_owned(),
+                versions: vec![MarketSkillVersion {
+                    version: "1.0.0".to_owned(),
+                    revision: "a".repeat(40),
+                    digest: format!("sha256-{}", "b".repeat(64)),
+                    readme: "# 示例技能".to_owned(),
+                    files: vec![
+                        MarketSkillFile {
+                            path: SKILL_PACKAGE_MANIFEST.to_owned(),
+                            size: 128,
+                            sha256: "c".repeat(64),
+                        },
+                        MarketSkillFile {
+                            path: SKILL_ENTRY_FILE.to_owned(),
+                            size: 256,
+                            sha256: "d".repeat(64),
+                        },
+                    ],
+                }],
             }],
         };
 

@@ -14,7 +14,7 @@ use crate::cli::{
     ConfigCronJobSkillCommand, ConfigCronJobsArgs, ConfigCronJobsCommand, ConfigMcpArgs, ConfigMcpCommand,
     ConfigMcpOauthCommand, ConfigMcpServersCommand, ConfigProviderModelsCommand, ConfigProvidersArgs,
     ConfigProvidersCommand, ConfigSettingsArgs, ConfigSettingsClientCommand, ConfigSettingsCommand, ConfigSkillsArgs,
-    ConfigSkillsCommand, ConfigSkillsMarketCommand,
+    ConfigSkillsCommand,
 };
 use crate::commands::config_capabilities;
 
@@ -304,7 +304,7 @@ async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<
         ConfigSkillsCommand::List => {
             let command = "config skills list";
             let env = ConfigEnv::from_env(command)?;
-            let data = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+            let data = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
             print_envelope(data, meta(None), command)
         }
         ConfigSkillsCommand::Create => {
@@ -313,84 +313,35 @@ async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<
                 "config skills create",
                 Method::POST,
                 "/api/skills/create",
-                "/api/skills",
+                "/api/skills/catalog",
                 false,
             )
             .await
         }
-        ConfigSkillsCommand::Import => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config skills import",
-                Method::POST,
-                "/api/skills/import",
-                "/api/skills",
-                false,
-            )
-            .await
-        }
-        ConfigSkillsCommand::Clone => {
-            let command = "config skills clone";
-            let env = ConfigEnv::from_env(command)?;
-            let mut payload = read_stdin_payload(command)?;
-            let repository_url = take_required_string_field(&mut payload, "repository_url", command)?;
-            reject_remaining_fields(&payload, command)?;
-            let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-            let data = request_json(
-                client,
-                &env,
-                Method::POST,
-                "/api/skills/clone",
-                Some(json!({ "repositoryUrl": repository_url })),
-                command,
-            )
-            .await?;
-            let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-            let mut extra = Map::new();
-            extra.insert("before".into(), redact_meta_value(before));
-            extra.insert("after".into(), redact_meta_value(after));
-            print_envelope(data, meta_from_map(extra), command)
-        }
+        ConfigSkillsCommand::Import => run_skill_import(client).await,
         ConfigSkillsCommand::Delete => run_skill_delete(client).await,
-        ConfigSkillsCommand::Market(args) => match args.command {
-            ConfigSkillsMarketCommand::List => {
-                run_no_input_request(
-                    client,
-                    "config skills market list",
-                    Method::GET,
-                    "/api/skills/market",
-                    false,
-                )
-                .await
-            }
-            ConfigSkillsMarketCommand::Install => run_skill_market_mutation(client, "install").await,
-            ConfigSkillsMarketCommand::Update => run_skill_market_mutation(client, "update").await,
-        },
         ConfigSkillsCommand::Copy => run_skill_copy(client).await,
         ConfigSkillsCommand::Preferences => run_skill_preferences(client).await,
     }
 }
 
-async fn run_skill_market_mutation(client: &reqwest::Client, operation: &'static str) -> Result<(), ConfigError> {
-    let command = if operation == "install" {
-        "config skills market install"
-    } else {
-        "config skills market update"
-    };
+async fn run_skill_import(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config skills import";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
-    let market_id = take_required_string_field(&mut payload, "market_id", command)?;
-    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let archive_path = take_required_string_field(&mut payload, "archive_path", command)?;
     reject_remaining_fields(&payload, command)?;
-    let before = request_json(client, &env, Method::GET, "/api/skills/market", None, command).await?;
-    let path = format!(
-        "/api/skills/market/{}/{}/{}",
-        encode_path_segment(&market_id),
-        encode_path_segment(&slug),
-        operation
-    );
-    let data = request_json(client, &env, Method::POST, &path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, "/api/skills/market", None, command).await?;
+    let before = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        "/api/skills/import",
+        Some(json!({ "archivePath": archive_path })),
+        command,
+    )
+    .await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
     let mut extra = Map::new();
     extra.insert("before".into(), redact_meta_value(before));
     extra.insert("after".into(), redact_meta_value(after));
@@ -401,21 +352,24 @@ async fn run_skill_copy(client: &reqwest::Client) -> Result<(), ConfigError> {
     let command = "config skills copy";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
+    let source = take_required_string_field(&mut payload, "source", command)?;
+    let namespace = take_required_string_field(&mut payload, "namespace", command)?;
     let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let version = take_required_string_field(&mut payload, "version", command)?;
     let target_slug = take_required_string_field(&mut payload, "target_slug", command)?;
     reject_remaining_fields(&payload, command)?;
-    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-    let path = format!("/api/skills/{}/copy", encode_path_segment(&slug));
+    let before = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
+    let path = skill_catalog_operation_path(&source, &namespace, &slug, "copy-to-mine");
     let data = request_json(
         client,
         &env,
         Method::POST,
         &path,
-        Some(json!({ "targetSlug": target_slug })),
+        Some(json!({ "version": version, "targetSlug": target_slug })),
         command,
     )
     .await?;
-    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
     let mut extra = Map::new();
     extra.insert("before".into(), redact_meta_value(before));
     extra.insert("after".into(), redact_meta_value(after));
@@ -426,15 +380,19 @@ async fn run_skill_preferences(client: &reqwest::Client) -> Result<(), ConfigErr
     let command = "config skills preferences";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
+    let source = take_required_string_field(&mut payload, "source", command)?;
+    let namespace = take_required_string_field(&mut payload, "namespace", command)?;
     let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let selected_version = take_required_string_field(&mut payload, "selected_version", command)?;
     let object = payload.as_object_mut().ok_or_else(|| {
         ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "JSON 载荷必须是对象").field("field", "stdin")
     })?;
     let enabled = take_required_bool_field(object, "enabled", command)?;
     let auto_inject = take_required_bool_field(object, "auto_inject", command)?;
+    let follow_latest = take_required_bool_field(object, "follow_latest", command)?;
     reject_remaining_fields(&payload, command)?;
-    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
-    let path = format!("/api/skills/{}/preferences", encode_path_segment(&slug));
+    let before = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
+    let path = skill_catalog_operation_path(&source, &namespace, &slug, "preferences");
     let data = request_json(
         client,
         &env,
@@ -443,11 +401,13 @@ async fn run_skill_preferences(client: &reqwest::Client) -> Result<(), ConfigErr
         Some(json!({
             "enabled": enabled,
             "autoInject": auto_inject,
+            "selectedVersion": selected_version,
+            "followLatest": follow_latest,
         })),
         command,
     )
     .await?;
-    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
     let mut extra = Map::new();
     extra.insert("before".into(), redact_meta_value(before));
     extra.insert("after".into(), redact_meta_value(after));
@@ -457,16 +417,32 @@ async fn run_skill_preferences(client: &reqwest::Client) -> Result<(), ConfigErr
 async fn run_skill_delete(client: &reqwest::Client) -> Result<(), ConfigError> {
     let command = "config skills delete";
     let env = ConfigEnv::from_env(command)?;
-    let payload = read_stdin_payload(command)?;
-    let skill_name = required_string_field(&payload, "skill_name", command)?;
-    let path = format!("/api/skills/{}", encode_path_segment(&skill_name));
-    let before = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let mut payload = read_stdin_payload(command)?;
+    let source = take_required_string_field(&mut payload, "source", command)?;
+    let namespace = take_required_string_field(&mut payload, "namespace", command)?;
+    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = skill_catalog_resource_path(&source, &namespace, &slug);
+    let before = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
     let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, "/api/skills", None, command).await?;
+    let after = request_json(client, &env, Method::GET, "/api/skills/catalog", None, command).await?;
     let mut extra = Map::new();
     extra.insert("before".into(), redact_meta_value(before));
     extra.insert("after".into(), redact_meta_value(after));
     print_envelope(data, meta_from_map(extra), command)
+}
+
+fn skill_catalog_resource_path(source: &str, namespace: &str, slug: &str) -> String {
+    format!(
+        "/api/skills/catalog/{}/{}/{}",
+        encode_path_segment(source),
+        encode_path_segment(namespace),
+        encode_path_segment(slug)
+    )
+}
+
+fn skill_catalog_operation_path(source: &str, namespace: &str, slug: &str, operation: &str) -> String {
+    format!("{}/{}", skill_catalog_resource_path(source, namespace, slug), operation)
 }
 
 async fn run_mcp(client: &reqwest::Client, args: ConfigMcpArgs) -> Result<(), ConfigError> {

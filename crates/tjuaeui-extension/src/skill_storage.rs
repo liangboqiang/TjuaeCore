@@ -9,6 +9,12 @@ use crate::error::ExtensionError;
 pub struct SkillPaths {
     /// One immediate child directory per installed skill package.
     pub user_skills_dir: PathBuf,
+    /// Provider/version snapshots used only by the runtime. These snapshots
+    /// never appear in “我的技能” and contain no user preferences.
+    pub runtime_cache_dir: PathBuf,
+    /// Optional developer checkout of TjuaeHub. It is never required for
+    /// ordinary catalog browsing or runtime loading.
+    pub tjuae_hub_worktree_dir: Option<PathBuf>,
     /// User-authored assistant rules. Rules are not skill packages.
     pub assistant_rules_dir: PathBuf,
 }
@@ -16,8 +22,37 @@ pub struct SkillPaths {
 pub fn resolve_skill_paths(_app_resource_dir: &Path, data_dir: &Path) -> SkillPaths {
     SkillPaths {
         user_skills_dir: data_dir.join("skills"),
+        runtime_cache_dir: data_dir.join("skill-runtime-cache"),
+        tjuae_hub_worktree_dir: resolve_tjuae_hub_worktree(),
         assistant_rules_dir: data_dir.join("assistant-rules"),
     }
+}
+
+pub(crate) fn resolve_tjuae_hub_worktree() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("TJUAE_HUB_WORKTREE") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        append_tjuae_hub_candidates(&mut candidates, &current);
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        append_tjuae_hub_candidates(&mut candidates, directory);
+    }
+    candidates.into_iter().find_map(|candidate| {
+        let canonical = std::fs::canonicalize(candidate).ok()?;
+        (canonical.join("skills").is_dir() && canonical.join("schemas").is_dir()).then_some(canonical)
+    })
+}
+
+fn append_tjuae_hub_candidates(candidates: &mut Vec<PathBuf>, start: &Path) {
+    // Electron starts the bundled Core with the application data directory as
+    // its working directory. The executable still lives below the development
+    // checkout, so walking a short ancestor chain reliably finds the sibling
+    // TjuaeHub repository without changing installed-product behaviour.
+    candidates.extend(start.ancestors().take(10).map(|ancestor| ancestor.join("TjuaeHub")));
 }
 
 pub async fn read_assistant_rule(

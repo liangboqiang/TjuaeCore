@@ -97,6 +97,9 @@ pub enum ExtensionError {
 
     #[error("{0}")]
     JsonParse(#[from] serde_json::Error),
+
+    #[error("技能压缩包无效：{0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 #[cfg(test)]

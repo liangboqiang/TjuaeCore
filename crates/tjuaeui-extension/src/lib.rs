@@ -17,6 +17,7 @@ pub mod registry;
 mod registry_helpers;
 pub mod resolvers;
 pub mod routes;
+pub mod skill_catalog;
 pub mod skill_package;
 pub mod skill_routes;
 pub mod skill_storage;
@@ -46,12 +47,16 @@ pub use watcher::ExtensionWatcher;
 pub use hub::{HubIndexManager, HubInstaller};
 pub use hub_routes::{HubRouterState, hub_routes};
 pub use routes::{ExtensionRouterState, extension_routes};
+pub use skill_catalog::{
+    CatalogDetail, CatalogFile, CatalogFileContent, CatalogFileDiff, CatalogPage, CatalogSecurityReport, CatalogSkill,
+    SkillSpace, catalog_detail, catalog_file_content, compare_catalog_versions, copy_catalog_version_to_mine,
+    ensure_runtime_snapshot, list_catalog, publish_mine_to_tjuae_hub, runtime_skill_path,
+};
 pub use skill_package::{
-    InstalledSkill, MarketFileComparison, MarketIndex, MarketInfo, MarketSkillComparison, MarketSkillEntry,
-    MarketSkillPublication, MarketSyncState, SkillManifest, SkillPreferences, SkillSource, clone_skill,
-    compare_market_skill, copy_skill, create_skill, delete_installed_skill, ensure_skill_repositories, import_skill,
-    initialize_skill_workspaces, install_market_skill, list_installed_skills, load_installed_skill, market_indexes,
-    market_sync_state, publish_market_skill, resolve_installed_skill, update_skill_preferences,
+    InstalledSkill, MarketIndex, MarketInfo, MarketSkillEntry, MarketSkillFile, MarketSkillVersion, SkillManifest,
+    create_skill, delete_installed_skill, ensure_skill_repositories, export_skill_archive,
+    export_skill_directory_archive, import_skill_archive, initialize_skill_workspaces, list_installed_skills,
+    load_installed_skill, resolve_installed_skill, tjuae_hub_index,
 };
 pub use skill_routes::{SkillRouterState, skill_routes};
 pub use skill_storage::{

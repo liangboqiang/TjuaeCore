@@ -865,10 +865,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SkillResolver for RecordingSkillResolverForRelay {
-        async fn auto_inject_names(&self) -> Vec<String> {
-            Vec::new()
-        }
-
         async fn resolve_skills(&self, _names: &[String]) -> Vec<tjuaeui_extension::ResolvedAgentSkill> {
             Vec::new()
         }

@@ -1,300 +1,483 @@
 #![allow(clippy::disallowed_types)]
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Json, Path as AxumPath, State};
+use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::routing::{delete, get, post, put};
+use futures_util::future::join_all;
 use tjuaeui_api_types::{
-    ApiResponse, CloneSkillRequest, CopySkillRequest, CreateSkillRequest, ImportSkillRequest,
-    MarketFileComparisonResponse, MarketInfoResponse, MarketSkillComparisonResponse, MarketSkillResponse,
-    MarketSyncStateResponse, MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef,
-    PublishMarketSkillRequest, PublishMarketSkillResponse, ReadAssistantRuleRequest, SkillGitStatusResponse,
-    SkillPreferencesResponse, SkillSourceResponse, SkillWorkspaceResponse, UpdateSkillPreferencesRequest,
-    WriteAssistantRuleRequest,
+    ApiResponse, CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest,
+    ImportSkillRequest, ReadAssistantRuleRequest, SaveSkillFileRequest, SkillCatalogDetailResponse,
+    SkillCatalogFileContentResponse, SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse,
+    SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse,
+    SkillSourceResponse, SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery,
+    SkillVersionResponse, UpdateSkillPreferencesRequest, WriteAssistantRuleRequest,
 };
-use tjuaeui_common::{ApiError, WorkspaceGitProvisioner, WorkspaceGitState};
+use tjuaeui_common::{ApiError, WorkspaceGitProvisioner};
+use tjuaeui_db::{ISkillUserPreferenceRepository, SkillUserPreferenceRow, UpsertSkillUserPreferenceParams};
 
 use crate::classifier::AssistantRuleDispatcher;
+use crate::error::ExtensionError;
+use crate::skill_package::{SKILL_PACKAGE_MANIFEST, reseal_skill_package, save_skill_manifest_content};
 use crate::skill_storage::{self, SkillPaths};
-use crate::{InstalledSkill, MarketSyncState, SkillPreferences, SkillSource};
+use crate::{CatalogDetail, CatalogSkill, SkillSpace};
 
 #[derive(Clone)]
 pub struct SkillRouterState {
     pub skill_paths: SkillPaths,
     pub git: Arc<dyn WorkspaceGitProvisioner>,
+    pub preferences: Arc<dyn ISkillUserPreferenceRepository>,
+    pub can_write_tjuae_hub: bool,
     #[allow(clippy::type_complexity)]
     pub assistant_dispatcher: Option<Arc<dyn AssistantRuleDispatcher>>,
 }
 
 pub fn skill_routes(state: SkillRouterState) -> Router {
     Router::new()
-        .route("/api/skills", get(list_skills))
-        .route("/api/skills/market", get(list_market_skills))
+        .route("/api/skills/catalog", get(list_skill_catalog))
         .route(
-            "/api/skills/market/{market_id}/{slug}/install",
-            post(install_market_skill),
+            "/api/skills/catalog/{source}/{namespace}/{slug}",
+            get(get_skill_detail).delete(delete_skill),
         )
         .route(
-            "/api/skills/market/{market_id}/{slug}/update",
-            post(update_market_skill),
+            "/api/skills/catalog/{source}/{namespace}/{slug}/file",
+            get(get_skill_file).put(save_skill_file),
         )
         .route(
-            "/api/skills/market/{market_id}/{slug}/compare",
-            get(compare_market_skill),
+            "/api/skills/catalog/{source}/{namespace}/{slug}/compare",
+            get(compare_skill_versions),
         )
         .route(
-            "/api/skills/market/{market_id}/{slug}/publish",
-            post(publish_market_skill),
+            "/api/skills/catalog/{source}/{namespace}/{slug}/preferences",
+            put(update_preferences),
         )
-        .route("/api/skills/{slug}/copy", post(copy_skill))
-        .route("/api/skills/{slug}/preferences", put(update_preferences))
+        .route(
+            "/api/skills/catalog/{source}/{namespace}/{slug}/copy-to-mine",
+            post(copy_to_mine),
+        )
+        .route(
+            "/api/skills/catalog/{source}/{namespace}/{slug}/publish-to-tjuae-hub",
+            post(publish_to_tjuae_hub),
+        )
+        .route(
+            "/api/skills/catalog/{source}/{namespace}/{slug}/export",
+            post(export_skill),
+        )
         .route("/api/skills/import", post(import_skill))
         .route("/api/skills/create", post(create_skill))
-        .route("/api/skills/clone", post(clone_skill))
-        .route("/api/skills/{name}", delete(delete_skill))
-        .route("/api/skills/materialize-for-agent", post(materialize_for_agent))
         .route("/api/skills/assistant-rule/read", post(read_assistant_rule))
         .route("/api/skills/assistant-rule/write", post(write_assistant_rule))
         .route("/api/skills/assistant-rule/{id}", delete(delete_assistant_rule))
         .with_state(state)
 }
 
-async fn list_skills(
+async fn list_skill_catalog(
     State(state): State<SkillRouterState>,
-) -> Result<Json<ApiResponse<Vec<SkillWorkspaceResponse>>>, ApiError> {
-    let items = crate::list_installed_skills(&state.skill_paths.user_skills_dir).await?;
-    let mut response = Vec::with_capacity(items.len());
-    for item in items {
-        response.push(to_workspace_response(&state, item).await);
+    Query(query): Query<SkillCatalogQuery>,
+) -> Result<Json<ApiResponse<SkillCatalogPageResponse>>, ApiError> {
+    let mut requested = parse_sources(&query.sources)?;
+    // Provider cursors are intentionally opaque and incompatible with one
+    // another (SkillHub uses page numbers, ClawHub uses opaque tokens). An
+    // aggregate query therefore cannot expose one provider's cursor as if it
+    // represented all sources. Pagination remains available for one selected
+    // source; the all-source directory is search-first and returns one merged
+    // page.
+    let aggregate_cursor_allowed = requested.len() == 1;
+    let preferences = state
+        .preferences
+        .list()
+        .await
+        .map_err(ExtensionError::from)?
+        .into_iter()
+        .map(|preference| {
+            (
+                preference_key(&preference.source, &preference.namespace, &preference.slug),
+                preference,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if query.enabled == Some(true) || query.auto_inject == Some(true) {
+        requested.retain(|source| {
+            preferences.values().any(|preference| {
+                preference.source == source.id()
+                    && preference.enabled
+                    && (query.auto_inject != Some(true) || preference.auto_inject)
+            })
+        });
     }
-    Ok(Json(ApiResponse::ok(response)))
-}
-
-async fn list_market_skills(
-    State(state): State<SkillRouterState>,
-) -> Result<Json<ApiResponse<Vec<MarketSkillResponse>>>, ApiError> {
-    let installed = crate::list_installed_skills(&state.skill_paths.user_skills_dir).await?;
-    let indexes = crate::market_indexes().await?;
-    let mut response = Vec::new();
-    for index in indexes {
-        let market = MarketInfoResponse {
-            id: index.market.id.clone(),
-            name: index.market.name.clone(),
-            repository: index.repository.clone(),
-            revision: index.revision.clone(),
-        };
-        for entry in index.skills.clone() {
-            let local = installed.iter().find(|skill| {
-                matches!(
-                    &skill.source,
-                    SkillSource::Market { market_id, repository, path, .. }
-                        if market_id == &market.id && repository == &market.repository && path == &entry.path
-                )
-            });
-            let installed_version = local.map(|skill| skill.version.clone());
-            let sync_state = crate::market_sync_state(local, &index, &entry, state.git.clone()).await?;
-            response.push(MarketSkillResponse {
-                id: entry.id.clone(),
-                slug: entry.id,
-                name: entry.name,
-                description: entry.description,
-                version: entry.version,
-                path: entry.path,
-                digest: entry.digest,
-                categories: entry.categories,
-                market: market.clone(),
-                installed: local.is_some(),
-                installed_version,
-                sync_state: to_sync_state_response(sync_state),
-            });
+    let mut items = Vec::new();
+    let mut next_cursor = None;
+    let limit = query.limit.unwrap_or(60);
+    let provider_results = join_all(requested.into_iter().map(|source| {
+        let root = state.skill_paths.user_skills_dir.clone();
+        let q = query.q.clone();
+        let cursor = query.cursor.clone();
+        let git = state.git.clone();
+        async move {
+            let page = crate::list_catalog(&root, source, &q, "name", cursor.as_deref(), limit, git).await;
+            (source, page)
+        }
+    }))
+    .await;
+    for (source, result) in provider_results {
+        match result {
+            Ok(page) => {
+                if aggregate_cursor_allowed && next_cursor.is_none() {
+                    next_cursor = page.next_cursor.clone();
+                }
+                items.extend(page.items.into_iter().map(|item| {
+                    let identity = identity_for(&item);
+                    let key = preference_key(source_id(identity.source), &identity.namespace, &identity.slug);
+                    catalog_item_response(item, preferences.get(&key), state.can_write_tjuae_hub)
+                }));
+            }
+            Err(error) => tracing::warn!(source = source.id(), %error, "skill provider unavailable"),
         }
     }
+    items.retain(|item| matches_filters(item, &query));
+    items.sort_by_key(|item| item.name.to_lowercase());
+    let total = items.len() as u64;
+    Ok(Json(ApiResponse::ok(SkillCatalogPageResponse {
+        items,
+        total,
+        next_cursor,
+    })))
+}
+
+async fn get_skill_detail(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    Query(query): Query<SkillVersionQuery>,
+) -> Result<Json<ApiResponse<SkillCatalogDetailResponse>>, ApiError> {
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let preference = state
+        .preferences
+        .get(&source, &namespace, &slug)
+        .await
+        .map_err(ExtensionError::from)?;
+    let requested_version = query.version.as_deref().or_else(|| {
+        preference
+            .as_ref()
+            .filter(|value| !value.follow_latest)
+            .and_then(|value| value.selected_version.as_deref())
+    });
+    let detail = crate::catalog_detail(
+        &state.skill_paths.user_skills_dir,
+        space,
+        &namespace,
+        &slug,
+        requested_version,
+        state.git.clone(),
+    )
+    .await?;
+    let response = detail_response(
+        detail,
+        preference.as_ref(),
+        requested_version,
+        state.can_write_tjuae_hub,
+    )?;
     Ok(Json(ApiResponse::ok(response)))
 }
 
-async fn compare_market_skill(
+async fn get_skill_file(
     State(state): State<SkillRouterState>,
-    AxumPath((market_id, slug)): AxumPath<(String, String)>,
-) -> Result<Json<ApiResponse<MarketSkillComparisonResponse>>, ApiError> {
-    let comparison =
-        crate::compare_market_skill(&state.skill_paths.user_skills_dir, &market_id, &slug, state.git.clone()).await?;
-    Ok(Json(ApiResponse::ok(MarketSkillComparisonResponse {
-        slug: comparison.slug,
-        base_revision: comparison.base_revision,
-        remote_revision: comparison.remote_revision,
-        sync_state: to_sync_state_response(comparison.sync_state),
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    Query(query): Query<SkillCatalogFileQuery>,
+) -> Result<Json<ApiResponse<SkillCatalogFileContentResponse>>, ApiError> {
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let local_hub_root = state
+        .skill_paths
+        .tjuae_hub_worktree_dir
+        .as_ref()
+        .map(|root| root.join("skills"));
+    let editable_hub_worktree = if space == SkillSpace::TjuaeHub && state.can_write_tjuae_hub {
+        match local_hub_root.as_ref() {
+            Some(root) => crate::load_installed_skill(&root.join(&slug))
+                .await
+                .ok()
+                .is_some_and(|skill| version_is_editable(query.version.as_deref(), &skill.version)),
+            None => false,
+        }
+    } else {
+        false
+    };
+    let file = if editable_hub_worktree
+        && local_hub_root
+            .as_ref()
+            .is_some_and(|root| root.join(&slug).join(&query.path).is_file())
+    {
+        let root = local_hub_root.as_ref().expect("checked above");
+        let target = safe_local_file(root, &slug, &query.path)?;
+        let content = tokio::fs::read_to_string(&target).await.map_err(ExtensionError::from)?;
+        crate::CatalogFileContent {
+            path: query.path.clone(),
+            size: content.len() as u64,
+            content,
+        }
+    } else {
+        crate::catalog_file_content(
+            &state.skill_paths.user_skills_dir,
+            space,
+            &namespace,
+            &slug,
+            &query.path,
+            query.version.as_deref(),
+        )
+        .await?
+    };
+    Ok(Json(ApiResponse::ok(SkillCatalogFileContentResponse {
+        path: file.path,
+        content: file.content,
+        size: file.size,
+        editable: space == SkillSpace::Mine || editable_hub_worktree,
+    })))
+}
+
+async fn save_skill_file(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<SaveSkillFileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillCatalogFileContentResponse>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    let space = SkillSpace::parse(&source)?;
+    let _ = namespace;
+    let root = match space {
+        SkillSpace::Mine => state.skill_paths.user_skills_dir.clone(),
+        SkillSpace::TjuaeHub if state.can_write_tjuae_hub => state
+            .skill_paths
+            .tjuae_hub_worktree_dir
+            .as_ref()
+            .map(|root| root.join("skills"))
+            .ok_or_else(|| ExtensionError::InvalidRequest("未配置 TjuaeHub 开发工作副本".into()))?,
+        _ => return Err(ExtensionError::InvalidRequest("这个技能来源是只读的".into()).into()),
+    };
+    let directory = root.join(&slug);
+    crate::load_installed_skill(&directory).await?;
+    let target = safe_local_file(&root, &slug, &request.path)?;
+    if request.path == SKILL_PACKAGE_MANIFEST {
+        save_skill_manifest_content(&directory, &request.content).await?;
+    } else {
+        tokio::fs::write(&target, request.content.as_bytes())
+            .await
+            .map_err(ExtensionError::from)?;
+        reseal_skill_package(&directory).await?;
+    }
+    Ok(Json(ApiResponse::ok(SkillCatalogFileContentResponse {
+        path: request.path,
+        size: request.content.len() as u64,
+        content: request.content,
+        editable: true,
+    })))
+}
+
+async fn compare_skill_versions(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    Query(query): Query<CompareSkillVersionsQuery>,
+) -> Result<Json<ApiResponse<SkillVersionComparisonResponse>>, ApiError> {
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let comparison = crate::compare_catalog_versions(
+        &state.skill_paths.user_skills_dir,
+        space,
+        &namespace,
+        &slug,
+        &query.base,
+        &query.target,
+        state.git.clone(),
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(SkillVersionComparisonResponse {
+        identity: identity(source_response(space), namespace, slug),
+        base_version: query.base,
+        target_version: query.target,
         files: comparison
-            .files
             .into_iter()
-            .map(|file| MarketFileComparisonResponse {
+            .map(|file| SkillVersionFileDiffResponse {
                 path: file.path,
                 status: file.status,
                 binary: file.binary,
-                local_content: file.local_content,
-                remote_content: file.remote_content,
+                base_content: file.base_content,
+                target_content: file.target_content,
             })
             .collect(),
     })))
 }
 
-async fn publish_market_skill(
+async fn update_preferences(
     State(state): State<SkillRouterState>,
-    AxumPath((market_id, slug)): AxumPath<(String, String)>,
-    body: Result<Json<PublishMarketSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<PublishMarketSkillResponse>>, ApiError> {
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<UpdateSkillPreferencesRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillPreferencesResponse>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    let result = crate::publish_market_skill(
-        &state.skill_paths.user_skills_dir,
-        &market_id,
-        &slug,
-        &request.fork_repository_url,
-        &request.message,
-        state.git.clone(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(PublishMarketSkillResponse {
-        branch: result.branch,
-        commit: result.commit,
-        compare_url: result.compare_url,
-    })))
-}
-
-fn to_sync_state_response(state: MarketSyncState) -> MarketSyncStateResponse {
-    match state {
-        MarketSyncState::NotInstalled => MarketSyncStateResponse::NotInstalled,
-        MarketSyncState::Synced => MarketSyncStateResponse::Synced,
-        MarketSyncState::LocalChanged => MarketSyncStateResponse::LocalChanged,
-        MarketSyncState::UpdateAvailable => MarketSyncStateResponse::UpdateAvailable,
-        MarketSyncState::Diverged => MarketSyncStateResponse::Diverged,
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    if request.auto_inject && !request.enabled {
+        return Err(ExtensionError::InvalidRequest("自动注入的技能必须先启用".into()).into());
     }
+    let existing = state
+        .preferences
+        .get(&source, &namespace, &slug)
+        .await
+        .map_err(ExtensionError::from)?;
+    let mut selected_version = request
+        .selected_version
+        .clone()
+        .or_else(|| existing.as_ref().and_then(|value| value.selected_version.clone()));
+    // Disabling and assistant-injection changes must remain available while a
+    // remote Hub is offline. An explicit version is validated by the runtime
+    // snapshot operation only when it is actually enabled. `followLatest`
+    // deliberately refreshes provider metadata before enabling.
+    if request.enabled && (request.follow_latest || selected_version.is_none()) {
+        let detail = crate::catalog_detail(
+            &state.skill_paths.user_skills_dir,
+            space,
+            &namespace,
+            &slug,
+            request.selected_version.as_deref(),
+            state.git.clone(),
+        )
+        .await?;
+        selected_version = request
+            .selected_version
+            .clone()
+            .or_else(|| detail.versions.first().cloned())
+            .or_else(|| detail.skill.version.clone());
+    }
+    if request.enabled {
+        let selected_version = selected_version
+            .as_deref()
+            .ok_or_else(|| ExtensionError::InvalidVersion {
+                version: String::new(),
+                reason: "该来源没有可用版本".to_owned(),
+            })?;
+        crate::ensure_runtime_snapshot(
+            &state.skill_paths.user_skills_dir,
+            &state.skill_paths.runtime_cache_dir,
+            space,
+            &namespace,
+            &slug,
+            selected_version,
+            state.git.clone(),
+        )
+        .await?;
+    }
+    let preference = state
+        .preferences
+        .upsert(UpsertSkillUserPreferenceParams {
+            source: &source,
+            namespace: &namespace,
+            slug: &slug,
+            selected_version: selected_version.as_deref(),
+            follow_latest: request.follow_latest,
+            enabled: request.enabled,
+            auto_inject: request.auto_inject,
+        })
+        .await
+        .map_err(ExtensionError::from)?;
+    Ok(Json(ApiResponse::ok(preference_response(Some(&preference)))))
 }
 
-async fn install_market_skill(
+async fn copy_to_mine(
     State(state): State<SkillRouterState>,
-    AxumPath((market_id, slug)): AxumPath<(String, String)>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
-    let skill = crate::install_market_skill(
-        &state.skill_paths.user_skills_dir,
-        &market_id,
-        &slug,
-        false,
-        state.git.clone(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
-}
-
-async fn update_market_skill(
-    State(state): State<SkillRouterState>,
-    AxumPath((market_id, slug)): AxumPath<(String, String)>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
-    let skill = crate::install_market_skill(
-        &state.skill_paths.user_skills_dir,
-        &market_id,
-        &slug,
-        true,
-        state.git.clone(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
-}
-
-async fn copy_skill(
-    State(state): State<SkillRouterState>,
-    AxumPath(slug): AxumPath<String>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
     body: Result<Json<CopySkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
+) -> Result<Json<ApiResponse<SkillOperationResponse>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    let skill = crate::copy_skill(
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    if space == SkillSpace::Mine {
+        return Err(ExtensionError::InvalidRequest("该技能已在“我的技能”中".into()).into());
+    }
+    let copied = crate::copy_catalog_version_to_mine(
         &state.skill_paths.user_skills_dir,
+        space,
+        &namespace,
         &slug,
+        &request.version,
         &request.target_slug,
         state.git.clone(),
     )
     .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
+    Ok(Json(ApiResponse::ok(operation_for_mine(&copied.slug, &copied.version))))
 }
 
-async fn update_preferences(
+async fn export_skill(
     State(state): State<SkillRouterState>,
-    AxumPath(slug): AxumPath<String>,
-    body: Result<Json<UpdateSkillPreferencesRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<ExportSkillRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<bool>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    let skill = crate::update_skill_preferences(
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let snapshot = crate::ensure_runtime_snapshot(
         &state.skill_paths.user_skills_dir,
+        &state.skill_paths.runtime_cache_dir,
+        space,
+        &namespace,
         &slug,
-        SkillPreferences {
-            enabled: request.enabled,
-            auto_inject: request.auto_inject,
-        },
+        &request.version,
+        state.git.clone(),
     )
     .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
+    crate::export_skill_directory_archive(&snapshot, Path::new(&request.output_path)).await?;
+    Ok(Json(ApiResponse::ok(true)))
 }
 
-async fn to_workspace_response(state: &SkillRouterState, skill: InstalledSkill) -> SkillWorkspaceResponse {
-    let git_status = state
-        .git
-        .workspace_git_state(&skill.path)
-        .await
-        .unwrap_or(WorkspaceGitState::Unknown);
-    SkillWorkspaceResponse {
-        id: skill.id,
-        slug: skill.slug,
-        name: skill.name,
-        description: skill.description,
-        version: skill.version,
-        path: skill.path.to_string_lossy().into_owned(),
-        source: match skill.source {
-            SkillSource::Local => SkillSourceResponse::Local,
-            SkillSource::Market {
-                market_id,
-                repository,
-                path,
-                revision,
-            } => SkillSourceResponse::Market {
-                market_id,
-                repository,
-                path,
-                revision,
-            },
-        },
-        categories: skill.categories,
-        preferences: SkillPreferencesResponse {
-            enabled: skill.preferences.enabled,
-            auto_inject: skill.preferences.auto_inject,
-        },
-        git_status: match git_status {
-            WorkspaceGitState::Clean => SkillGitStatusResponse::Clean,
-            WorkspaceGitState::Modified => SkillGitStatusResponse::Modified,
-            WorkspaceGitState::Conflicted => SkillGitStatusResponse::Conflicted,
-            WorkspaceGitState::Unknown => SkillGitStatusResponse::Unknown,
-        },
+async fn publish_to_tjuae_hub(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<CopySkillRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillOperationResponse>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    if SkillSpace::parse(&source)? != SkillSpace::Mine || !state.can_write_tjuae_hub {
+        return Err(ExtensionError::InvalidRequest("当前用户没有 TjuaeHub 开发权限".into()).into());
     }
+    let _ = route_namespace(&namespace);
+    let hub = state
+        .skill_paths
+        .tjuae_hub_worktree_dir
+        .as_ref()
+        .ok_or_else(|| ExtensionError::InvalidRequest("未配置 TjuaeHub 开发工作副本".into()))?;
+    let published = crate::publish_mine_to_tjuae_hub(
+        &state.skill_paths.user_skills_dir,
+        hub,
+        &slug,
+        &request.version,
+        &request.target_slug,
+        state.git.clone(),
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(SkillOperationResponse {
+        identity: identity(SkillSourceResponse::TjuaeHub, "official".into(), published.slug),
+        version: published.version,
+    })))
 }
 
 async fn import_skill(
     State(state): State<SkillRouterState>,
     body: Result<Json<ImportSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
+) -> Result<Json<ApiResponse<SkillOperationResponse>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    let skill = crate::import_skill(
+    let skill = crate::import_skill_archive(
         &state.skill_paths.user_skills_dir,
-        Path::new(&request.skill_path),
+        Path::new(&request.archive_path),
         state.git.clone(),
     )
     .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
+    Ok(Json(ApiResponse::ok(operation_for_mine(&skill.slug, &skill.version))))
 }
 
 async fn create_skill(
     State(state): State<SkillRouterState>,
     body: Result<Json<CreateSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
+) -> Result<Json<ApiResponse<SkillOperationResponse>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
     let skill = crate::create_skill(
         &state.skill_paths.user_skills_dir,
@@ -304,53 +487,210 @@ async fn create_skill(
         state.git.clone(),
     )
     .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
-}
-
-async fn clone_skill(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<CloneSkillRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillWorkspaceResponse>>, ApiError> {
-    let Json(request) = body.map_err(ApiError::from)?;
-    let skill = crate::clone_skill(
-        &state.skill_paths.user_skills_dir,
-        &request.repository_url,
-        state.git.clone(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(to_workspace_response(&state, skill).await)))
+    Ok(Json(ApiResponse::ok(operation_for_mine(&skill.slug, &skill.version))))
 }
 
 async fn delete_skill(
     State(state): State<SkillRouterState>,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    crate::delete_installed_skill(&state.skill_paths.user_skills_dir, &name).await?;
-    Ok(Json(ApiResponse::success()))
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+) -> Result<Json<ApiResponse<bool>>, ApiError> {
+    let namespace = route_namespace(&namespace);
+    if SkillSpace::parse(&source)? != SkillSpace::Mine {
+        return Err(ExtensionError::InvalidRequest("远程来源是只读目录，不能从本机删除".into()).into());
+    }
+    crate::delete_installed_skill(&state.skill_paths.user_skills_dir, &slug).await?;
+    state
+        .preferences
+        .delete(&source, &namespace, &slug)
+        .await
+        .map_err(ExtensionError::from)?;
+    Ok(Json(ApiResponse::ok(true)))
 }
 
-async fn materialize_for_agent(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<MaterializeSkillsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<MaterializeSkillsResponse>>, ApiError> {
-    let Json(request) = body.map_err(ApiError::from)?;
-    if request.conversation_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("conversationId 不能为空".into()));
+fn detail_response(
+    detail: CatalogDetail,
+    preference: Option<&SkillUserPreferenceRow>,
+    requested_version: Option<&str>,
+    can_write_hub: bool,
+) -> Result<SkillCatalogDetailResponse, ExtensionError> {
+    let versions = detail
+        .versions
+        .iter()
+        .map(|version| SkillVersionResponse {
+            version: version.clone(),
+            content_hash: None,
+            published_at: None,
+        })
+        .collect::<Vec<_>>();
+    let selected = requested_version
+        .or(preference.and_then(|value| value.selected_version.as_deref()))
+        .or(detail.skill.version.as_deref())
+        .unwrap_or_else(|| detail.versions.first().map(String::as_str).unwrap_or("0.0.0"))
+        .to_owned();
+    if !detail.versions.is_empty() && !detail.versions.iter().any(|version| version == &selected) {
+        return Err(ExtensionError::InvalidVersion {
+            version: selected,
+            reason: "该来源没有这个版本".into(),
+        });
     }
-    let mut skills = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for reference in &request.skills {
-        let Some(skill) = crate::resolve_installed_skill(&state.skill_paths.user_skills_dir, reference).await? else {
-            continue;
-        };
-        if skill.preferences.enabled && seen.insert(skill.id.clone()) {
-            skills.push(MaterializedSkillRef {
-                name: skill.slug,
-                source_path: skill.path.to_string_lossy().into_owned(),
-            });
-        }
+    Ok(SkillCatalogDetailResponse {
+        skill: catalog_item_response(detail.skill, preference, can_write_hub),
+        selected_version: selected,
+        versions,
+        files: detail
+            .files
+            .into_iter()
+            .map(|file| SkillFileResponse {
+                path: file.path,
+                size: file.size,
+                sha256: file.sha256,
+            })
+            .collect(),
+        readme: detail.readme,
+    })
+}
+
+fn catalog_item_response(
+    skill: CatalogSkill,
+    preference: Option<&SkillUserPreferenceRow>,
+    can_write_hub: bool,
+) -> SkillCatalogItemResponse {
+    let identity = identity_for(&skill);
+    let source = identity.source;
+    SkillCatalogItemResponse {
+        identity,
+        name: skill.name,
+        description: skill.description,
+        latest_version: skill.version.unwrap_or_else(|| "0.0.0".into()),
+        categories: skill.categories,
+        tags: skill.tags,
+        icon_url: skill.icon_url,
+        author: skill.author,
+        preferences: preference_response(preference),
+        editable: source == SkillSourceResponse::Mine || (source == SkillSourceResponse::TjuaeHub && can_write_hub),
+        can_copy_to_mine: source != SkillSourceResponse::Mine,
+        can_publish_to_tjuae_hub: source == SkillSourceResponse::Mine && can_write_hub,
     }
-    Ok(Json(ApiResponse::ok(MaterializeSkillsResponse { skills })))
+}
+
+fn identity_for(skill: &CatalogSkill) -> SkillIdentityResponse {
+    let source = source_response(skill.space);
+    identity(source, skill.namespace.clone(), skill.slug.clone())
+}
+
+fn identity(source: SkillSourceResponse, namespace: String, slug: String) -> SkillIdentityResponse {
+    SkillIdentityResponse {
+        source,
+        namespace,
+        slug,
+    }
+}
+
+fn source_id(source: SkillSourceResponse) -> &'static str {
+    match source {
+        SkillSourceResponse::Mine => "mine",
+        SkillSourceResponse::TjuaeHub => "tjuae-hub",
+        SkillSourceResponse::SkillHub => "skillhub",
+        SkillSourceResponse::ClawHub => "clawhub",
+    }
+}
+
+fn source_response(space: SkillSpace) -> SkillSourceResponse {
+    match space {
+        SkillSpace::Mine => SkillSourceResponse::Mine,
+        SkillSpace::TjuaeHub => SkillSourceResponse::TjuaeHub,
+        SkillSpace::SkillHub => SkillSourceResponse::SkillHub,
+        SkillSpace::ClawHub => SkillSourceResponse::ClawHub,
+    }
+}
+
+fn preference_response(row: Option<&SkillUserPreferenceRow>) -> SkillPreferencesResponse {
+    row.map(|row| SkillPreferencesResponse {
+        selected_version: row.selected_version.clone(),
+        follow_latest: row.follow_latest,
+        enabled: row.enabled,
+        auto_inject: row.auto_inject,
+    })
+    .unwrap_or_default()
+}
+
+fn preference_key(source: &str, namespace: &str, slug: &str) -> String {
+    format!("{source}\u{1f}{namespace}\u{1f}{slug}")
+}
+
+fn route_namespace(namespace: &str) -> String {
+    if namespace == "~" {
+        String::new()
+    } else {
+        namespace.to_owned()
+    }
+}
+
+fn version_is_editable(requested: Option<&str>, workspace_version: &str) -> bool {
+    requested.is_none_or(|version| version == workspace_version)
+}
+
+fn parse_sources(value: &str) -> Result<Vec<SkillSpace>, ExtensionError> {
+    if value.trim().is_empty() {
+        return Ok(vec![
+            SkillSpace::Mine,
+            SkillSpace::TjuaeHub,
+            SkillSpace::SkillHub,
+            SkillSpace::ClawHub,
+        ]);
+    }
+    value.split(',').map(|item| SkillSpace::parse(item.trim())).collect()
+}
+
+fn matches_filters(item: &SkillCatalogItemResponse, query: &SkillCatalogQuery) -> bool {
+    if query.enabled.is_some_and(|enabled| item.preferences.enabled != enabled)
+        || query
+            .auto_inject
+            .is_some_and(|enabled| item.preferences.auto_inject != enabled)
+    {
+        return false;
+    }
+    let categories = query
+        .categories
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let tags = query
+        .tags
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    categories
+        .iter()
+        .all(|value| item.categories.iter().any(|item| item == value))
+        && tags.iter().all(|value| item.tags.iter().any(|item| item == value))
+}
+
+fn safe_local_file(root: &Path, slug: &str, relative: &str) -> Result<std::path::PathBuf, ExtensionError> {
+    if relative.is_empty()
+        || relative.contains('\\')
+        || Path::new(relative).is_absolute()
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ExtensionError::PathTraversal(relative.into()));
+    }
+    let workspace = std::fs::canonicalize(root.join(slug))?;
+    let target = workspace.join(relative);
+    if !target.starts_with(&workspace) {
+        return Err(ExtensionError::PathTraversal(relative.into()));
+    }
+    Ok(target)
+}
+
+fn operation_for_mine(slug: &str, version: &str) -> SkillOperationResponse {
+    SkillOperationResponse {
+        identity: identity(SkillSourceResponse::Mine, "local".into(), slug.into()),
+        version: version.into(),
+    }
 }
 
 async fn read_assistant_rule(
@@ -358,15 +698,17 @@ async fn read_assistant_rule(
     body: Result<Json<ReadAssistantRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
-        let content = dispatcher
-            .read_rule(&request.assistant_id, request.locale.as_deref())
-            .await?;
-        return Ok(Json(ApiResponse::ok(content)));
-    }
-    let content =
-        skill_storage::read_assistant_rule(&state.skill_paths, &request.assistant_id, request.locale.as_deref())
-            .await?;
+    let content = match state.assistant_dispatcher {
+        Some(dispatcher) => {
+            dispatcher
+                .read_rule(&request.assistant_id, request.locale.as_deref())
+                .await?
+        }
+        None => {
+            skill_storage::read_assistant_rule(&state.skill_paths, &request.assistant_id, request.locale.as_deref())
+                .await?
+        }
+    };
     Ok(Json(ApiResponse::ok(content)))
 }
 
@@ -375,30 +717,85 @@ async fn write_assistant_rule(
     body: Result<Json<WriteAssistantRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
     let Json(request) = body.map_err(ApiError::from)?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
-        dispatcher
-            .write_rule(&request.assistant_id, request.locale.as_deref(), &request.content)
-            .await?;
-        return Ok(Json(ApiResponse::ok(true)));
-    }
-    let ok = skill_storage::write_assistant_rule(
-        &state.skill_paths,
-        &request.assistant_id,
-        &request.content,
-        request.locale.as_deref(),
-    )
-    .await?;
-    Ok(Json(ApiResponse::ok(ok)))
+    let written = match state.assistant_dispatcher {
+        Some(dispatcher) => {
+            dispatcher
+                .write_rule(&request.assistant_id, request.locale.as_deref(), &request.content)
+                .await?;
+            true
+        }
+        None => {
+            skill_storage::write_assistant_rule(
+                &state.skill_paths,
+                &request.assistant_id,
+                &request.content,
+                request.locale.as_deref(),
+            )
+            .await?
+        }
+    };
+    Ok(Json(ApiResponse::ok(written)))
 }
 
 async fn delete_assistant_rule(
     State(state): State<SkillRouterState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
-    if let Some(dispatcher) = &state.assistant_dispatcher {
-        return Ok(Json(ApiResponse::ok(dispatcher.delete_rule(&id).await?)));
+    let deleted = match state.assistant_dispatcher {
+        Some(dispatcher) => dispatcher.delete_rule(&id).await?,
+        None => skill_storage::delete_assistant_rule(&state.skill_paths, &id).await?,
+    };
+    Ok(Json(ApiResponse::ok(deleted)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_filter_is_explicit_and_comparison_route_has_one_identity() {
+        assert_eq!(
+            parse_sources("mine,skillhub").unwrap(),
+            vec![SkillSpace::Mine, SkillSpace::SkillHub]
+        );
+        assert!(parse_sources("unknown").is_err());
+        assert_eq!(
+            preference_key("skillhub", "alice", "writer"),
+            "skillhub\u{1f}alice\u{1f}writer"
+        );
     }
-    Ok(Json(ApiResponse::ok(
-        skill_storage::delete_assistant_rule(&state.skill_paths, &id).await?,
-    )))
+
+    #[test]
+    fn only_the_current_hub_worktree_version_is_editable() {
+        assert!(version_is_editable(None, "2.0.0"));
+        assert!(version_is_editable(Some("2.0.0"), "2.0.0"));
+        assert!(!version_is_editable(Some("1.0.0"), "2.0.0"));
+    }
+
+    #[test]
+    fn detail_defaults_to_the_provider_latest_version_not_list_order() {
+        let detail = CatalogDetail {
+            skill: CatalogSkill {
+                id: "skillhub:owner/demo".into(),
+                space: SkillSpace::SkillHub,
+                slug: "demo".into(),
+                namespace: "owner".into(),
+                name: "Demo".into(),
+                description: String::new(),
+                version: Some("1.0.3".into()),
+                categories: vec![],
+                tags: vec![],
+                icon_url: None,
+                author: None,
+            },
+            readme: String::new(),
+            files: vec![],
+            versions: vec!["1.0.1".into(), "1.0.3".into(), "1.0.2".into()],
+            security_reports: vec![],
+        };
+
+        let response = detail_response(detail, None, None, false).unwrap();
+
+        assert_eq!(response.selected_version, "1.0.3");
+    }
 }

@@ -393,8 +393,8 @@
       "avatar": "avatars/cowork.jpg",
       "agent_ref": "tjuaecli",
       "enabled_skills": [
-        "skill-creator",
-        "pdf"
+        "tjuae-hub:official:skill-creator",
+        "tjuae-hub:official:pdf"
       ],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
@@ -661,8 +661,8 @@
       "avatar": "avatars/social-job-publisher.jpg",
       "agent_ref": "tjuaecli",
       "enabled_skills": [
-        "xiaohongshu-recruiter",
-        "x-recruiter"
+        "tjuae-hub:official:xiaohongshu-recruiter",
+        "tjuae-hub:official:x-recruiter"
       ],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
@@ -717,7 +717,7 @@
       "avatar": "avatars/beautiful-mermaid.jpg",
       "agent_ref": "tjuaecli",
       "enabled_skills": [
-        "mermaid"
+        "tjuae-hub:official:mermaid"
       ],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
@@ -772,7 +772,7 @@
       "avatar": "avatars/story-roleplay.jpg",
       "agent_ref": "tjuaecli",
       "enabled_skills": [
-        "story-roleplay"
+        "tjuae-hub:official:story-roleplay"
       ],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
@@ -880,9 +880,9 @@
       "avatar": "avatars/tjuaeui-assistant.jpg",
       "agent_ref": "tjuaecli",
       "enabled_skills": [
-        "tjuaeui-config",
-        "tjuaeui-troubleshooting",
-        "tjuaeui-webui-public"
+        "tjuae-hub:official:tjuaeui-config",
+        "tjuae-hub:official:tjuaeui-troubleshooting",
+        "tjuae-hub:official:tjuaeui-webui-public"
       ],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],

@@ -1,62 +1,65 @@
-use std::fs;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tempfile::TempDir;
 use tjuaeui_ai_agent::{
     AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, build_system_instructions,
     detect_skill_load_request, prepare_first_message, prepare_first_message_with_skills_index,
 };
-use tjuaeui_extension::resolve_skill_paths;
+use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner};
+use tjuaeui_extension::{create_skill, resolve_skill_paths};
 
-fn write_skill(root: &std::path::Path, slug: &str, auto_inject: bool, body: &str) {
-    let directory = root.join("skills").join(slug);
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(
-        directory.join(".tjuae-skill.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "$schema": "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/schemas/tjuae-skill.v1.schema.json",
-            "schemaVersion": 1,
-            "id": slug,
-            "version": "1.0.0",
-            "categories": ["test"],
-            "enabled": true,
-            "autoInject": auto_inject,
-            "source": { "kind": "local" }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        directory.join("SKILL.md"),
-        format!("---\nname: {slug}\ndescription: {slug} description\n---\n{body}"),
-    )
-    .unwrap();
+struct TestGit;
+
+#[async_trait]
+impl WorkspaceGitProvisioner for TestGit {
+    async fn ensure_workspace_git(&self, workspace: &std::path::Path) -> Result<WorkspaceGitProvision, String> {
+        Ok(WorkspaceGitProvision {
+            repository_root: workspace.display().to_string(),
+            workspace_path: workspace.display().to_string(),
+            branch: "main".to_owned(),
+            head_commit: "test".to_owned(),
+        })
+    }
+
+    async fn commit_workspace_snapshot(&self, _workspace: &std::path::Path, _message: &str) -> Result<String, String> {
+        Ok("test".to_owned())
+    }
 }
 
 #[tokio::test]
-async fn discovers_only_canonical_packages_and_respects_preferences() {
+async fn discovers_only_skills_named_by_the_assistant_snapshot() {
     let temp = TempDir::new().unwrap();
-    write_skill(temp.path(), "automatic", true, "automatic body");
-    write_skill(temp.path(), "optional", false, "optional body");
+    let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+    create_skill(
+        &temp.path().join("skills"),
+        "automatic",
+        "automatic",
+        "automatic body",
+        git.clone(),
+    )
+    .await
+    .unwrap();
+    create_skill(
+        &temp.path().join("skills"),
+        "optional",
+        "optional",
+        "optional body",
+        git,
+    )
+    .await
+    .unwrap();
     let paths = Arc::new(resolve_skill_paths(temp.path(), temp.path()));
     let manager = AcpSkillManager::new(paths);
 
-    let automatic = manager.discover_skills(None, None).await;
-    assert_eq!(
-        automatic.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(),
-        ["automatic"]
-    );
-
-    let optional = manager
-        .discover_skills(Some(&["optional".to_owned()]), Some(&["automatic".to_owned()]))
-        .await;
+    let optional = manager.discover_by_names(&["optional".to_owned()]).await;
     assert_eq!(
         optional.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(),
         ["optional"]
     );
     assert_eq!(
         manager.get_skill("optional").await.unwrap().body.as_deref(),
-        Some("optional body")
+        Some("# optional\n\noptional body")
     );
 }
 
