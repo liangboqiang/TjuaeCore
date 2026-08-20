@@ -87,6 +87,7 @@ async fn run_assistants(client: &reqwest::Client, args: ConfigAssistantsArgs) ->
         ConfigAssistantsCommand::List => run_assistant_list(client).await,
         ConfigAssistantsCommand::Get => run_assistant_get(client).await,
         ConfigAssistantsCommand::Create => run_assistant_create(client).await,
+        ConfigAssistantsCommand::Settings => run_assistant_settings(client).await,
         ConfigAssistantsCommand::Delete => run_assistant_delete(client).await,
         ConfigAssistantsCommand::Copy => run_assistant_copy(client).await,
         ConfigAssistantsCommand::Preferences => run_assistant_preferences(client).await,
@@ -152,6 +153,40 @@ async fn run_assistant_create(client: &reqwest::Client) -> Result<(), ConfigErro
         Method::POST,
         "/api/assistants/catalog/mine",
         Some(json!({ "slug": slug, "name": name, "description": description })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+async fn run_assistant_settings(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants settings";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let name = take_required_string_field(&mut payload, "name", command)?;
+    let description = take_optional_string_field(&mut payload, "description").unwrap_or_default();
+    let avatar = take_optional_string_field(&mut payload, "avatar");
+    let avatar_data_url = take_optional_string_field(&mut payload, "avatar_data_url");
+    let defaults = take_required_value_field(&mut payload, "defaults", command)?;
+    let recommended_prompts = take_required_value_field(&mut payload, "recommended_prompts", command)?;
+    let rules = take_required_string_field(&mut payload, "rules", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "settings");
+    let data = request_json(
+        client,
+        &env,
+        Method::PUT,
+        &path,
+        Some(json!({
+            "name": name,
+            "description": description,
+            "avatar": avatar,
+            "avatarDataUrl": avatar_data_url,
+            "defaults": defaults,
+            "recommendedPrompts": recommended_prompts,
+            "rules": rules,
+        })),
         command,
     )
     .await?;

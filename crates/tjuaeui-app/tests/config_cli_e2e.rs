@@ -65,26 +65,22 @@ async fn fake_conversation_rename(
     }))
 }
 
-async fn fake_assistant_rule_read(
+async fn fake_assistant_settings(
     State(capture): State<SharedCapture>,
+    Path((source, namespace, slug)): Path<(String, String, String)>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> axum::Json<serde_json::Value> {
     *capture.lock().unwrap() = Some(Capture {
+        resource_id: Some(format!("{source}:{namespace}:{slug}")),
         payload: Some(payload),
         ..Capture::default()
     });
     axum::Json(json!({
         "success": true,
-        "data": "current rule"
-    }))
-}
-
-async fn fake_assistant_rule_write(
-    axum::Json(_payload): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    axum::Json(json!({
-        "success": true,
-        "data": true
+        "data": {
+            "identity": { "source": source, "namespace": "", "slug": slug },
+            "manifest": { "name": "Requirement analyst" }
+        }
     }))
 }
 
@@ -371,8 +367,10 @@ async fn spawn_config_probe_server(capture: SharedCapture) -> (String, tokio::ta
             "/api/conversations/{id}",
             get(fake_context_conversation).patch(fake_conversation_rename),
         )
-        .route("/api/skills/assistant-rule/read", post(fake_assistant_rule_read))
-        .route("/api/skills/assistant-rule/write", post(fake_assistant_rule_write))
+        .route(
+            "/api/assistants/catalog/{source}/{namespace}/{slug}/settings",
+            put(fake_assistant_settings),
+        )
         .route("/api/internal/conversation-cron/list", get(fake_conversation_cron_list))
         .route(
             "/api/internal/conversation-cron/jobs/{job_id}",
@@ -485,14 +483,28 @@ async fn config_capabilities_prints_agent_readable_contract_without_runtime_env(
     let domains = stdout["data"]["domains"]
         .as_array()
         .expect("domains should be an array");
-    let assistant_rule_write = domains
+    let assistant_settings = domains
         .iter()
         .flat_map(|domain| domain["commands"].as_array().into_iter().flatten())
-        .find(|command| command["command"] == "config assistants rule write")
-        .expect("assistant rule write should be advertised");
-    assert_eq!(assistant_rule_write["input"], "stdin_json");
-    assert_eq!(assistant_rule_write["readback"], true);
-    assert_eq!(assistant_rule_write["selectors"], json!(["assistant_id"]));
+        .find(|command| command["command"] == "config assistants settings")
+        .expect("assistant settings should be advertised");
+    assert_eq!(assistant_settings["input"], "stdin_json");
+    assert_eq!(assistant_settings["readback"], true);
+    assert_eq!(
+        assistant_settings["stdin_fields"],
+        json!([
+            "source",
+            "namespace",
+            "slug",
+            "name",
+            "description",
+            "avatar",
+            "avatar_data_url",
+            "defaults",
+            "recommended_prompts",
+            "rules"
+        ])
+    );
 
     let cron_current_update = domains
         .iter()
@@ -929,63 +941,14 @@ async fn config_context_resolves_current_conversation_assistant() {
 }
 
 #[tokio::test]
-async fn config_assistant_rule_read_resolves_current_assistant_selector() {
+async fn config_assistant_settings_uses_catalog_identity_and_redacts_rules() {
     let capture = Arc::new(Mutex::new(None));
     let (base_url, handle) = spawn_config_probe_server(capture.clone()).await;
 
     let mut child = config_command()
-        .args(["assistants", "rule", "read"])
+        .args(["assistants", "settings"])
         .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-current")
-        .env("TJUAE_USER_ID", "user-current")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(br#"{ "assistant_id": "current", "locale": "zh-CN" }"#)
-        .await
-        .unwrap();
-    drop(child.stdin.take());
-
-    let output = child.wait_with_output().await.unwrap();
-
-    handle.abort();
-    assert!(
-        output.status.success(),
-        "assistant rule read failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let captured = capture
-        .lock()
-        .unwrap()
-        .take()
-        .expect("server should receive assistant rule payload");
-    let payload = captured.payload.unwrap();
-    assert_eq!(payload["assistant_id"], "assistant-current");
-    assert_eq!(payload["locale"], "zh-CN");
-    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["data"], "current rule");
-    assert_eq!(
-        stdout["meta"]["resolved_selectors"]["assistant_id"],
-        "assistant-current"
-    );
-}
-
-#[tokio::test]
-async fn config_assistant_rule_write_redacts_rule_content_from_metadata() {
-    let capture = Arc::new(Mutex::new(None));
-    let (base_url, handle) = spawn_config_probe_server(capture).await;
-
-    let mut child = config_command()
-        .args(["assistants", "rule", "write"])
-        .env("TJUAE_BASE_URL", &base_url)
-        .env("TJUAE_CONVERSATION_ID", "conv-current")
+        .env("TJUAE_CONVERSATION_ID", "conv-assistant")
         .env("TJUAE_USER_ID", "user-current")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -998,9 +961,14 @@ async fn config_assistant_rule_write_redacts_rule_content_from_metadata() {
         .unwrap()
         .write_all(
             br#"{
-  "assistant_id": "current",
-  "locale": "zh-CN",
-  "content": "SECRET_RULE_BODY"
+  "source": "mine",
+  "namespace": "",
+  "slug": "requirement-analyst",
+  "name": "Requirement analyst",
+  "description": "Turns ideas into requirements",
+  "defaults": { "agent": "codex", "skills": [], "mcps": [] },
+  "recommended_prompts": ["Draft a PRD"],
+  "rules": "SECRET_RULE_BODY"
 }"#,
         )
         .await
@@ -1012,17 +980,24 @@ async fn config_assistant_rule_write_redacts_rule_content_from_metadata() {
     handle.abort();
     assert!(
         output.status.success(),
-        "assistant rule write failed\nstdout:\n{}\nstderr:\n{}",
+        "assistant settings failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let captured = capture
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server should receive assistant settings payload");
+    assert_eq!(captured.resource_id.as_deref(), Some("mine:~:requirement-analyst"));
+    let payload = captured.payload.unwrap();
+    assert_eq!(payload["name"], "Requirement analyst");
+    assert_eq!(payload["defaults"]["agent"], "codex");
+    assert_eq!(payload["rules"], "SECRET_RULE_BODY");
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout_text.contains("SECRET_RULE_BODY"));
-    assert!(!stdout_text.contains("current rule"));
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["data"], true);
-    assert_eq!(stdout["meta"]["before"]["redacted"], true);
-    assert_eq!(stdout["meta"]["after"]["redacted"], true);
+    assert_eq!(stdout["data"]["manifest"]["name"], "Requirement analyst");
 }
 
 #[tokio::test]

@@ -74,9 +74,9 @@ For "something is wrong with TjuaeUI" with no specifics, run `overview` first �
 
 Provider listings include every `api_key` in plaintext. **Never** paste raw provider JSON into chat, a log, or a memory file. When you must show a provider, redact the key (`sk-…last4`). Treat keys the user gives you the same way.
 
-### 5. An assistant has two parts
+### 5. Assistants use the structured settings protocol
 
-Creating an assistant only writes metadata (name/avatar/engine/prompts). The **system prompt (rules) is a separate second step**, written via `config assistants rule write`. After creating an assistant, don't forget to set its system prompt.
+First run `config assistants create` to create the minimal catalog entry, then use `config assistants settings` to write the name, description, avatar, runtime agent, model, permission, thought level, ordered skills, MCP servers, recommended prompts, and rules in one structured request. Do not hand-edit `_meta.json`; the skills array order is the context order. Always read back with `config assistants get`.
 
 ---
 
@@ -86,7 +86,7 @@ Creating an assistant only writes metadata (name/avatar/engine/prompts). The **s
 
 1. With `tjuaeui-config`, read current state (`config assistants list`, `config skills list`, `config mcp servers list`, `config providers list`, `config settings get`).
 2. Tell the user what you'll change.
-3. Perform the write (remember the assistant system prompt is a second step).
+3. Perform the write (after creating an assistant, complete it with structured `settings`).
 4. Read it back to confirm.
 5. Remind the user to refresh / reopen the relevant view to see the change.
 
@@ -147,6 +147,6 @@ Key actions: **never hand over a link before you've personally verified it opens
 2. **Diagnose wide first** (`overview`), then drill in.
 3. **Confirm write/destructive actions; if you ask, wait.**
 4. **Never expose keys in plaintext**; always redact on display.
-5. **Creating an assistant has a second step**: write the system prompt separately.
+5. **Create assistants through the structured protocol**: `create`, then `settings`, then read back with `get`.
 6. **The skills use an injected runtime context — never guess ports or URLs**; if the CLI reports a context error, tell the user to launch TjuaeUI.
 7. **After config changes, remind the user to refresh the view.**

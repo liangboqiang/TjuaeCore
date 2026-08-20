@@ -65,6 +65,7 @@ pub(crate) fn data() -> Value {
                 no_input(&["assistants", "list"], "列出“我的助手”和 TjuaeHub 助手目录。", false),
                 stdin(&["assistants", "get"], "读取指定来源、命名空间、标识和版本的助手。", &["source", "namespace", "slug", "version"], &[], false, false),
                 stdin(&["assistants", "create"], "在“我的助手”中新建目录包。", &["slug", "name", "description"], &[], true, false),
+                stdin_redacted(&["assistants", "settings"], "结构化设置助手名称、规则、智能体、模型、权限、技能、MCP 和快捷提示；技能数组顺序即上下文注入顺序。", &["source", "namespace", "slug", "name", "description", "avatar", "avatar_data_url", "defaults", "recommended_prompts", "rules"], &[], true, false, &["avatar_data_url", "rules"]),
                 stdin(&["assistants", "delete"], "删除“我的助手”目录包。", &["source", "namespace", "slug"], &[], true, true),
                 stdin(&["assistants", "copy"], "把准确来源版本复制到“我的助手”。", &["source", "namespace", "slug", "version", "target_slug"], &[], true, false),
                 stdin(&["assistants", "preferences"], "更新版本跟随、停用状态和排序；首次启用必须使用显式激活流程。", &["source", "namespace", "slug", "selected_version", "follow_latest", "enabled", "sort_order"], &[], true, false),

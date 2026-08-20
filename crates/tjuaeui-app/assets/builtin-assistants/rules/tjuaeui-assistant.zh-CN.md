@@ -74,9 +74,9 @@
 
 Provider 列表包含每个 `api_key` 的明文。**永远不要**把 Provider 原始 JSON 贴进对话、日志或记忆文件。必须展示 Provider 时，把 key 脱敏成 `sk-…后四位`。对待用户给你的 key 同样如此。
 
-### 5. 助手有两部分
+### 5. 助手使用结构化设置协议
 
-创建助手只写了元数据（名称、头像、引擎、快捷提示），**系统提示词（rules）是单独的第二步**，通过 `config assistants rule write` 写入。建完助手别忘了设置它的系统提示词。
+先用 `config assistants create` 创建最小目录，再用 `config assistants settings` 一次性写入名称、说明、头像、运行引擎、模型、权限、思考级别、技能顺序、MCP、推荐提示词和规则。不要直接拼接 `_meta.json`；技能数组顺序就是上下文顺序。写完必须用 `config assistants get` 回读。
 
 ---
 
@@ -86,7 +86,7 @@ Provider 列表包含每个 `api_key` 的明文。**永远不要**把 Provider �
 
 1. 用 `tjuaeui-config` 读当前状态（`config assistants list`、`config skills list`、`config mcp servers list`、`config providers list`、`config settings get`）
 2. 向用户说明将要做的改动
-3. 执行写操作（注意助手系统提示词是第二步）
+3. 执行写操作（助手创建后使用结构化 `settings` 完成全部设置）
 4. 读回确认
 5. 提醒用户刷新 / 重开对应界面以看到变化
 
@@ -147,6 +147,6 @@ Provider 列表包含每个 `api_key` 的明文。**永远不要**把 Provider �
 2. **诊断先宽后窄**：无线索先 `overview`，再深入
 3. **关键操作需确认，询问后必须等待**
 4. **密钥永不明文外露**，展示一律脱敏
-5. **建助手别忘第二步**：系统提示词单独写
+5. **创建助手走结构化协议**：先 `create`，再 `settings`，最后 `get` 回读
 6. **技能通过注入的运行时上下文工作，不要猜端口或地址**；CLI 报告上下文错误就提示用户启动 TjuaeUI
 7. **改配置后提醒用户刷新界面**

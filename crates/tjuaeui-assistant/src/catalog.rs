@@ -28,6 +28,7 @@ const MANIFEST_FILE: &str = "_meta.json";
 const ENTRY_FILE: &str = "ASSISTANT.md";
 const HUB_INDEX_ENV: &str = "TJUAE_HUB_ASSISTANT_INDEX_URL";
 const HUB_INDEX_URL: &str = "https://raw.githubusercontent.com/liangboqiang/TjuaeHub/main/dist/assistants.json";
+const HUB_INDEX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 pub const SYSTEM_ASSISTANT_SLUG: &str = "tjuaeui-assistant";
 
 #[derive(Clone)]
@@ -38,6 +39,8 @@ pub struct AssistantCatalogService {
     hub_index_snapshot: Option<PathBuf>,
     can_write_hub: bool,
     git: GitServiceRef,
+    hub_index_cache: Arc<tokio::sync::RwLock<Option<(tokio::time::Instant, AssistantMarketIndex)>>>,
+    hub_asset_cache: Arc<tokio::sync::RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 /// 已激活助手的领域运行时快照。所有宿主（会话、团队、定时任务、频道）都从
@@ -100,6 +103,8 @@ impl AssistantCatalogService {
             hub_index_snapshot,
             can_write_hub,
             git,
+            hub_index_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            hub_asset_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -459,6 +464,14 @@ impl AssistantCatalogService {
                 let _ = tokio::fs::rename(&backup, &root).await;
                 return Err(error.into());
             }
+            if let Err(error) = self
+                .refresh_activation_after_edit(identity, &manifest.content_hash)
+                .await
+            {
+                let _ = tokio::fs::remove_dir_all(&root).await;
+                let _ = tokio::fs::rename(&backup, &root).await;
+                return Err(error);
+            }
             let _ = tokio::fs::remove_dir_all(&backup).await;
             Ok::<(), AssistantError>(())
         }
@@ -467,7 +480,6 @@ impl AssistantCatalogService {
             let _ = tokio::fs::remove_dir_all(&temporary).await;
         }
         result?;
-        self.invalidate_activation(identity).await?;
         self.detail(identity, None).await
     }
 
@@ -549,6 +561,14 @@ impl AssistantCatalogService {
                 let _ = tokio::fs::rename(&backup, &root).await;
                 return Err(error.into());
             }
+            if let Err(error) = self
+                .refresh_activation_after_edit(identity, &manifest.content_hash)
+                .await
+            {
+                let _ = tokio::fs::remove_dir_all(&root).await;
+                let _ = tokio::fs::rename(&backup, &root).await;
+                return Err(error);
+            }
             let _ = tokio::fs::remove_dir_all(&backup).await;
             Ok::<(), AssistantError>(())
         }
@@ -557,7 +577,6 @@ impl AssistantCatalogService {
             let _ = tokio::fs::remove_dir_all(&temporary).await;
         }
         result?;
-        self.invalidate_activation(identity).await?;
         self.detail(identity, None).await
     }
 
@@ -809,6 +828,14 @@ impl AssistantCatalogService {
                 let _ = tokio::fs::rename(&backup, &root).await;
                 return Err(error.into());
             }
+            if let Err(error) = self
+                .refresh_activation_after_edit(identity, &manifest.content_hash)
+                .await
+            {
+                let _ = tokio::fs::remove_dir_all(&root).await;
+                let _ = tokio::fs::rename(&backup, &root).await;
+                return Err(error);
+            }
             let _ = tokio::fs::remove_dir_all(&backup).await;
             Ok::<(), AssistantError>(())
         }
@@ -817,7 +844,7 @@ impl AssistantCatalogService {
             let _ = tokio::fs::remove_dir_all(&temporary).await;
         }
         result?;
-        self.invalidate_activation(identity).await
+        Ok(())
     }
 
     pub async fn delete_mine(&self, identity: &AssistantIdentityResponse) -> Result<(), AssistantError> {
@@ -914,7 +941,65 @@ impl AssistantCatalogService {
         version: Option<&str>,
         path: &str,
     ) -> Result<Vec<u8>, AssistantError> {
-        self.file_bytes(identity, version, path).await
+        tjuaeui_catalog::validate_relative_file(path, 0)?;
+        match identity.source {
+            AssistantSourceResponse::Mine => {
+                let root = self.mine_root.join(&identity.slug);
+                let declared = list_local_files(&root)?.into_iter().any(|file| file.path == path);
+                if !declared {
+                    return Err(AssistantError::NotFound(format!("助手文件 {path}")));
+                }
+                tjuaeui_catalog::read_local_file(&root, path)
+                    .await
+                    .map_err(AssistantError::from)
+            }
+            AssistantSourceResponse::TjuaeHub => {
+                if let Some(root) = self.hub_worktree_root_for_version(identity, version).await? {
+                    let declared = list_local_files(&root)?.into_iter().any(|file| file.path == path);
+                    if !declared {
+                        return Err(AssistantError::NotFound(format!("助手文件 {path}")));
+                    }
+                    tjuaeui_catalog::read_local_file(&root, path)
+                        .await
+                        .map_err(AssistantError::from)
+                } else {
+                    let index = self.hub_index().await?;
+                    let entry = index
+                        .assistants
+                        .iter()
+                        .find(|entry| entry.id == identity.slug)
+                        .ok_or_else(|| AssistantError::NotFound(identity.slug.clone()))?;
+                    let selected_version = version.unwrap_or(&entry.latest_version);
+                    let selected = entry
+                        .version(selected_version)
+                        .ok_or_else(|| AssistantError::NotFound(selected_version.to_owned()))?;
+                    let declared = selected
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .ok_or_else(|| AssistantError::NotFound(format!("助手文件 {path}")))?;
+                    let cache_key = format!(
+                        "{}:{}:{}:{}:{path}",
+                        source_id(identity.source),
+                        identity.namespace,
+                        identity.slug,
+                        selected.revision
+                    );
+                    if let Some(bytes) = self.hub_asset_cache.read().await.get(&cache_key).cloned() {
+                        return Ok(bytes);
+                    }
+                    let bytes = tjuaeui_catalog::fetch_github_revision_file(
+                        &index.repository,
+                        &selected.revision,
+                        &entry.path,
+                        declared,
+                    )
+                    .await?;
+                    self.hub_asset_cache.write().await.insert(cache_key, bytes.clone());
+                    Ok(bytes)
+                }
+            }
+        }
     }
 
     async fn file_bytes(
@@ -1202,20 +1287,24 @@ impl AssistantCatalogService {
         let selected = entry
             .version(selected_version)
             .ok_or_else(|| AssistantError::NotFound(selected_version.to_owned()))?;
-        let manifest_file = selected
-            .files
-            .iter()
-            .find(|file| file.path == MANIFEST_FILE)
-            .ok_or_else(|| AssistantError::BadRequest("助手版本缺少 _meta.json".to_owned()))?;
-        let bytes = tjuaeui_catalog::fetch_github_revision_file(
-            &index.repository,
-            &selected.revision,
-            &entry.path,
-            manifest_file,
-        )
-        .await?;
-        let manifest: AssistantManifest = serde_json::from_slice(&bytes)
-            .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+        let manifest = if entry.manifest.version == selected_version {
+            entry.manifest.clone()
+        } else {
+            let manifest_file = selected
+                .files
+                .iter()
+                .find(|file| file.path == MANIFEST_FILE)
+                .ok_or_else(|| AssistantError::BadRequest("助手版本缺少 _meta.json".to_owned()))?;
+            let bytes = tjuaeui_catalog::fetch_github_revision_file(
+                &index.repository,
+                &selected.revision,
+                &entry.path,
+                manifest_file,
+            )
+            .await?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?
+        };
         validate_manifest(&manifest, &entry.id)?;
         Ok(AssistantCatalogDetailResponse {
             item: item_from_manifest(
@@ -1234,6 +1323,12 @@ impl AssistantCatalogService {
     }
 
     async fn hub_index(&self) -> Result<AssistantMarketIndex, AssistantError> {
+        if self.hub_worktree.is_none()
+            && let Some((cached_at, index)) = self.hub_index_cache.read().await.as_ref()
+            && cached_at.elapsed() < HUB_INDEX_CACHE_TTL
+        {
+            return Ok(index.clone());
+        }
         let configured = std::env::var(HUB_INDEX_ENV).ok();
         let worktree_index = self.hub_worktree.as_ref().map(|root| root.join("dist/assistants.json"));
         let local = worktree_index.as_deref().or(self.hub_index_snapshot.as_deref());
@@ -1241,6 +1336,9 @@ impl AssistantCatalogService {
             tjuaeui_catalog::load_json(configured.as_deref(), local, HUB_INDEX_URL, "assistants").await?;
         if index.schema_version != 1 || index.market.id != "tjuae-hub" {
             return Err(AssistantError::BadRequest("TjuaeHub 助手索引版本或标识无效".to_owned()));
+        }
+        if self.hub_worktree.is_none() {
+            *self.hub_index_cache.write().await = Some((tokio::time::Instant::now(), index.clone()));
         }
         Ok(index)
     }
@@ -1289,7 +1387,11 @@ impl AssistantCatalogService {
         }
     }
 
-    async fn invalidate_activation(&self, identity: &AssistantIdentityResponse) -> Result<(), AssistantError> {
+    async fn refresh_activation_after_edit(
+        &self,
+        identity: &AssistantIdentityResponse,
+        content_hash: &str,
+    ) -> Result<(), AssistantError> {
         let Some(current) = self
             .preferences
             .get(source_id(identity.source), &identity.namespace, &identity.slug)
@@ -1297,6 +1399,7 @@ impl AssistantCatalogService {
         else {
             return Ok(());
         };
+        let enabled = current.enabled || is_system_assistant(identity);
         self.preferences
             .upsert(UpsertAssistantUserPreferenceParams {
                 source: &current.source,
@@ -1304,10 +1407,10 @@ impl AssistantCatalogService {
                 slug: &current.slug,
                 selected_version: current.selected_version.as_deref(),
                 follow_latest: current.follow_latest,
-                enabled: is_system_assistant(identity),
-                activation_status: "pending",
-                activation_fingerprint: None,
-                resource_bindings: "{}",
+                enabled,
+                activation_status: if enabled { "ready" } else { "pending" },
+                activation_fingerprint: enabled.then_some(content_hash),
+                resource_bindings: if enabled { &current.resource_bindings } else { "{}" },
                 runtime_overrides: &current.runtime_overrides,
                 sort_order: current.sort_order,
                 last_used_at: current.last_used_at,
@@ -1347,6 +1450,7 @@ struct AssistantMarketEntry {
     path: String,
     name: String,
     description: String,
+    manifest: AssistantManifest,
     avatar: Option<String>,
     categories: Vec<String>,
     tags: Vec<String>,
@@ -2189,5 +2293,56 @@ mod tests {
             service.delete_mine(&identity).await,
             Err(AssistantError::Forbidden(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn editing_enabled_system_assistant_keeps_activation_ready() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        let preferences = Arc::new(SqliteAssistantUserPreferenceRepository::new(database.pool().clone()));
+        let service = AssistantCatalogService::new(
+            preferences.clone(),
+            temp.path(),
+            None,
+            None,
+            false,
+            Arc::new(GitService::new()),
+        );
+        service.ensure_system_assistant("# TjuaeUI 管家").await.unwrap();
+        let identity = identity(AssistantSourceResponse::Mine, "", SYSTEM_ASSISTANT_SLUG);
+
+        let saved = service
+            .update_settings(
+                &identity,
+                UpdateAssistantCatalogSettingsRequest {
+                    name: "TjuaeUI 管家".to_owned(),
+                    description: "使用 Codex CLI 的系统管家".to_owned(),
+                    avatar: None,
+                    avatar_data_url: None,
+                    defaults: AssistantDefaultsCatalogResponse {
+                        agent: Some("codex-agent-id".to_owned()),
+                        ..AssistantDefaultsCatalogResponse::default()
+                    },
+                    recommended_prompts: vec!["创建一个助手".to_owned()],
+                    rules: "# 更新后的管家".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(saved.manifest.defaults.agent.as_deref(), Some("codex-agent-id"));
+        let preference = preferences
+            .get("mine", "", SYSTEM_ASSISTANT_SLUG)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(preference.enabled);
+        assert_eq!(preference.activation_status, "ready");
+        assert_eq!(
+            preference.activation_fingerprint.as_deref(),
+            Some(saved.manifest.content_hash.as_str())
+        );
+        let profile = service.runtime_profile(&runtime_id(&identity)).await.unwrap().unwrap();
+        assert_eq!(profile.agent_id, "codex-agent-id");
     }
 }
