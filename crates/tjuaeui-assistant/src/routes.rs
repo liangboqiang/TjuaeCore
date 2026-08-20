@@ -15,9 +15,9 @@ use tjuaeui_api_types::{
     AssistantCatalogFileQuery, AssistantCatalogPageResponse, AssistantCatalogQuery, AssistantIdentityResponse,
     AssistantOperationResponse, AssistantRuntimeAgentResponse, AssistantRuntimeOptionResponse, AssistantSourceResponse,
     AssistantVersionComparisonResponse, AssistantVersionQuery, CopyAssistantToMineRequest, CreateMineAssistantRequest,
-    ExportAssistantRequest, ExportAssistantResponse, PrepareAssistantRequest, PublishAssistantCatalogRequest,
-    PublishAssistantCatalogResponse, SaveAssistantCatalogFileRequest, UpdateAssistantCatalogPreferencesRequest,
-    UpdateAssistantCatalogSettingsRequest,
+    ExportAssistantRequest, ExportAssistantResponse, ImportAssistantRequest, PrepareAssistantRequest,
+    PublishAssistantCatalogRequest, PublishAssistantCatalogResponse, SaveAssistantCatalogFileRequest,
+    UpdateAssistantCatalogPreferencesRequest, UpdateAssistantCatalogSettingsRequest,
 };
 use tjuaeui_common::ApiError;
 
@@ -32,6 +32,7 @@ pub fn assistant_routes(state: AssistantRouterState) -> Router {
             "/api/assistants/catalog/{source}",
             get(list_catalog).post(create_mine_catalog),
         )
+        .route("/api/assistants/import", post(import_mine_catalog))
         .route(
             "/api/assistants/catalog/{source}/{namespace}/{slug}",
             get(get_catalog_detail)
@@ -209,6 +210,15 @@ async fn create_mine_catalog(
     }
     let Json(request) = body.map_err(ApiError::from)?;
     let detail = state.catalog.create_mine(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(detail))))
+}
+
+async fn import_mine_catalog(
+    State(state): State<AssistantRouterState>,
+    body: Result<Json<ImportAssistantRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ApiResponse<AssistantCatalogDetailResponse>>), ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    let detail = state.catalog.import_mine(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(detail))))
 }
 

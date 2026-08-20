@@ -62,9 +62,10 @@ pub use assistant_catalog::{
     AssistantRequirementResponse, AssistantRuntimeAgentResponse, AssistantRuntimeOptionResponse,
     AssistantSourceResponse, AssistantVersionComparisonResponse, AssistantVersionFileDiffResponse,
     AssistantVersionQuery, AssistantVersionResponse, CopyAssistantToMineRequest, CreateMineAssistantRequest,
-    ExportAssistantRequest, ExportAssistantResponse, PrepareAssistantRequest, PublishAssistantCatalogRequest,
-    PublishAssistantCatalogResponse, SaveAssistantCatalogFileRequest, UpdateAssistantCatalogPreferencesRequest,
-    UpdateAssistantCatalogSettingsRequest, UpdateAssistantRuntimeOverridesRequest,
+    ExportAssistantRequest, ExportAssistantResponse, ImportAssistantRequest, PrepareAssistantRequest,
+    PublishAssistantCatalogRequest, PublishAssistantCatalogResponse, SaveAssistantCatalogFileRequest,
+    UpdateAssistantCatalogPreferencesRequest, UpdateAssistantCatalogSettingsRequest,
+    UpdateAssistantRuntimeOverridesRequest,
 };
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser, QrLoginRequest,

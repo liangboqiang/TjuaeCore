@@ -13,7 +13,7 @@ use tjuaeui_api_types::{
     AssistantPreferencesCatalogResponse, AssistantRequirementKind, AssistantRequirementResponse,
     AssistantSourceResponse, AssistantVersionComparisonResponse, AssistantVersionFileDiffResponse,
     AssistantVersionResponse, CopyAssistantToMineRequest, CreateMineAssistantRequest, ExportAssistantRequest,
-    ExportAssistantResponse, PublishAssistantCatalogRequest, PublishAssistantCatalogResponse,
+    ExportAssistantResponse, ImportAssistantRequest, PublishAssistantCatalogRequest, PublishAssistantCatalogResponse,
     SaveAssistantCatalogFileRequest, UpdateAssistantCatalogPreferencesRequest, UpdateAssistantCatalogSettingsRequest,
     UpdateAssistantRuntimeOverridesRequest,
 };
@@ -428,6 +428,65 @@ impl AssistantCatalogService {
         result?;
         self.detail(&identity(AssistantSourceResponse::Mine, "", &request.slug), None)
             .await
+    }
+
+    pub async fn import_mine(
+        &self,
+        request: ImportAssistantRequest,
+    ) -> Result<AssistantCatalogDetailResponse, AssistantError> {
+        let archive = PathBuf::from(request.archive_path);
+        if !archive
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("zip"))
+        {
+            return Err(AssistantError::BadRequest(
+                "助手导入文件必须使用 .zip 扩展名".to_owned(),
+            ));
+        }
+        if !tokio::fs::try_exists(&archive).await? {
+            return Err(AssistantError::NotFound("助手导入文件不存在".to_owned()));
+        }
+        if !tokio::fs::metadata(&archive).await?.is_file() {
+            return Err(AssistantError::BadRequest("助手导入路径不是文件".to_owned()));
+        }
+
+        tokio::fs::create_dir_all(&self.mine_root).await?;
+        let staging = self.mine_root.join(format!(".importing-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir(&staging).await?;
+        let extract_archive = archive.clone();
+        let extract_target = staging.clone();
+        let result = async {
+            tokio::task::spawn_blocking(move || extract_assistant_archive(&extract_archive, &extract_target))
+                .await
+                .map_err(|error| AssistantError::Internal(error.to_string()))??;
+            let package_root = detect_assistant_package_root(&staging)?;
+            let manifest_bytes = tokio::fs::read(package_root.join(MANIFEST_FILE)).await?;
+            let mut manifest: AssistantManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+            validate_slug(&manifest.id)?;
+            validate_manifest(&manifest, &manifest.id)?;
+            if !package_root.join(&manifest.instructions.default).is_file() {
+                return Err(AssistantError::BadRequest("助手包缺少规则入口文件".to_owned()));
+            }
+            let target = self.mine_root.join(&manifest.id);
+            if tokio::fs::try_exists(&target).await? {
+                return Err(AssistantError::Conflict(format!("助手 {} 已存在", manifest.id)));
+            }
+            manifest.content_hash = assistant_directory_digest(&package_root)?;
+            tokio::fs::write(
+                package_root.join(MANIFEST_FILE),
+                serde_json::to_vec_pretty(&manifest).map_err(|error| AssistantError::Internal(error.to_string()))?,
+            )
+            .await?;
+            let slug = manifest.id.clone();
+            tokio::fs::rename(&package_root, &target).await?;
+            let identity = identity(AssistantSourceResponse::Mine, "", &slug);
+            self.detail(&identity, None).await
+        }
+        .await;
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        result
     }
 
     pub async fn save_file(
@@ -2111,6 +2170,62 @@ fn validate_slug(value: &str) -> Result<(), AssistantError> {
     Ok(())
 }
 
+fn extract_assistant_archive(archive_path: &Path, target: &Path) -> Result<(), AssistantError> {
+    const MAX_FILES: usize = 2_500;
+    const MAX_BYTES: u64 = 100 * 1024 * 1024;
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| AssistantError::BadRequest(error.to_string()))?;
+    if archive.len() > MAX_FILES {
+        return Err(AssistantError::BadRequest("助手包文件数量超过 2500".to_owned()));
+    }
+    let mut total = 0_u64;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| AssistantError::BadRequest(error.to_string()))?;
+        let enclosed = file
+            .enclosed_name()
+            .ok_or_else(|| AssistantError::BadRequest(format!("助手包路径越界：{}", file.name())))?;
+        if file.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000) {
+            return Err(AssistantError::BadRequest(format!(
+                "助手包不能包含符号链接：{}",
+                file.name()
+            )));
+        }
+        total = total.saturating_add(file.size());
+        if total > MAX_BYTES {
+            return Err(AssistantError::BadRequest("助手包解压后超过 100 MB".to_owned()));
+        }
+        let destination = target.join(enclosed);
+        if file.is_dir() {
+            std::fs::create_dir_all(destination)?;
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::io::copy(&mut file, &mut std::fs::File::create(destination)?)?;
+    }
+    Ok(())
+}
+
+fn detect_assistant_package_root(staging: &Path) -> Result<PathBuf, AssistantError> {
+    if staging.join(MANIFEST_FILE).is_file() && staging.join(ENTRY_FILE).is_file() {
+        return Ok(staging.to_path_buf());
+    }
+    let directories = std::fs::read_dir(staging)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .collect::<Vec<_>>();
+    if directories.len() == 1 {
+        let root = directories[0].path();
+        if root.join(MANIFEST_FILE).is_file() && root.join(ENTRY_FILE).is_file() {
+            return Ok(root);
+        }
+    }
+    Err(AssistantError::BadRequest("压缩包中未找到有效助手".to_owned()))
+}
+
 fn list_local_files(root: &Path) -> Result<Vec<CatalogFile>, AssistantError> {
     fn visit(root: &Path, directory: &Path, files: &mut Vec<CatalogFile>) -> Result<(), AssistantError> {
         for entry in std::fs::read_dir(directory)? {
@@ -2241,6 +2356,7 @@ async fn rename_assistant_directory(source: &Path, target: &Path) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tjuaeui_db::SqliteAssistantUserPreferenceRepository;
     use tjuaeui_file::GitService;
 
@@ -2315,6 +2431,76 @@ mod tests {
             service.delete_mine(&identity).await,
             Err(AssistantError::Forbidden(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn exported_assistant_package_round_trips_through_import() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        let service = AssistantCatalogService::new(
+            Arc::new(SqliteAssistantUserPreferenceRepository::new(database.pool().clone())),
+            temp.path(),
+            None,
+            None,
+            false,
+            Arc::new(GitService::new()),
+        );
+        service
+            .create_mine(CreateMineAssistantRequest {
+                slug: "portable-helper".to_owned(),
+                name: "Portable Helper".to_owned(),
+                description: "Round trip".to_owned(),
+            })
+            .await
+            .unwrap();
+        let identity = identity(AssistantSourceResponse::Mine, "", "portable-helper");
+        let archive = temp.path().join("portable-helper.zip");
+        service
+            .export(
+                &identity,
+                ExportAssistantRequest {
+                    version: None,
+                    output_path: archive.to_string_lossy().into_owned(),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        service.delete_mine(&identity).await.unwrap();
+
+        let imported = service
+            .import_mine(ImportAssistantRequest {
+                archive_path: archive.to_string_lossy().into_owned(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported.item.identity.slug, "portable-helper");
+        assert_eq!(imported.manifest.name, "Portable Helper");
+        assert!(
+            service
+                .mine_root()
+                .join("portable-helper")
+                .join(MANIFEST_FILE)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn assistant_archive_rejects_parent_directory_entries() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let archive_path = temp.path().join("unsafe.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("../outside.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"unsafe").unwrap();
+        archive.finish().unwrap();
+
+        let result = extract_assistant_archive(&archive_path, &temp.path().join("target"));
+        assert!(matches!(result, Err(AssistantError::BadRequest(_))));
+        assert!(!temp.path().join("outside.txt").exists());
     }
 
     #[tokio::test]

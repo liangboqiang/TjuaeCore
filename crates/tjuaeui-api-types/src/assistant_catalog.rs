@@ -395,6 +395,12 @@ pub struct CreateMineAssistantRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportAssistantRequest {
+    pub archive_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CopyAssistantToMineRequest {
     pub version: Option<String>,
     pub target_slug: String,
