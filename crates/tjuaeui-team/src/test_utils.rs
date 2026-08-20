@@ -208,14 +208,13 @@ pub(crate) mod workspace_harness {
     };
     use tjuaeui_common::{AgentKillReason, AgentType, PaginatedResult, now_ms};
     use tjuaeui_db::models::{
-        AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, ConversationRow, MessageRow, TeamRow,
-        TeamTaskRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
-        UpsertAssistantOverlayParams,
+        AgentMetadataRow, ConversationRow, MessageRow, TeamRow, TeamTaskRow, UpdateAgentHandshakeParams,
+        UpsertAgentMetadataParams,
     };
     use tjuaeui_db::{
-        ConversationFilters, ConversationRowUpdate, DbError, IAgentMetadataRepository, IAssistantDefinitionRepository,
-        IAssistantOverlayRepository, IConversationRepository, IProviderRepository, ITeamRepository, MessagePageParams,
-        MessagePageResult, MessageRowUpdate, MessageSearchRow, UpdateTeamParams,
+        ConversationFilters, ConversationRowUpdate, DbError, IAgentMetadataRepository, IConversationRepository,
+        IProviderRepository, ITeamRepository, MessagePageParams, MessagePageResult, MessageRowUpdate, MessageSearchRow,
+        UpdateTeamParams,
     };
     use tjuaeui_realtime::EventBroadcaster;
 
@@ -878,63 +877,6 @@ pub(crate) mod workspace_harness {
         }
     }
 
-    struct EmptyAssistantDefinitionRepo;
-
-    #[async_trait]
-    impl IAssistantDefinitionRepository for EmptyAssistantDefinitionRepo {
-        async fn list(&self) -> Result<Vec<AssistantDefinitionRow>, DbError> {
-            Ok(vec![])
-        }
-
-        async fn get_by_assistant_id(&self, _assistant_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn get_by_id(&self, _definition_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn get_by_source_ref(
-            &self,
-            _source: &str,
-            _source_ref: &str,
-        ) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn upsert(
-            &self,
-            _params: &UpsertAssistantDefinitionParams<'_>,
-        ) -> Result<AssistantDefinitionRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn soft_delete(&self, _definition_id: &str, _deleted_at: i64) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    struct EmptyAssistantOverlayRepo;
-
-    #[async_trait]
-    impl IAssistantOverlayRepository for EmptyAssistantOverlayRepo {
-        async fn get(&self, _definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(vec![])
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
     struct EmptyProviderRepo;
 
     #[async_trait]
@@ -1044,8 +986,6 @@ pub(crate) mod workspace_harness {
             team_repo_dyn,
             Arc::new(EmptyAgentMetadataRepo),
             Arc::new(EmptyTeamAssistantCatalog),
-            Arc::new(EmptyAssistantDefinitionRepo),
-            Arc::new(EmptyAssistantOverlayRepo),
             Arc::new(EmptyProviderRepo),
             conversation_port,
             projection_store,

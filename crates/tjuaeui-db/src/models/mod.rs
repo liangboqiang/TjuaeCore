@@ -1,6 +1,6 @@
 mod acp_session;
 mod agent_metadata;
-mod assistant;
+mod assistant_user_preference;
 mod channel;
 mod client_preference;
 mod conversation;
@@ -21,11 +21,7 @@ pub use acp_session::AcpSessionRow;
 pub use agent_metadata::{
     AgentMetadataRow, UpdateAgentAvailabilitySnapshotParams, UpdateAgentHandshakeParams, UpsertAgentMetadataParams,
 };
-pub use assistant::{
-    AssistantDefinitionRow, AssistantOverlayRow, AssistantOverrideRow, AssistantPreferenceRow, AssistantRow,
-    CreateAssistantParams, UpdateAssistantParams, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
-    UpsertAssistantPreferenceParams, UpsertOverrideParams,
-};
+pub use assistant_user_preference::AssistantUserPreferenceRow;
 pub use channel::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
 pub use client_preference::ClientPreference;
 pub use conversation::{ConversationAssistantSnapshotRow, ConversationRow, UpsertConversationAssistantSnapshotParams};

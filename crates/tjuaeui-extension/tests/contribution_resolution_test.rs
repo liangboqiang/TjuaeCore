@@ -155,56 +155,11 @@ fn cr2_mcp_server_resolved_as_opaque_config() {
 }
 
 // ---------------------------------------------------------------------------
-// CR-3: Assistant resolution with @file: reference
+// CR-3: Agent resolution with @file: reference
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cr3_assistant_file_reference_resolved() {
-    let dir = std::env::temp_dir().join("cr3_assistant_resolve");
-    let prompts = dir.join("prompts");
-    std::fs::create_dir_all(&prompts).unwrap();
-    std::fs::write(prompts.join("system.md"), "You are a helpful coding assistant.").unwrap();
-
-    let contributes = ExtContributes {
-        assistants: vec![ExtAssistant {
-            id: "code-helper".into(),
-            name: "Code Helper".into(),
-            description: Some("AI coding assistant".into()),
-            system_prompt: Some("@file:prompts/system.md".into()),
-            icon: Some("icons/code.png".into()),
-            context: None,
-            agent_id: Some("gemini".into()),
-            enabled_skills: vec!["code-review".into()],
-            prompts: vec!["Review this patch".into()],
-            models: vec!["gemini-2.0-flash".into()],
-        }],
-        ..Default::default()
-    };
-
-    let ext = make_loaded_extension("helper-ext", &dir.to_string_lossy(), contributes);
-    let result = resolve_extension_contributions(&ext);
-
-    assert_eq!(result.assistants.len(), 1);
-    let assistant = &result.assistants[0];
-    assert_eq!(assistant.extension_name, "helper-ext");
-    assert_eq!(
-        assistant.system_prompt.as_deref(),
-        Some("You are a helpful coding assistant.")
-    );
-    assert_eq!(assistant.agent_id.as_deref(), Some("gemini"));
-    assert_eq!(assistant.enabled_skills, vec!["code-review"]);
-    assert_eq!(assistant.prompts, vec!["Review this patch"]);
-    assert_eq!(assistant.models, vec!["gemini-2.0-flash"]);
-
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// CR-4: Agent resolution with @file: reference
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cr4_agent_file_reference_resolved() {
+fn cr3_agent_file_reference_resolved() {
     let dir = std::env::temp_dir().join("cr4_agent_resolve");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("agent_ctx.md"), "Agent context loaded from file.").unwrap();

@@ -1,6 +1,6 @@
 pub mod acp_session;
 pub mod agent_metadata;
-pub mod assistant;
+pub mod assistant_user_preference;
 pub mod channel;
 mod client_preference;
 pub mod conversation;
@@ -16,7 +16,7 @@ mod settings;
 pub mod skill_user_preference;
 mod sqlite_acp_session;
 mod sqlite_agent_metadata;
-mod sqlite_assistant;
+mod sqlite_assistant_user_preference;
 mod sqlite_channel;
 mod sqlite_client_preference;
 mod sqlite_conversation;
@@ -36,10 +36,7 @@ mod user;
 
 pub use acp_session::{CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams};
 pub use agent_metadata::IAgentMetadataRepository;
-pub use assistant::{
-    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantOverrideRepository,
-    IAssistantPreferenceRepository, IAssistantRepository,
-};
+pub use assistant_user_preference::{IAssistantUserPreferenceRepository, UpsertAssistantUserPreferenceParams};
 pub use channel::IChannelRepository;
 pub use client_preference::IClientPreferenceRepository;
 pub use conversation::IConversationRepository;
@@ -57,10 +54,7 @@ pub use settings::{ISettingsRepository, UpsertSystemSettingsParams};
 pub use skill_user_preference::{ISkillUserPreferenceRepository, UpsertSkillUserPreferenceParams};
 pub use sqlite_acp_session::SqliteAcpSessionRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
-pub use sqlite_assistant::{
-    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository,
-    SqliteAssistantPreferenceRepository, SqliteAssistantRepository,
-};
+pub use sqlite_assistant_user_preference::SqliteAssistantUserPreferenceRepository;
 pub use sqlite_channel::SqliteChannelRepository;
 pub use sqlite_client_preference::SqliteClientPreferenceRepository;
 pub use sqlite_conversation::SqliteConversationRepository;

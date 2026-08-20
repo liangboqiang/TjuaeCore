@@ -97,7 +97,6 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         // Query routes
         .route("/api/extensions", get(get_loaded_extensions))
         .route("/api/extensions/themes", get(get_themes))
-        .route("/api/extensions/assistants", get(get_assistants))
         .route("/api/extensions/acp-adapters", get(get_acp_adapters))
         .route("/api/extensions/agents", get(get_agents))
         .route("/api/extensions/mcp-servers", get(get_mcp_servers))
@@ -166,38 +165,6 @@ async fn get_themes(
                     "is_preset": true,
                     "created_at": timestamp,
                     "updated_at": timestamp,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/assistants` — get all resolved assistants.
-async fn get_assistants(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let assistants = state.registry.get_assistants().await;
-    let value = serde_json::Value::Array(
-        assistants
-            .into_iter()
-            .map(|assistant| {
-                serde_json::json!({
-                    "id": format!("ext-{}", assistant.id),
-                    "name": assistant.name,
-                    "description": assistant.description,
-                    "avatar": assistant.icon,
-                    "agentId": assistant.agent_id,
-                    "context": assistant.context.unwrap_or_default(),
-                    "models": assistant.models,
-                    "enabledSkills": assistant.enabled_skills,
-                    "prompts": assistant.prompts,
-                    "isPreset": true,
-                    "isBuiltin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "_extensionName": assistant.extension_name,
-                    "_kind": "assistant",
                 })
             })
             .collect(),

@@ -7,7 +7,6 @@
 
 pub mod acp_adapter;
 pub mod agent;
-pub mod assistant;
 pub mod channel_plugin;
 pub mod i18n;
 pub mod mcp_server;
@@ -36,7 +35,6 @@ pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContrib
     ResolvedContributions {
         acp_adapters: acp_adapter::resolve_acp_adapters(&contributes.acp_adapters, ext_name, ext_dir),
         mcp_servers: mcp_server::resolve_mcp_servers(&contributes.mcp_servers, ext_name),
-        assistants: assistant::resolve_assistants(&contributes.assistants, ext_name, ext_dir),
         agents: agent::resolve_agents(&contributes.agents, ext_name, ext_dir),
         themes: theme::resolve_themes(&contributes.themes, ext_name, ext_dir),
         channel_plugins: channel_plugin::resolve_channel_plugins(&contributes.channel_plugins, ext_name, ext_dir),
@@ -84,7 +82,6 @@ fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContr
 
     target.acp_adapters.extend(source.acp_adapters);
     target.mcp_servers.extend(source.mcp_servers);
-    target.assistants.extend(source.assistants);
     target.agents.extend(source.agents);
     target.themes.extend(source.themes);
     target.channel_plugins.extend(source.channel_plugins);
@@ -157,7 +154,7 @@ mod tests {
         let result = resolve_extension_contributions(&ext);
         assert!(result.acp_adapters.is_empty());
         assert!(result.mcp_servers.is_empty());
-        assert!(result.assistants.is_empty());
+        assert!(result.agents.is_empty());
     }
 
     #[test]

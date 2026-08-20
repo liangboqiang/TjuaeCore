@@ -265,23 +265,6 @@ pub struct SkillOperationResponse {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ReadAssistantRuleRequest {
-    pub assistant_id: String,
-    #[serde(default)]
-    pub locale: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WriteAssistantRuleRequest {
-    pub assistant_id: String,
-    pub content: String,
-    #[serde(default)]
-    pub locale: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

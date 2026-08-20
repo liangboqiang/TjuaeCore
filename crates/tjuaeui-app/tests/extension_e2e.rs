@@ -16,16 +16,13 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     let ext_root = tmp.path().join("extensions");
     let ext_dir = ext_root.join("legacy-suite");
     std::fs::create_dir_all(ext_dir.join("assets")).unwrap();
-    std::fs::create_dir_all(ext_dir.join("assistants")).unwrap();
     std::fs::create_dir_all(ext_dir.join("agents")).unwrap();
     std::fs::create_dir_all(ext_dir.join("themes")).unwrap();
 
     std::fs::write(ext_dir.join("assets/adapter.png"), "adapter").unwrap();
-    std::fs::write(ext_dir.join("assets/assistant.png"), "assistant").unwrap();
     std::fs::write(ext_dir.join("assets/agent.png"), "agent").unwrap();
     std::fs::write(ext_dir.join("assets/theme-cover.png"), "cover").unwrap();
     std::fs::write(ext_dir.join("assets/channel.png"), "channel").unwrap();
-    std::fs::write(ext_dir.join("assistants/context.md"), "Assistant context from file.").unwrap();
     std::fs::write(ext_dir.join("agents/context.md"), "Agent context from file.").unwrap();
     std::fs::write(ext_dir.join("themes/dark.css"), ":root { --legacy-bg: #111; }").unwrap();
 
@@ -84,18 +81,6 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                                 "default": 30
                             }
                         ]
-                    }
-                ],
-                "assistants": [
-                    {
-                        "id": "legacy-assistant",
-                        "name": "Legacy Assistant",
-                        "avatar": "assets/assistant.png",
-                        "agentId": "cc126dd5",
-                        "contextFile": "assistants/context.md",
-                        "models": ["gemini-2.0-flash"],
-                        "enabledSkills": ["review-skill"],
-                        "prompts": ["Review the diff"]
                     }
                 ],
                 "agents": [
@@ -200,21 +185,6 @@ async fn eq3_get_themes_empty() {
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/themes", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-}
-
-#[tokio::test]
-async fn eq4_get_assistants_empty() {
-    let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let resp = app
-        .oneshot(get_with_token("/api/extensions/assistants", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -426,32 +396,11 @@ async fn eq15_legacy_acp_and_mcp_endpoints_preserve_contract() {
 }
 
 #[tokio::test]
-async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
+async fn eq16_legacy_agent_and_theme_endpoints_preserve_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
-
-    let assistant_resp = app
-        .clone()
-        .oneshot(get_with_token("/api/extensions/assistants", &token))
-        .await
-        .unwrap();
-    assert_eq!(assistant_resp.status(), StatusCode::OK);
-    let assistant_json = body_json(assistant_resp).await;
-    let assistants = assistant_json["data"].as_array().unwrap();
-    assert_eq!(assistants.len(), 1);
-    assert_eq!(assistants[0]["id"], "ext-legacy-assistant");
-    assert_eq!(assistants[0]["agentId"], "cc126dd5");
-    assert_eq!(assistants[0]["enabledSkills"][0], "review-skill");
-    assert_eq!(assistants[0]["prompts"][0], "Review the diff");
-    assert_eq!(assistants[0]["models"][0], "gemini-2.0-flash");
-    assert_eq!(assistants[0]["_kind"], "assistant");
-    assert_eq!(assistants[0]["context"], "Assistant context from file.");
-    assert_eq!(
-        assistants[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/assistant.png"
-    );
 
     let agent_resp = app
         .clone()

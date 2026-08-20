@@ -17,13 +17,6 @@ pub enum AssistantError {
 
     #[error("内部错误：{0}")]
     Internal(String),
-
-    /// Assistant storage bootstrap lost a concurrent-startup race and exhausted
-    /// its retries (concurrent-startup regression). Distinct from a genuine failure
-    /// so the router can emit a benign, recoverable boundary stage. Constructed
-    /// only by the bootstrap retry path — never by `From<DbError>`.
-    #[error("并发初始化冲突：{0}")]
-    ConcurrentBootstrapContention(String),
 }
 
 impl From<DbError> for AssistantError {

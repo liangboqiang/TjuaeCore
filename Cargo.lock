@@ -5037,24 +5037,33 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "dirs",
  "http-body-util",
  "include_dir",
+ "mime_guess",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.19",
  "tjuaeui-api-types",
  "tjuaeui-auth",
+ "tjuaeui-catalog",
  "tjuaeui-common",
  "tjuaeui-db",
  "tjuaeui-extension",
+ "tjuaeui-file",
  "tjuaeui-realtime",
+ "tjuaeui-runtime",
  "tokio",
  "tower",
  "tracing",
+ "url",
  "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -5079,6 +5088,22 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "tjuaeui-catalog"
+version = "0.2.0"
+dependencies = [
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tjuaeui-runtime",
+ "tokio",
+ "url",
 ]
 
 [[package]]

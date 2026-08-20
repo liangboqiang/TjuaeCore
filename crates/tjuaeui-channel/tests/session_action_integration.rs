@@ -5,12 +5,15 @@
 
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use tjuaeui_api_types::WebSocketMessage;
 use tjuaeui_common::{generate_id, now_ms};
 use tjuaeui_db::models::AssistantUserRow;
 use tjuaeui_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
 use tjuaeui_realtime::EventBroadcaster;
 
+use support::StaticChannelAssistantCatalog;
 use tjuaeui_channel::action::{ActionExecutor, MessageResult};
 use tjuaeui_channel::channel_settings::ChannelSettingsService;
 use tjuaeui_channel::pairing::PairingService;
@@ -56,7 +59,10 @@ async fn setup() -> (
     let session_mgr_arc = Arc::new(SessionManager::new(repo.clone()));
     let pref_repo: Arc<dyn tjuaeui_db::IClientPreferenceRepository> =
         Arc::new(tjuaeui_db::SqliteClientPreferenceRepository::new(db.pool().clone()));
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::empty()),
+    ));
     let executor = ActionExecutor::new(pairing_arc, session_mgr_arc, settings);
 
     // Keep db alive

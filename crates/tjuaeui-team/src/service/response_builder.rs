@@ -37,12 +37,11 @@ impl TeamSessionService {
 
     async fn resolve_agent_icon(&self, agent: &TeamAgent) -> Result<Option<String>, TeamError> {
         if let Some(assistant_id) = agent.assistant_id.as_deref()
-            && let Some(definition) = self.assistant_definition_repo.get_by_assistant_id(assistant_id).await?
-            && let Some(icon) = assistant_icon(
-                definition.assistant_id.as_str(),
-                &definition.avatar_type,
-                definition.avatar_value.as_deref(),
-            )
+            && let Some(icon) = self
+                .assistant_catalog
+                .resolve_team_selectable_assistant(assistant_id)
+                .await?
+                .and_then(|assistant| assistant.avatar)
         {
             return Ok(Some(icon));
         }
@@ -66,39 +65,5 @@ impl TeamSessionService {
         }
 
         Ok(None)
-    }
-}
-
-fn assistant_icon(assistant_id: &str, avatar_type: &str, avatar_value: Option<&str>) -> Option<String> {
-    tjuaeui_api_types::assistant_avatar_response_value(avatar_type, avatar_value, assistant_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn assistant_icon_routes_user_asset_through_backend_even_without_value() {
-        assert_eq!(
-            assistant_icon("assistant-1", "user_asset", None).as_deref(),
-            Some("/api/assistants/assistant-1/avatar")
-        );
-    }
-
-    #[test]
-    fn assistant_icon_does_not_pass_through_direct_asset_values() {
-        assert_eq!(
-            assistant_icon("assistant-1", "user_asset", Some("data:image/png;base64,abc")).as_deref(),
-            Some("/api/assistants/assistant-1/avatar")
-        );
-        assert_eq!(
-            assistant_icon("assistant-1", "user_asset", Some("https://example.invalid/avatar.png")).as_deref(),
-            Some("/api/assistants/assistant-1/avatar")
-        );
-    }
-
-    #[test]
-    fn assistant_icon_returns_none_for_none_avatar_type() {
-        assert_eq!(assistant_icon("assistant-1", "none", None), None);
     }
 }

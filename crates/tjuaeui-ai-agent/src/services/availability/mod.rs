@@ -469,10 +469,9 @@ fn explicit_probe_args(meta: &AgentMetadata) -> Result<Vec<String>, String> {
 /// Readiness check for the built-in tjuae_cli agent.
 ///
 /// tjuae_cli has no external CLI; it runs models through configured providers.
-/// Mirrors `AssistantService::resolve_default_agent_type`, which treats tjuae_cli
-/// as usable exactly when at least one provider is enabled. With no enabled
-/// provider it cannot complete a turn, so we report it offline with a
-/// `no_provider` code the UI maps to "configure a model" guidance.
+/// The assistant catalog can bind this agent only when at least one provider is
+/// enabled. With no enabled provider it cannot complete a turn, so we report it
+/// offline with a `no_provider` code the UI maps to "configure a model" guidance.
 async fn probe_tjuae_cli_provider_readiness(
     provider_repo: &Arc<dyn IProviderRepository>,
 ) -> (AgentSnapshotCheckStatus, Option<String>, Option<String>) {

@@ -686,6 +686,17 @@ mod tests {
         }
     }
 
+    struct EmptyAssistantCatalog;
+
+    #[async_trait::async_trait]
+    impl crate::channel_settings::ChannelAssistantCatalogPort for EmptyAssistantCatalog {
+        async fn list_runtime_assistants(
+            &self,
+        ) -> Result<Vec<crate::channel_settings::ChannelAssistantCatalogEntry>, crate::error::ChannelError> {
+            Ok(Vec::new())
+        }
+    }
+
     // ── Test helpers ───────────────────────────────────────────────────
 
     fn setup() -> (ActionExecutor, Arc<MockRepo>) {
@@ -694,7 +705,7 @@ mod tests {
         let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster));
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
         let pref_repo: Arc<dyn IClientPreferenceRepository> = Arc::new(MockPrefRepo);
-        let settings = Arc::new(ChannelSettingsService::new(pref_repo));
+        let settings = Arc::new(ChannelSettingsService::new(pref_repo, Arc::new(EmptyAssistantCatalog)));
         let executor = ActionExecutor::new(pairing, session_mgr, settings);
         (executor, repo)
     }

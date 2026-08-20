@@ -1,28 +1,32 @@
 use std::sync::{Arc, Mutex};
 
+mod support;
+
 use async_trait::async_trait;
 use tjuaeui_ai_agent::agent_task::{AgentInstance, IAgentTask};
 use tjuaeui_ai_agent::protocol::events::FinishEventData;
 use tjuaeui_ai_agent::types::{BuildTaskOptions, SendMessageData};
 use tjuaeui_ai_agent::{AgentError, AgentSendError, AgentStreamEvent, IMockAgent, IWorkerTaskManager};
 use tjuaeui_api_types::WebSocketMessage;
-use tjuaeui_channel::channel_settings::ChannelSettingsService;
+use tjuaeui_channel::channel_settings::{ChannelAssistantCatalogEntry, ChannelSettingsService};
 use tjuaeui_channel::error::ChannelError;
 use tjuaeui_channel::message_service::ChannelMessageService;
 use tjuaeui_channel::types::PluginType;
 use tjuaeui_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs};
-use tjuaeui_conversation::ConversationService;
 use tjuaeui_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
+use tjuaeui_conversation::{
+    AssistantRuntimeCatalogPort, AssistantRuntimePreferenceUpdate, AssistantRuntimeProfile, ConversationService,
+};
 use tjuaeui_db::models::AssistantSessionRow;
-use tjuaeui_db::models::UpsertAssistantDefinitionParams;
 use tjuaeui_db::{
-    IAcpSessionRepository, IAssistantDefinitionRepository, IClientPreferenceRepository, IConversationRepository,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository, SqliteClientPreferenceRepository,
-    SqliteConversationRepository, init_database_memory,
+    IAcpSessionRepository, IClientPreferenceRepository, IConversationRepository, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    init_database_memory,
 };
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::broadcast;
+
+use support::StaticChannelAssistantCatalog;
 
 struct TestBroadcaster {
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
@@ -177,41 +181,64 @@ impl IWorkerTaskManager for RecordingTaskManager {
     }
 }
 
-fn bare_assistant_definition_params<'a>(
-    definition_id: &'a str,
-    assistant_id: &'a str,
-    agent_id: &'a str,
-) -> UpsertAssistantDefinitionParams<'a> {
-    UpsertAssistantDefinitionParams {
-        id: definition_id,
-        assistant_id,
-        source: "generated",
-        owner_type: "system",
-        source_ref: Some(assistant_id),
-        name: assistant_id,
-        name_i18n: "{}",
-        description: Some("Channel bare assistant"),
-        description_i18n: "{}",
-        avatar_type: "emoji",
-        avatar_value: Some("🤖"),
-        agent_id,
-        rule_resource_type: "user_file",
-        rule_resource_ref: None,
-        recommended_prompts: "[]",
-        recommended_prompts_i18n: "{}",
-        default_model_mode: "auto",
-        default_model_value: None,
-        default_permission_mode: "auto",
-        default_permission_value: None,
-        default_thought_level_mode: "auto",
-        default_thought_level_value: None,
-        default_skills_mode: "auto",
-        default_skill_ids: "[]",
-        custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
-        default_mcps_mode: "auto",
-        default_mcp_ids: "[]",
+struct StaticConversationAssistantCatalog {
+    profiles: Vec<AssistantRuntimeProfile>,
+}
+
+#[async_trait]
+impl AssistantRuntimeCatalogPort for StaticConversationAssistantCatalog {
+    async fn resolve_enabled(
+        &self,
+        assistant_id: &str,
+        _locale: Option<&str>,
+    ) -> Result<Option<AssistantRuntimeProfile>, String> {
+        Ok(self.profiles.iter().find(|profile| profile.id == assistant_id).cloned())
     }
+
+    async fn update_runtime_preferences(
+        &self,
+        _assistant_id: &str,
+        _updates: AssistantRuntimePreferenceUpdate<'_>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn assistant_profile(assistant_id: &str, name: &str, agent_id: &str) -> AssistantRuntimeProfile {
+    AssistantRuntimeProfile {
+        id: assistant_id.to_owned(),
+        source: "mine".to_owned(),
+        name: name.to_owned(),
+        avatar: "🤖".to_owned(),
+        agent_id: agent_id.to_owned(),
+        rules: String::new(),
+        model_mode: "auto".to_owned(),
+        model: None,
+        permission_mode: "auto".to_owned(),
+        permission: None,
+        thought_level_mode: "auto".to_owned(),
+        thought_level: None,
+        skill_ids: Vec::new(),
+        mcp_ids: Vec::new(),
+    }
+}
+
+fn channel_catalog_entry(assistant_id: &str, name: &str, agent_id: &str) -> ChannelAssistantCatalogEntry {
+    let (agent_type, backend) = if agent_id == "tjuaecli" {
+        ("tjuaecli".to_owned(), None)
+    } else {
+        ("acp".to_owned(), Some(agent_id.to_owned()))
+    };
+    ChannelAssistantCatalogEntry {
+        assistant_id: assistant_id.to_owned(),
+        name: name.to_owned(),
+        agent_type,
+        backend,
+    }
+}
+
+fn attach_assistant_catalog(service: &ConversationService, profiles: Vec<AssistantRuntimeProfile>) {
+    service.with_assistant_runtime_catalog(Arc::new(StaticConversationAssistantCatalog { profiles }));
 }
 
 #[tokio::test]
@@ -230,9 +257,10 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         Arc::new(SqliteAcpSessionRepository::new(pool.clone())),
     ));
 
-    let settings = Arc::new(ChannelSettingsService::new(Arc::new(
-        SqliteClientPreferenceRepository::new(pool),
-    )));
+    let settings = Arc::new(ChannelSettingsService::new(
+        Arc::new(SqliteClientPreferenceRepository::new(pool)),
+        Arc::new(StaticChannelAssistantCatalog::empty()),
+    ));
     let message_svc = ChannelMessageService::new(
         conversation_svc,
         Arc::clone(&task_manager),
@@ -285,22 +313,12 @@ async fn send_to_agent_persists_assistant_snapshot_for_channel_bound_assistant()
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         acp_session_repo.clone(),
     ));
+    attach_assistant_catalog(
+        conversation_svc.as_ref(),
+        vec![assistant_profile("bare-claude", "Claude", "claude")],
+    );
 
     let pref_repo = Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let overlay_repo = Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let assistant_preference_repo = Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
-    conversation_svc.with_assistant_definition_repo(definition_repo.clone());
-    conversation_svc.with_assistant_state_repo(overlay_repo.clone());
-    conversation_svc.with_assistant_preference_repo(assistant_preference_repo);
-    definition_repo
-        .upsert(&bare_assistant_definition_params(
-            "asstdef-channel-claude",
-            "bare-claude",
-            "claude",
-        ))
-        .await
-        .unwrap();
     pref_repo
         .upsert_batch(&[(
             "assistant.telegram.agent",
@@ -309,7 +327,14 @@ async fn send_to_agent_persists_assistant_snapshot_for_channel_bound_assistant()
         .await
         .unwrap();
 
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo).with_assistant_repos(definition_repo, overlay_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::new(vec![channel_catalog_entry(
+            "bare-claude",
+            "Claude",
+            "claude",
+        )])),
+    ));
     let message_svc = ChannelMessageService::new(
         conversation_svc,
         Arc::clone(&task_manager),
@@ -382,9 +407,10 @@ async fn send_to_agent_rejects_unresolvable_channel_assistant_binding() {
         )])
         .await
         .unwrap();
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let overlay_repo = Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo).with_assistant_repos(definition_repo, overlay_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::empty()),
+    ));
     let message_svc = ChannelMessageService::new(
         conversation_svc,
         Arc::clone(&task_manager),
@@ -432,24 +458,21 @@ async fn send_to_agent_without_saved_binding_defaults_to_bare_tjuae_cli_assistan
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         acp_session_repo,
     ));
+    attach_assistant_catalog(
+        conversation_svc.as_ref(),
+        vec![assistant_profile("bare-tjuaecli", "TjuaeCLI", "tjuaecli")],
+    );
 
     let pref_repo = Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let overlay_repo = Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let assistant_preference_repo = Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
-    conversation_svc.with_assistant_definition_repo(definition_repo.clone());
-    conversation_svc.with_assistant_state_repo(overlay_repo.clone());
-    conversation_svc.with_assistant_preference_repo(assistant_preference_repo);
-    definition_repo
-        .upsert(&bare_assistant_definition_params(
-            "asstdef-channel-tjuaecli",
-            "bare-tjuaecli",
-            "tjuaecli",
-        ))
-        .await
-        .unwrap();
 
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo).with_assistant_repos(definition_repo, overlay_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::new(vec![channel_catalog_entry(
+            "bare-tjuaecli",
+            "TjuaeCLI",
+            "tjuaecli",
+        )])),
+    ));
     let message_svc = ChannelMessageService::new(
         conversation_svc,
         Arc::clone(&task_manager),
@@ -487,7 +510,7 @@ async fn send_to_agent_without_saved_binding_defaults_to_bare_tjuae_cli_assistan
 }
 
 #[tokio::test]
-async fn send_to_agent_without_assistant_name_falls_back_to_legacy_channel_name() {
+async fn send_to_agent_without_assistant_name_uses_channel_fallback_name() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
 
@@ -504,28 +527,25 @@ async fn send_to_agent_without_assistant_name_falls_back_to_legacy_channel_name(
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         acp_session_repo,
     ));
+    attach_assistant_catalog(
+        conversation_svc.as_ref(),
+        vec![assistant_profile("bare-codex", "bare-codex", "codex")],
+    );
 
     let pref_repo = Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let overlay_repo = Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let assistant_preference_repo = Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
-    conversation_svc.with_assistant_definition_repo(definition_repo.clone());
-    conversation_svc.with_assistant_state_repo(overlay_repo.clone());
-    conversation_svc.with_assistant_preference_repo(assistant_preference_repo);
-    definition_repo
-        .upsert(&bare_assistant_definition_params(
-            "asstdef-channel-codex",
-            "bare-codex",
-            "codex",
-        ))
-        .await
-        .unwrap();
     pref_repo
         .upsert_batch(&[("assistant.telegram.agent", r#"{"assistant_id":"bare-codex"}"#)])
         .await
         .unwrap();
 
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo).with_assistant_repos(definition_repo, overlay_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::new(vec![channel_catalog_entry(
+            "bare-codex",
+            "bare-codex",
+            "codex",
+        )])),
+    ));
     let message_svc = ChannelMessageService::new(
         conversation_svc,
         Arc::clone(&task_manager),

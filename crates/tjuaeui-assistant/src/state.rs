@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
-use crate::service::AssistantService;
+use crate::{AssistantActivationService, AssistantAgentCatalogPort, AssistantCatalogService};
 
 /// Shared state injected into `/api/assistants/*` handlers.
 #[derive(Clone)]
 pub struct AssistantRouterState {
-    pub service: Arc<AssistantService>,
+    pub catalog: Arc<AssistantCatalogService>,
+    pub activation: Arc<AssistantActivationService>,
+    pub agents: Arc<dyn AssistantAgentCatalogPort>,
 }

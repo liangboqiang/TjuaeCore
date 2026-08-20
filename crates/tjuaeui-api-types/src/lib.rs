@@ -6,7 +6,7 @@ mod acp_prompt_hook;
 mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
-mod assistant;
+mod assistant_catalog;
 mod auth;
 mod channel;
 mod confirmation;
@@ -51,14 +51,20 @@ pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind, AgentErrorResolutionTarget,
     AgentStreamErrorData,
 };
-pub use assistant::{
-    AssistantAgentResponse, AssistantCapabilitiesResponse, AssistantDefaultListRequest, AssistantDefaultListResponse,
-    AssistantDefaultScalarRequest, AssistantDefaultScalarResponse, AssistantDefaultsRequest, AssistantDefaultsResponse,
-    AssistantDetailResponse, AssistantEngineResponse, AssistantPreferencesResponse, AssistantProfileResponse,
-    AssistantPromptsResponse, AssistantResponse, AssistantRulesResponse, AssistantSource, AssistantStateResponse,
-    CreateAssistantRequest, ImportAssistantsRequest, ImportAssistantsResult, ImportError, SetAssistantStateRequest,
-    UpdateAssistantRequest, assistant_avatar_response_value, assistant_avatar_response_value_with_version,
-    is_local_avatar_value,
+pub use assistant_catalog::{
+    ActivateAssistantRequest, AssistantActivationAction, AssistantActivationCandidateResponse,
+    AssistantActivationChoice, AssistantActivationGroupResponse, AssistantActivationItemResponse,
+    AssistantActivationPlanResponse, AssistantActivationStatus, AssistantCatalogDetailResponse,
+    AssistantCatalogFileContentResponse, AssistantCatalogFileQuery, AssistantCatalogFileResponse,
+    AssistantCatalogItemResponse, AssistantCatalogPageResponse, AssistantCatalogQuery, AssistantDefaultRef,
+    AssistantDefaultScalar, AssistantDefaultsCatalogResponse, AssistantIdentityResponse, AssistantManifestResponse,
+    AssistantOperationResponse, AssistantPreferencesCatalogResponse, AssistantRequirementKind,
+    AssistantRequirementResponse, AssistantRuntimeAgentResponse, AssistantRuntimeOptionResponse,
+    AssistantSourceResponse, AssistantVersionComparisonResponse, AssistantVersionFileDiffResponse,
+    AssistantVersionQuery, AssistantVersionResponse, CopyAssistantToMineRequest, CreateMineAssistantRequest,
+    ExportAssistantRequest, ExportAssistantResponse, PrepareAssistantRequest, PublishAssistantCatalogRequest,
+    PublishAssistantCatalogResponse, SaveAssistantCatalogFileRequest, UpdateAssistantCatalogPreferencesRequest,
+    UpdateAssistantCatalogSettingsRequest, UpdateAssistantRuntimeOverridesRequest,
 };
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser, QrLoginRequest,
@@ -146,11 +152,10 @@ pub use shell::{
 };
 pub use skill::{
     CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest, ImportSkillRequest,
-    ReadAssistantRuleRequest, SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse,
-    SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
-    SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
-    SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
-    UpdateSkillPreferencesRequest, WriteAssistantRuleRequest,
+    SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse, SkillCatalogFileQuery,
+    SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse,
+    SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse, SkillVersionComparisonResponse,
+    SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse, UpdateSkillPreferencesRequest,
 };
 pub use system::{
     ClientPreferencesResponse, DEFAULT_NETWORK_PROXY_BYPASS, FeedbackDiagnosticsContextResponse,

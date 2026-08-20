@@ -133,29 +133,6 @@ pub struct ExtMcpServer {
     pub config: serde_json::Value,
 }
 
-/// Assistant contributed by an extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtAssistant {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "agentId")]
-    pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enabledSkills")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
 /// Autonomous agent contributed by an extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtAgent {
@@ -276,8 +253,6 @@ pub struct ExtContributes {
     pub acp_adapters: Vec<ExtAcpAdapter>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<ExtMcpServer>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assistants: Vec<ExtAssistant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<ExtAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -508,30 +483,6 @@ pub struct ResolvedMcpServer {
     pub config: serde_json::Value,
 }
 
-/// Resolved assistant (after @file: and env template resolution).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedAssistant {
-    pub extension_name: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled_skills: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prompts: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
 /// Resolved agent (after @file: and env template resolution).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResolvedAgent {
@@ -637,7 +588,6 @@ pub struct ResolvedModelProvider {
 pub struct ResolvedContributions {
     pub acp_adapters: Vec<ResolvedAcpAdapter>,
     pub mcp_servers: Vec<ResolvedMcpServer>,
-    pub assistants: Vec<ResolvedAssistant>,
     pub agents: Vec<ResolvedAgent>,
     pub themes: Vec<ResolvedTheme>,
     pub channel_plugins: Vec<ResolvedChannelPlugin>,

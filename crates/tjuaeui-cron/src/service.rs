@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,9 +13,8 @@ use tjuaeui_common::{
     validate_workspace_path_availability,
 };
 use tjuaeui_db::{
-    ClaimCronRunParams, CronRunClaimResult, FinishCronRunParams, IAgentMetadataRepository,
-    IAssistantDefinitionRepository, IAssistantOverlayRepository, ICronRepository, UpdateCronJobParams,
-    models::AgentMetadataRow, resolve_agent_binding_from_rows, runtime_backend_for_agent,
+    ClaimCronRunParams, CronRunClaimResult, FinishCronRunParams, IAgentMetadataRepository, ICronRepository,
+    UpdateCronJobParams, models::AgentMetadataRow, resolve_agent_binding_from_rows, runtime_backend_for_agent,
 };
 use tracing::{debug, error, info, warn};
 
@@ -50,8 +50,7 @@ const RUN_HISTORY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 pub struct CronService {
     repo: Arc<dyn ICronRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
-    assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
-    assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
+    assistant_catalog: Arc<dyn CronAssistantCatalogPort>,
     scheduler: Arc<CronScheduler>,
     executor: Arc<JobExecutor>,
     emitter: CronEventEmitter,
@@ -62,8 +61,7 @@ pub struct CronService {
 pub struct CronServiceDeps {
     pub repo: Arc<dyn ICronRepository>,
     pub agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
-    pub assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
-    pub assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
+    pub assistant_catalog: Arc<dyn CronAssistantCatalogPort>,
     pub scheduler: Arc<CronScheduler>,
     pub executor: Arc<JobExecutor>,
     pub emitter: CronEventEmitter,
@@ -75,8 +73,7 @@ impl CronService {
         Self {
             repo: deps.repo,
             agent_metadata_repo: deps.agent_metadata_repo,
-            assistant_definition_repo: deps.assistant_definition_repo,
-            assistant_overlay_repo: deps.assistant_overlay_repo,
+            assistant_catalog: deps.assistant_catalog,
             scheduler: deps.scheduler,
             executor: deps.executor,
             emitter: deps.emitter,
@@ -823,19 +820,12 @@ impl CronService {
     }
 
     async fn resolve_agent_type_for_assistant_id(&self, assistant_id: &str) -> Result<String, CronError> {
-        let definition = self
-            .assistant_definition_repo
-            .get_by_assistant_id(assistant_id)
+        let assistant = self
+            .assistant_catalog
+            .resolve_runtime_assistant(assistant_id)
             .await?
             .ok_or_else(|| CronError::InvalidAgentConfig(format!("找不到助手 '{assistant_id}'")))?;
-        let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
-        let effective_agent_id = overlay
-            .as_ref()
-            .and_then(|item| item.agent_id_override.as_deref())
-            .unwrap_or(definition.agent_id.as_str());
-        let effective_backend = self.runtime_backend_for_agent_id(effective_agent_id).await?;
-
-        Ok(runtime_agent_type_for_backend(&effective_backend).to_owned())
+        Ok(runtime_agent_type_for_backend(&assistant.backend).to_owned())
     }
 
     async fn bind_existing_conversation_if_needed(&self, job: &CronJob) {
@@ -1661,16 +1651,11 @@ impl CronService {
             return Ok(None);
         };
 
-        let Some(definition) = self.assistant_definition_repo.get_by_assistant_id(assistant_id).await? else {
-            return Ok(None);
-        };
-        let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
-        let effective_agent_id = overlay
-            .as_ref()
-            .and_then(|item| item.agent_id_override.as_deref())
-            .unwrap_or(definition.agent_id.as_str());
-
-        Ok(Some(self.runtime_backend_for_agent_id(effective_agent_id).await?))
+        Ok(self
+            .assistant_catalog
+            .resolve_runtime_assistant(assistant_id)
+            .await?
+            .map(|assistant| assistant.backend))
     }
 
     async fn resolve_assistant_name(&self, assistant_id: Option<&str>) -> Result<Option<String>, CronError> {
@@ -1679,51 +1664,33 @@ impl CronService {
         };
 
         Ok(self
-            .assistant_definition_repo
-            .get_by_assistant_id(assistant_id)
+            .assistant_catalog
+            .resolve_runtime_assistant(assistant_id)
             .await?
-            .map(|definition| definition.name.trim().to_owned())
+            .map(|assistant| assistant.name.trim().to_owned())
             .filter(|value| !value.is_empty()))
     }
 
     async fn resolve_assistant_id_for_agent_label(&self, agent_label: &str) -> Option<String> {
         let rows = self.agent_metadata_repo.list_all().await.ok()?;
         let binding = resolve_agent_binding_from_rows(&rows, agent_label)?;
-        self.assistant_definition_repo
-            .list()
+        self.assistant_catalog
+            .list_runtime_assistants()
             .await
             .ok()?
             .into_iter()
-            .filter(|definition| definition.deleted_at.is_none() && definition.agent_id == binding.agent_id)
-            .min_by_key(|definition| {
-                let source_rank = match definition.source.as_str() {
-                    "builtin" => 0,
-                    "generated" => 1,
-                    "user" => 2,
-                    _ => 3,
-                };
-                (source_rank, definition.name.clone())
-            })
-            .map(|definition| definition.assistant_id)
+            .find(|assistant| assistant.agent_id == binding.agent_id || assistant.backend == binding.runtime_backend)
+            .map(|assistant| assistant.assistant_id)
     }
 
     async fn resolve_default_assistant_id(&self) -> Option<String> {
-        self.assistant_definition_repo
-            .list()
+        self.assistant_catalog
+            .list_runtime_assistants()
             .await
             .ok()?
             .into_iter()
-            .filter(|definition| definition.deleted_at.is_none())
-            .min_by_key(|definition| {
-                let source_rank = match definition.source.as_str() {
-                    "builtin" => 0,
-                    "generated" => 1,
-                    "user" => 2,
-                    _ => 3,
-                };
-                (source_rank, definition.name.clone())
-            })
-            .map(|definition| definition.assistant_id)
+            .next()
+            .map(|assistant| assistant.assistant_id)
     }
 
     async fn runtime_backend_for_agent_id(&self, agent_id: &str) -> Result<String, CronError> {
@@ -1763,16 +1730,11 @@ impl CronService {
             return Ok(None);
         };
 
-        let Some(definition) = self.assistant_definition_repo.get_by_assistant_id(assistant_id).await? else {
+        let Some(assistant) = self.assistant_catalog.resolve_runtime_assistant(assistant_id).await? else {
             return Ok(None);
         };
-        let overlay = self.assistant_overlay_repo.get(&definition.id).await?;
-        let effective_agent_id = overlay
-            .as_ref()
-            .and_then(|item| item.agent_id_override.as_deref())
-            .unwrap_or(definition.agent_id.as_str());
 
-        self.resolve_agent_metadata_for_value(Some(effective_agent_id)).await
+        self.resolve_agent_metadata_for_value(Some(&assistant.agent_id)).await
     }
 
     async fn resolve_agent_metadata_for_value(
@@ -1789,6 +1751,30 @@ impl CronService {
         };
 
         Ok(rows.into_iter().find(|row| row.id == binding.agent_id))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronAssistantCatalogEntry {
+    pub assistant_id: String,
+    pub name: String,
+    pub agent_id: String,
+    pub backend: String,
+}
+
+#[async_trait]
+pub trait CronAssistantCatalogPort: Send + Sync {
+    async fn list_runtime_assistants(&self) -> Result<Vec<CronAssistantCatalogEntry>, CronError>;
+
+    async fn resolve_runtime_assistant(
+        &self,
+        assistant_id: &str,
+    ) -> Result<Option<CronAssistantCatalogEntry>, CronError> {
+        Ok(self
+            .list_runtime_assistants()
+            .await?
+            .into_iter()
+            .find(|assistant| assistant.assistant_id == assistant_id))
     }
 }
 

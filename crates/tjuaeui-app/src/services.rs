@@ -15,7 +15,6 @@ use tjuaeui_conversation::{ConversationService, runtime_state::ConversationRunti
 use tjuaeui_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository, IMcpServerRepository,
     IProjectStore, IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
-    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository,
     SqliteConversationRepository, SqliteMcpServerRepository, SqliteProjectStore, SqliteProviderRepository,
     SqliteSettingsRepository, SqliteUserRepository,
 };
@@ -326,15 +325,6 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
     .with_runtime_helper_context(deps.runtime_helper_bin, deps.runtime_base_url)
     .with_runtime_token_service(deps.runtime_token_service);
     service.with_mcp_server_repo(Arc::new(SqliteMcpServerRepository::new(deps.database.pool().clone())));
-    service.with_assistant_definition_repo(Arc::new(SqliteAssistantDefinitionRepository::new(
-        deps.database.pool().clone(),
-    )));
-    service.with_assistant_state_repo(Arc::new(SqliteAssistantOverlayRepository::new(
-        deps.database.pool().clone(),
-    )));
-    service.with_assistant_preference_repo(Arc::new(SqliteAssistantPreferenceRepository::new(
-        deps.database.pool().clone(),
-    )));
     if let Some(hook) = deps.task_manager_delete_hook {
         service.with_delete_hook(hook);
     }

@@ -194,7 +194,6 @@ fn normalize_contributes(value: &mut Value) {
 
     normalize_array_entries(obj.get_mut("acp_adapters"), normalize_acp_adapter);
     normalize_array_entries(obj.get_mut("mcp_servers"), normalize_mcp_server);
-    normalize_array_entries(obj.get_mut("assistants"), normalize_assistant);
     normalize_array_entries(obj.get_mut("agents"), normalize_agent);
     normalize_array_entries(obj.get_mut("skills"), normalize_skill);
     normalize_array_entries(obj.get_mut("channel_plugins"), normalize_channel_plugin);
@@ -246,13 +245,12 @@ fn normalize_mcp_server(value: &mut Value) {
     }
 }
 
-fn normalize_assistant(value: &mut Value) {
+fn normalize_agent(value: &mut Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
 
     move_key(obj, "avatar", "icon");
-    move_key(obj, "systemPrompt", "system_prompt");
     if !obj.contains_key("context") {
         if let Some(Value::String(path)) = obj.remove("contextFile") {
             obj.insert("context".into(), Value::String(format!("@file:{path}")));
@@ -260,14 +258,6 @@ fn normalize_assistant(value: &mut Value) {
     } else {
         obj.remove("contextFile");
     }
-}
-
-fn normalize_agent(value: &mut Value) {
-    normalize_assistant(value);
-    let Some(obj) = value.as_object_mut() else {
-        return;
-    };
-
     move_key(obj, "agentType", "agent_type");
 }
 

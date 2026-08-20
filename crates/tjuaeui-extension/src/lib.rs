@@ -3,7 +3,6 @@
 //! Extension registry plus the single local skill-workspace model.
 
 mod asset_paths;
-pub mod classifier;
 pub mod constants;
 pub mod dependency;
 pub mod error;
@@ -26,7 +25,6 @@ pub mod template;
 pub mod types;
 pub mod watcher;
 
-pub use classifier::{AssistantClassifier, AssistantRuleDispatcher, DefaultUserClassifier};
 pub use constants::*;
 pub use dependency::{DependencyIssue, DependencyValidationResult, topological_sort, validate_dependencies};
 pub use error::ExtensionError;

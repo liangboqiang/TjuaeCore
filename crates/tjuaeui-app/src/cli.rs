@@ -361,31 +361,26 @@ pub(crate) enum ConfigAssistantsCommand {
     List,
     Get,
     Create,
-    Update,
     Delete,
-    Import,
-    State,
-    Rule(ConfigAssistantRuleArgs),
-    Skill(ConfigAssistantSkillArgs),
+    Copy,
+    Preferences,
+    File(ConfigAssistantFileArgs),
+    Prepare,
+    Activate,
+    Export,
+    Publish,
 }
 
 #[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigAssistantRuleArgs {
+pub(crate) struct ConfigAssistantFileArgs {
     #[command(subcommand)]
-    pub command: ConfigAssistantTextCommand,
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ConfigAssistantSkillArgs {
-    #[command(subcommand)]
-    pub command: ConfigAssistantTextCommand,
+    pub command: ConfigAssistantFileCommand,
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]
-pub(crate) enum ConfigAssistantTextCommand {
+pub(crate) enum ConfigAssistantFileCommand {
     Read,
     Write,
-    Delete,
 }
 
 #[derive(Args, Debug, Clone)]

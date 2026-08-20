@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+mod support;
+
+use support::StaticChannelAssistantCatalog;
 use tjuaeui_channel::action::{ActionExecutor, MessageResult};
 use tjuaeui_channel::channel_settings::ChannelSettingsService;
 use tjuaeui_channel::pairing::PairingService;
@@ -42,7 +45,10 @@ async fn unauthorized_user_gets_pairing_response() {
 
     let pref_repo: Arc<dyn tjuaeui_db::IClientPreferenceRepository> =
         Arc::new(tjuaeui_db::SqliteClientPreferenceRepository::new(pool));
-    let settings = Arc::new(ChannelSettingsService::new(pref_repo));
+    let settings = Arc::new(ChannelSettingsService::new(
+        pref_repo,
+        Arc::new(StaticChannelAssistantCatalog::empty()),
+    ));
 
     let pairing = Arc::new(PairingService::new(repo.clone(), bus));
     let session_mgr = Arc::new(SessionManager::new(repo));

@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::cli::{
     ConfigAgentCustomCommand, ConfigAgentOverridesCommand, ConfigAgentsArgs, ConfigAgentsCommand, ConfigArgs,
-    ConfigAssistantTextCommand, ConfigAssistantsArgs, ConfigAssistantsCommand, ConfigCommand, ConfigConversationArgs,
+    ConfigAssistantFileCommand, ConfigAssistantsArgs, ConfigAssistantsCommand, ConfigCommand, ConfigConversationArgs,
     ConfigConversationCommand, ConfigCronArgs, ConfigCronCommand, ConfigCronCurrentArgs, ConfigCronCurrentCommand,
     ConfigCronJobSkillCommand, ConfigCronJobsArgs, ConfigCronJobsCommand, ConfigMcpArgs, ConfigMcpCommand,
     ConfigMcpOauthCommand, ConfigMcpServersCommand, ConfigProviderModelsCommand, ConfigProvidersArgs,
@@ -84,219 +84,330 @@ async fn run_conversation(client: &reqwest::Client, args: ConfigConversationArgs
 
 async fn run_assistants(client: &reqwest::Client, args: ConfigAssistantsArgs) -> Result<(), ConfigError> {
     match args.command {
-        ConfigAssistantsCommand::List => {
-            let command = "config assistants list";
-            let env = ConfigEnv::from_env(command)?;
-            let data = request_json(client, &env, Method::GET, "/api/assistants", None, command).await?;
-            print_envelope(data, meta(None), command)
-        }
+        ConfigAssistantsCommand::List => run_assistant_list(client).await,
         ConfigAssistantsCommand::Get => run_assistant_get(client).await,
-        ConfigAssistantsCommand::Create => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config assistants create",
-                Method::POST,
-                "/api/assistants",
-                "/api/assistants",
-                false,
-            )
-            .await
-        }
-        ConfigAssistantsCommand::Update => run_assistant_update(client).await,
+        ConfigAssistantsCommand::Create => run_assistant_create(client).await,
         ConfigAssistantsCommand::Delete => run_assistant_delete(client).await,
-        ConfigAssistantsCommand::Import => {
-            run_payload_request_with_collection_readback(
-                client,
-                "config assistants import",
-                Method::POST,
-                "/api/assistants/import",
-                "/api/assistants",
-                false,
-            )
-            .await
-        }
-        ConfigAssistantsCommand::State => run_assistant_state(client).await,
-        ConfigAssistantsCommand::Rule(args) => {
-            run_assistant_text(client, "rule", args.command, "/api/skills/assistant-rule").await
-        }
-        ConfigAssistantsCommand::Skill(args) => {
-            run_assistant_text(client, "skill", args.command, "/api/skills/assistant-skill").await
-        }
+        ConfigAssistantsCommand::Copy => run_assistant_copy(client).await,
+        ConfigAssistantsCommand::Preferences => run_assistant_preferences(client).await,
+        ConfigAssistantsCommand::File(args) => run_assistant_file(client, args.command).await,
+        ConfigAssistantsCommand::Prepare => run_assistant_prepare(client).await,
+        ConfigAssistantsCommand::Activate => run_assistant_activate(client).await,
+        ConfigAssistantsCommand::Export => run_assistant_export(client).await,
+        ConfigAssistantsCommand::Publish => run_assistant_publish(client).await,
     }
+}
+
+async fn run_assistant_list(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants list";
+    let env = ConfigEnv::from_env(command)?;
+    let mine = request_json(
+        client,
+        &env,
+        Method::GET,
+        "/api/assistants/catalog/mine?limit=100",
+        None,
+        command,
+    )
+    .await?;
+    let hub = request_json(
+        client,
+        &env,
+        Method::GET,
+        "/api/assistants/catalog/tjuae-hub?limit=100",
+        None,
+        command,
+    )
+    .await?;
+    print_envelope(json!({ "mine": mine, "tjuaeHub": hub }), meta(None), command)
 }
 
 async fn run_assistant_get(client: &reqwest::Client) -> Result<(), ConfigError> {
     let command = "config assistants get";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = required_string_field(&payload, "assistant_id", command)?;
-    let locale = optional_string_field(&payload, "locale");
-    let path = assistant_detail_path(&id, locale.as_deref());
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let version = take_optional_string_field(&mut payload, "version");
+    reject_remaining_fields(&payload, command)?;
+    let mut path = assistant_catalog_resource_path(&source, &namespace, &slug);
+    if let Some(version) = version {
+        path.push_str("?version=");
+        path.push_str(&encode_query_component(&version));
+    }
     let data = request_json(client, &env, Method::GET, &path, None, command).await?;
-    print_envelope(data, meta(Some(selectors)), command)
+    print_envelope(data, meta(None), command)
 }
 
-async fn run_assistant_update(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config assistants update";
+async fn run_assistant_create(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants create";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = take_required_string_field(&mut payload, "assistant_id", command)?;
-    let locale = take_optional_string_field(&mut payload, "locale");
-    let detail_path = assistant_detail_path(&id, locale.as_deref());
-    let before = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let update_path = format!("/api/assistants/{}", encode_path_segment(&id));
-    let data = request_json(client, &env, Method::PUT, &update_path, Some(payload), command).await?;
-    let after = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
-}
-
-async fn run_assistant_state(client: &reqwest::Client) -> Result<(), ConfigError> {
-    let command = "config assistants state";
-    let env = ConfigEnv::from_env(command)?;
-    let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = take_required_string_field(&mut payload, "assistant_id", command)?;
-    let path = format!("/api/assistants/{}/state", encode_path_segment(&id));
-    let detail_path = assistant_detail_path(&id, None);
-    let before = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let data = request_json(client, &env, Method::PATCH, &path, Some(payload), command).await?;
-    let after = request_json(client, &env, Method::GET, &detail_path, None, command).await?;
-    let mut extra = selectors.into_map();
-    extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
-    print_envelope(data, meta_from_map(extra), command)
+    let slug = take_required_string_field(&mut payload, "slug", command)?;
+    let name = take_required_string_field(&mut payload, "name", command)?;
+    let description = take_optional_string_field(&mut payload, "description").unwrap_or_default();
+    reject_remaining_fields(&payload, command)?;
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        "/api/assistants/catalog/mine",
+        Some(json!({ "slug": slug, "name": name, "description": description })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
 }
 
 async fn run_assistant_delete(client: &reqwest::Client) -> Result<(), ConfigError> {
     let command = "config assistants delete";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
-    let id = required_string_field(&payload, "assistant_id", command)?;
-    let before = request_json(
-        client,
-        &env,
-        Method::GET,
-        &assistant_detail_path(&id, None),
-        None,
-        command,
-    )
-    .await?;
-    let path = format!("/api/assistants/{}", encode_path_segment(&id));
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_resource_path(&source, &namespace, &slug);
+    let before = request_json(client, &env, Method::GET, &path, None, command).await?;
     let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-    let after = request_json(client, &env, Method::GET, "/api/assistants", None, command).await?;
-    let mut extra = selectors.into_map();
+    let mut extra = Map::new();
     extra.insert("before".into(), redact_meta_value(before));
-    extra.insert("after".into(), redact_meta_value(after));
     print_envelope(data, meta_from_map(extra), command)
 }
 
-async fn run_assistant_text(
-    client: &reqwest::Client,
-    kind: &'static str,
-    action: ConfigAssistantTextCommand,
-    route_prefix: &'static str,
-) -> Result<(), ConfigError> {
-    let action_name = match action {
-        ConfigAssistantTextCommand::Read => "read",
-        ConfigAssistantTextCommand::Write => "write",
-        ConfigAssistantTextCommand::Delete => "delete",
-    };
-    let command = format!("config assistants {kind} {action_name}");
-    let command = command.as_str();
+async fn run_assistant_copy(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants copy";
     let env = ConfigEnv::from_env(command)?;
     let mut payload = read_stdin_payload(command)?;
-    let mut selectors = SelectorMeta::default();
-    resolve_top_level_selectors(client, &env, command, &mut payload, &mut selectors).await?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let version = take_optional_string_field(&mut payload, "version");
+    let target_slug = take_required_string_field(&mut payload, "target_slug", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "copy-to-mine");
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({ "version": version, "targetSlug": target_slug })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
 
+async fn run_assistant_preferences(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants preferences";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let selected_version = take_optional_string_field(&mut payload, "selected_version");
+    let object = payload.as_object_mut().ok_or_else(|| {
+        ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "JSON 载荷必须是对象").field("field", "stdin")
+    })?;
+    let follow_latest = take_required_bool_field(object, "follow_latest", command)?;
+    let enabled = take_required_bool_field(object, "enabled", command)?;
+    let sort_order = object
+        .remove("sort_order")
+        .and_then(|value| value.as_i64())
+        .map(|value| value as i32);
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_resource_path(&source, &namespace, &slug);
+    let data = request_json(
+        client,
+        &env,
+        Method::PATCH,
+        &path,
+        Some(json!({
+            "selectedVersion": selected_version,
+            "followLatest": follow_latest,
+            "enabled": enabled,
+            "sortOrder": sort_order,
+        })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+async fn run_assistant_file(client: &reqwest::Client, action: ConfigAssistantFileCommand) -> Result<(), ConfigError> {
+    let action_name = match action {
+        ConfigAssistantFileCommand::Read => "read",
+        ConfigAssistantFileCommand::Write => "write",
+    };
+    let command = format!("config assistants file {action_name}");
+    let env = ConfigEnv::from_env(&command)?;
+    let mut payload = read_stdin_payload(&command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, &command)?;
+    let file_path = take_required_string_field(&mut payload, "path", &command)?;
+    let version = take_optional_string_field(&mut payload, "version");
+    let resource = assistant_catalog_operation_path(&source, &namespace, &slug, "file");
     match action {
-        ConfigAssistantTextCommand::Read => {
+        ConfigAssistantFileCommand::Read => {
+            reject_remaining_fields(&payload, &command)?;
+            let mut path = format!("{resource}?path={}", encode_query_component(&file_path));
+            if let Some(version) = version {
+                path.push_str("&version=");
+                path.push_str(&encode_query_component(&version));
+            }
+            let data = request_json(client, &env, Method::GET, &path, None, &command).await?;
+            print_envelope(data, meta(None), &command)
+        }
+        ConfigAssistantFileCommand::Write => {
+            if version.is_some() {
+                return Err(ConfigError::new(
+                    ConfigErrorCode::PayloadInvalid,
+                    &command,
+                    "历史版本只读，写入时不能指定 version",
+                ));
+            }
+            let content = take_required_value_field(&mut payload, "content", &command)?
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    ConfigError::new(ConfigErrorCode::PayloadInvalid, &command, "content 必须是字符串")
+                        .field("field", "content")
+                })?;
+            reject_remaining_fields(&payload, &command)?;
             let data = request_json(
                 client,
                 &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(payload),
-                command,
+                Method::PUT,
+                &resource,
+                Some(json!({ "path": file_path, "content": content })),
+                &command,
             )
             .await?;
-            print_envelope(data, meta(Some(selectors)), command)
-        }
-        ConfigAssistantTextCommand::Write => {
-            let id = required_string_field(&payload, "assistant_id", command)?;
-            let locale = optional_string_field(&payload, "locale");
-            let read_payload = assistant_text_read_payload(&id, locale.as_deref());
-            let before = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload.clone()),
-                command,
-            )
-            .await?;
-            let data = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/write"),
-                Some(payload),
-                command,
-            )
-            .await?;
-            let after = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload),
-                command,
-            )
-            .await?;
-            let mut extra = selectors.into_map();
-            extra.insert("before".into(), redacted_content_summary(before));
-            extra.insert("after".into(), redacted_content_summary(after));
-            print_envelope(data, meta_from_map(extra), command)
-        }
-        ConfigAssistantTextCommand::Delete => {
-            let id = required_string_field(&payload, "assistant_id", command)?;
-            let locale = optional_string_field(&payload, "locale");
-            let read_payload = assistant_text_read_payload(&id, locale.as_deref());
-            let before = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload.clone()),
-                command,
-            )
-            .await?;
-            let path = format!("{route_prefix}/{}", encode_path_segment(&id));
-            let data = request_json(client, &env, Method::DELETE, &path, None, command).await?;
-            let after = request_json(
-                client,
-                &env,
-                Method::POST,
-                &format!("{route_prefix}/read"),
-                Some(read_payload),
-                command,
-            )
-            .await?;
-            let mut extra = selectors.into_map();
-            extra.insert("before".into(), redacted_content_summary(before));
-            extra.insert("after".into(), redacted_content_summary(after));
-            print_envelope(data, meta_from_map(extra), command)
+            print_envelope(data, meta(None), &command)
         }
     }
+}
+
+async fn run_assistant_prepare(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants prepare";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let version = take_optional_string_field(&mut payload, "version");
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "activation/prepare");
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({ "version": version })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+async fn run_assistant_activate(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants activate";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let plan_id = take_required_string_field(&mut payload, "plan_id", command)?;
+    let fingerprint = take_required_string_field(&mut payload, "fingerprint", command)?;
+    let confirmed_groups = take_required_value_field(&mut payload, "confirmed_groups", command)?;
+    let choices = take_required_value_field(&mut payload, "choices", command)?;
+    if !confirmed_groups.is_array() || !choices.is_array() {
+        return Err(ConfigError::new(
+            ConfigErrorCode::PayloadInvalid,
+            command,
+            "confirmed_groups 与 choices 必须是数组",
+        ));
+    }
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "activation/commit");
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({
+            "planId": plan_id,
+            "fingerprint": fingerprint,
+            "confirmedGroups": confirmed_groups,
+            "choices": choices,
+        })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+async fn run_assistant_export(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants export";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let version = take_optional_string_field(&mut payload, "version");
+    let output_path = take_required_string_field(&mut payload, "output_path", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "export");
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({ "version": version, "outputPath": output_path })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+async fn run_assistant_publish(client: &reqwest::Client) -> Result<(), ConfigError> {
+    let command = "config assistants publish";
+    let env = ConfigEnv::from_env(command)?;
+    let mut payload = read_stdin_payload(command)?;
+    let (source, namespace, slug) = take_assistant_identity(&mut payload, command)?;
+    let message = take_required_string_field(&mut payload, "message", command)?;
+    reject_remaining_fields(&payload, command)?;
+    let path = assistant_catalog_operation_path(&source, &namespace, &slug, "publish");
+    let data = request_json(
+        client,
+        &env,
+        Method::POST,
+        &path,
+        Some(json!({ "message": message })),
+        command,
+    )
+    .await?;
+    print_envelope(data, meta(None), command)
+}
+
+fn take_assistant_identity(payload: &mut Value, command: &str) -> Result<(String, String, String), ConfigError> {
+    let source = take_required_string_field(payload, "source", command)?;
+    let namespace = take_optional_string_field(payload, "namespace").unwrap_or_default();
+    let slug = take_required_string_field(payload, "slug", command)?;
+    Ok((source, namespace, slug))
+}
+
+fn take_required_value_field(payload: &mut Value, field: &'static str, command: &str) -> Result<Value, ConfigError> {
+    payload
+        .as_object_mut()
+        .and_then(|object| object.remove(field))
+        .ok_or_else(|| {
+            ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "missing required field").field("field", field)
+        })
+}
+
+fn assistant_catalog_resource_path(source: &str, namespace: &str, slug: &str) -> String {
+    let namespace = if namespace.is_empty() { "~" } else { namespace };
+    format!(
+        "/api/assistants/catalog/{}/{}/{}",
+        encode_path_segment(source),
+        encode_path_segment(namespace),
+        encode_path_segment(slug)
+    )
+}
+
+fn assistant_catalog_operation_path(source: &str, namespace: &str, slug: &str, operation: &str) -> String {
+    format!(
+        "{}/{}",
+        assistant_catalog_resource_path(source, namespace, slug),
+        operation
+    )
 }
 
 async fn run_skills(client: &reqwest::Client, args: ConfigSkillsArgs) -> Result<(), ConfigError> {
@@ -1529,15 +1640,6 @@ fn required_string_field(payload: &Value, field: &'static str, command: &str) ->
         })
 }
 
-fn optional_string_field(payload: &Value, field: &'static str) -> Option<String> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 fn take_required_string_field(payload: &mut Value, field: &'static str, command: &str) -> Result<String, ConfigError> {
     let object = payload.as_object_mut().ok_or_else(|| {
         ConfigError::new(ConfigErrorCode::PayloadInvalid, command, "JSON 载荷必须是对象").field("field", "stdin")
@@ -1586,24 +1688,6 @@ fn reject_remaining_fields(payload: &Value, command: &str) -> Result<(), ConfigE
         );
     }
     Ok(())
-}
-
-fn assistant_detail_path(id: &str, locale: Option<&str>) -> String {
-    let mut path = format!("/api/assistants/{}", encode_path_segment(id));
-    if let Some(locale) = locale {
-        path.push_str("?locale=");
-        path.push_str(&encode_query_component(locale));
-    }
-    path
-}
-
-fn assistant_text_read_payload(id: &str, locale: Option<&str>) -> Value {
-    let mut object = Map::new();
-    object.insert("assistant_id".into(), Value::String(id.to_owned()));
-    if let Some(locale) = locale {
-        object.insert("locale".into(), Value::String(locale.to_owned()));
-    }
-    Value::Object(object)
 }
 
 fn redacted_content_summary(value: Value) -> Value {

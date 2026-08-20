@@ -462,7 +462,7 @@ impl IConversationRepository for SqliteConversationRepository {
         sqlx::query(
             "INSERT INTO conversation_assistant_snapshots (
                 conversation_id,
-                assistant_definition_id,
+                assistant_catalog_id,
                 assistant_id,
                 assistant_source,
                 agent_id,
@@ -482,7 +482,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
-                assistant_definition_id = excluded.assistant_definition_id,
+                assistant_catalog_id = excluded.assistant_catalog_id,
                 assistant_id = excluded.assistant_id,
                 assistant_source = excluded.assistant_source,
                 agent_id = excluded.agent_id,
@@ -501,7 +501,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 updated_at = excluded.updated_at",
         )
         .bind(params.conversation_id)
-        .bind(params.assistant_definition_id)
+        .bind(params.assistant_catalog_id)
         .bind(params.assistant_id)
         .bind(params.assistant_source)
         .bind(params.agent_id)

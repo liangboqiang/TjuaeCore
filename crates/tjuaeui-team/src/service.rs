@@ -16,10 +16,7 @@ use tjuaeui_api_types::{
 };
 use tjuaeui_common::{AgentKillReason, ConversationStatus, TimestampMs, generate_id, now_ms};
 use tjuaeui_db::models::TeamRow;
-use tjuaeui_db::{
-    IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository, IProviderRepository,
-    ITeamRepository, UpdateTeamParams,
-};
+use tjuaeui_db::{IAgentMetadataRepository, IProviderRepository, ITeamRepository, UpdateTeamParams};
 use tjuaeui_project::{ProjectService, canonical};
 use tjuaeui_realtime::EventBroadcaster;
 use tracing::{debug, info, warn};
@@ -90,8 +87,6 @@ pub struct TeamSessionService {
     repo: Arc<dyn ITeamRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
     assistant_catalog: Arc<dyn TeamAssistantCatalogPort>,
-    assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
-    assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
     provider_repo: Arc<dyn IProviderRepository>,
     conversation_port: Arc<dyn TeamConversationProvisioningPort>,
     projection_store: Arc<dyn TeamProjectionMessageStore>,
@@ -126,8 +121,6 @@ impl TeamSessionService {
         repo: Arc<dyn ITeamRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
         assistant_catalog: Arc<dyn TeamAssistantCatalogPort>,
-        assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
-        assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
         conversation_port: Arc<dyn TeamConversationProvisioningPort>,
         projection_store: Arc<dyn TeamProjectionMessageStore>,
@@ -141,8 +134,6 @@ impl TeamSessionService {
             repo,
             agent_metadata_repo,
             assistant_catalog,
-            assistant_definition_repo,
-            assistant_overlay_repo,
             provider_repo,
             conversation_port,
             projection_store,
@@ -160,8 +151,6 @@ impl TeamSessionService {
         repo: Arc<dyn ITeamRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
         assistant_catalog: Arc<dyn TeamAssistantCatalogPort>,
-        assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository>,
-        assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
         conversation_port: Arc<dyn TeamConversationProvisioningPort>,
         projection_store: Arc<dyn TeamProjectionMessageStore>,
@@ -176,8 +165,6 @@ impl TeamSessionService {
             repo,
             agent_metadata_repo,
             assistant_catalog,
-            assistant_definition_repo,
-            assistant_overlay_repo,
             provider_repo,
             conversation_port,
             projection_store,

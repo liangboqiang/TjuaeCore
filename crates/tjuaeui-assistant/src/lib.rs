@@ -1,20 +1,16 @@
 #![warn(clippy::disallowed_types)]
 
-//! User-authored assistant management.
-//!
-//! Owns the `assistants` and `assistant_overrides` tables, built-in
-//! assistant loading from on-disk manifest, and merge logic for
-//! `GET /api/assistants` across builtin + user + extension sources.
+//! 双来源版本化助手目录、显式资源激活与统一运行时视图。
 
+pub mod activation;
 pub mod agent_catalog;
-pub mod builtin;
+pub mod catalog;
 pub mod error;
 pub mod routes;
-pub mod service;
 pub mod state;
 
+pub use activation::AssistantActivationService;
 pub use agent_catalog::AssistantAgentCatalogPort;
-pub use builtin::{AvatarAsset, BuiltinAssistant, BuiltinAssistantRegistry};
+pub use catalog::AssistantCatalogService;
 pub use error::AssistantError;
-pub use routes::{AssistantRouterState, assistant_routes};
-pub use service::AssistantService;
+pub use routes::{AssistantRouterState, assistant_asset_routes, assistant_routes};

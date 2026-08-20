@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -45,9 +46,15 @@ pub trait TeamAssistantCatalogPort: Send + Sync {
 pub struct TeamAssistantCatalogEntry {
     pub assistant_id: String,
     pub name: String,
+    pub name_i18n: BTreeMap<String, String>,
     pub backend: String,
     pub description: String,
+    pub description_i18n: BTreeMap<String, String>,
     pub skills: Vec<String>,
+    pub model: Option<String>,
+    pub avatar: Option<String>,
+    pub recommended_prompts: Vec<String>,
+    pub recommended_prompts_i18n: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

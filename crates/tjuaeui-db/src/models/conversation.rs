@@ -42,7 +42,7 @@ pub struct ConversationRow {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConversationAssistantSnapshotRow {
     pub conversation_id: String,
-    pub assistant_definition_id: String,
+    pub assistant_catalog_id: String,
     pub assistant_id: String,
     pub assistant_source: String,
     pub agent_id: String,
@@ -66,7 +66,7 @@ pub struct ConversationAssistantSnapshotRow {
 #[derive(Debug, Clone)]
 pub struct UpsertConversationAssistantSnapshotParams<'a> {
     pub conversation_id: &'a str,
-    pub assistant_definition_id: &'a str,
+    pub assistant_catalog_id: &'a str,
     pub assistant_id: &'a str,
     pub assistant_source: &'a str,
     pub agent_id: &'a str,

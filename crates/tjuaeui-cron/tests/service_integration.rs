@@ -21,15 +21,14 @@ use tjuaeui_api_types::{
     WebSocketMessage,
 };
 use tjuaeui_common::{PaginatedResult, ProviderWithModel, TimestampMs, now_ms};
-use tjuaeui_conversation::ConversationService;
+use tjuaeui_conversation::{
+    AssistantRuntimeCatalogPort, AssistantRuntimePreferenceUpdate, AssistantRuntimeProfile, ConversationService,
+};
 use tjuaeui_cron::{CronRouterState, cron_routes};
 use tjuaeui_db::{
     ConversationFilters, ConversationRowUpdate, IAcpSessionRepository, IAgentMetadataRepository,
-    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantPreferenceRepository,
     IConversationRepository, ICronRepository, MessagePageParams, MessagePageResult, MessageRowUpdate, MessageSearchRow,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository, SqliteCronRepository,
-    UpsertAgentMetadataParams, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteCronRepository, UpsertAgentMetadataParams,
     UpsertConversationAssistantSnapshotParams, init_database_memory,
     models::{ConversationAssistantSnapshotRow, CronJobRow, MessageRow},
 };
@@ -38,7 +37,7 @@ use tjuaeui_realtime::EventBroadcaster;
 use tjuaeui_cron::events::CronEventEmitter;
 use tjuaeui_cron::executor::JobExecutor;
 use tjuaeui_cron::scheduler::CronScheduler;
-use tjuaeui_cron::service::{CronService, CronServiceDeps};
+use tjuaeui_cron::service::{CronAssistantCatalogEntry, CronAssistantCatalogPort, CronService, CronServiceDeps};
 use tjuaeui_cron::types::CronAgentConfig;
 use tjuaeui_cron::types::JobStatus;
 use tower::ServiceExt;
@@ -104,6 +103,90 @@ impl tjuaeui_ai_agent::task_manager::IWorkerTaskManager for StubTaskManager {
     }
     fn collect_idle(&self, _: TimestampMs) -> Vec<String> {
         vec![]
+    }
+}
+
+#[derive(Default)]
+struct TestAssistantCatalog {
+    entries: Mutex<HashMap<String, CronAssistantCatalogEntry>>,
+    definition_ids: Mutex<HashMap<String, String>>,
+}
+
+impl TestAssistantCatalog {
+    fn upsert(&self, definition_id: &str, assistant_id: &str, backend: &str) {
+        self.definition_ids
+            .lock()
+            .unwrap()
+            .insert(definition_id.to_owned(), assistant_id.to_owned());
+        self.entries.lock().unwrap().insert(
+            assistant_id.to_owned(),
+            CronAssistantCatalogEntry {
+                assistant_id: assistant_id.to_owned(),
+                name: assistant_id.to_owned(),
+                agent_id: seeded_agent_id(backend).to_owned(),
+                backend: backend.to_owned(),
+            },
+        );
+    }
+
+    fn override_backend(&self, definition_id: &str, backend: &str) {
+        let assistant_id = self
+            .definition_ids
+            .lock()
+            .unwrap()
+            .get(definition_id)
+            .cloned()
+            .expect("assistant definition must exist before override");
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.get_mut(&assistant_id).expect("assistant catalog entry");
+        entry.agent_id = seeded_agent_id(backend).to_owned();
+        entry.backend = backend.to_owned();
+    }
+}
+
+#[async_trait::async_trait]
+impl CronAssistantCatalogPort for TestAssistantCatalog {
+    async fn list_runtime_assistants(&self) -> Result<Vec<CronAssistantCatalogEntry>, tjuaeui_cron::error::CronError> {
+        Ok(self.entries.lock().unwrap().values().cloned().collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl AssistantRuntimeCatalogPort for TestAssistantCatalog {
+    async fn resolve_enabled(
+        &self,
+        assistant_id: &str,
+        _locale: Option<&str>,
+    ) -> Result<Option<AssistantRuntimeProfile>, String> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap()
+            .get(assistant_id)
+            .map(|entry| AssistantRuntimeProfile {
+                id: entry.assistant_id.clone(),
+                source: "mine".to_owned(),
+                name: entry.name.clone(),
+                avatar: "🤖".to_owned(),
+                agent_id: entry.agent_id.clone(),
+                rules: String::new(),
+                model_mode: "auto".to_owned(),
+                model: None,
+                permission_mode: "auto".to_owned(),
+                permission: None,
+                thought_level_mode: "auto".to_owned(),
+                thought_level: None,
+                skill_ids: Vec::new(),
+                mcp_ids: Vec::new(),
+            }))
+    }
+
+    async fn update_runtime_preferences(
+        &self,
+        _assistant_id: &str,
+        _updates: AssistantRuntimePreferenceUpdate<'_>,
+    ) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -519,7 +602,7 @@ impl IConversationRepository for StubConvRepo {
         let now = now_ms();
         let row = ConversationAssistantSnapshotRow {
             conversation_id: params.conversation_id.to_owned(),
-            assistant_definition_id: params.assistant_definition_id.to_owned(),
+            assistant_catalog_id: params.assistant_catalog_id.to_owned(),
             assistant_id: params.assistant_id.to_owned(),
             assistant_source: params.assistant_source.to_owned(),
             agent_id: params.agent_id.to_owned(),
@@ -783,12 +866,7 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
     let cron_repo: Arc<dyn ICronRepository> = Arc::new(SqliteCronRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository> =
-        Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository> =
-        Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let assistant_preference_repo: Arc<dyn IAssistantPreferenceRepository> =
-        Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
+    let assistant_catalog = Arc::new(TestAssistantCatalog::default());
     let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let bc = Arc::new(MockBroadcaster::new());
     let data_dir = std::env::temp_dir().join(format!("tjuaeui-cron-test-{}", now_ms()));
@@ -826,9 +904,7 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
         Arc::clone(&agent_metadata_repo),
         acp_session_repo,
     ));
-    conv_service.with_assistant_definition_repo(assistant_definition_repo.clone());
-    conv_service.with_assistant_state_repo(assistant_overlay_repo.clone());
-    conv_service.with_assistant_preference_repo(assistant_preference_repo);
+    conv_service.with_assistant_runtime_catalog(assistant_catalog.clone());
     let agent_registry = AgentRegistry::new(agent_metadata_repo.clone());
     agent_registry.hydrate().await.unwrap();
     let executor = Arc::new(JobExecutor::new(
@@ -847,22 +923,15 @@ async fn setup_with_conv_runtime_and_agent_metadata() -> (
     let svc = CronService::new(CronServiceDeps {
         repo: cron_repo.clone(),
         agent_metadata_repo: agent_metadata_repo.clone(),
-        assistant_definition_repo: assistant_definition_repo.clone(),
-        assistant_overlay_repo: assistant_overlay_repo.clone(),
+        assistant_catalog: assistant_catalog.clone(),
         scheduler,
         executor,
         emitter,
         data_dir,
     });
 
-    seed_assistant_definition(
-        &assistant_definition_repo,
-        "asstdef_default",
-        "assistant-default",
-        "claude",
-    )
-    .await;
-    seed_bare_assistant_definitions(&assistant_definition_repo).await;
+    seed_assistant_definition(&assistant_catalog, "asstdef_default", "assistant-default", "claude").await;
+    seed_bare_assistant_definitions(&assistant_catalog).await;
 
     std::mem::forget(db);
     (svc, cron_repo, bc, stub_conv_repo, conv_service, agent_metadata_repo)
@@ -873,20 +942,15 @@ async fn setup_with_assistant_repos() -> (
     Arc<dyn ICronRepository>,
     Arc<MockBroadcaster>,
     Arc<StubConvRepo>,
-    Arc<dyn IAssistantDefinitionRepository>,
-    Arc<dyn IAssistantOverlayRepository>,
+    Arc<TestAssistantCatalog>,
+    Arc<TestAssistantCatalog>,
 ) {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
     let cron_repo: Arc<dyn ICronRepository> = Arc::new(SqliteCronRepository::new(pool.clone()));
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let assistant_definition_repo: Arc<dyn IAssistantDefinitionRepository> =
-        Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let assistant_overlay_repo: Arc<dyn IAssistantOverlayRepository> =
-        Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
-    let assistant_preference_repo: Arc<dyn IAssistantPreferenceRepository> =
-        Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
+    let assistant_catalog = Arc::new(TestAssistantCatalog::default());
     let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let bc = Arc::new(MockBroadcaster::new());
     let data_dir = std::env::temp_dir().join(format!("tjuaeui-cron-test-{}", now_ms()));
@@ -924,9 +988,7 @@ async fn setup_with_assistant_repos() -> (
         Arc::clone(&agent_metadata_repo),
         acp_session_repo,
     ));
-    conv_service.with_assistant_definition_repo(assistant_definition_repo.clone());
-    conv_service.with_assistant_state_repo(assistant_overlay_repo.clone());
-    conv_service.with_assistant_preference_repo(assistant_preference_repo);
+    conv_service.with_assistant_runtime_catalog(assistant_catalog.clone());
     let agent_registry = AgentRegistry::new(agent_metadata_repo.clone());
     agent_registry.hydrate().await.unwrap();
     let executor = Arc::new(JobExecutor::new(
@@ -944,22 +1006,15 @@ async fn setup_with_assistant_repos() -> (
     let svc = CronService::new(CronServiceDeps {
         repo: cron_repo.clone(),
         agent_metadata_repo,
-        assistant_definition_repo: assistant_definition_repo.clone(),
-        assistant_overlay_repo: assistant_overlay_repo.clone(),
+        assistant_catalog: assistant_catalog.clone(),
         scheduler,
         executor,
         emitter,
         data_dir,
     });
 
-    seed_assistant_definition(
-        &assistant_definition_repo,
-        "asstdef_default",
-        "assistant-default",
-        "claude",
-    )
-    .await;
-    seed_bare_assistant_definitions(&assistant_definition_repo).await;
+    seed_assistant_definition(&assistant_catalog, "asstdef_default", "assistant-default", "claude").await;
+    seed_bare_assistant_definitions(&assistant_catalog).await;
 
     std::mem::forget(db);
     (
@@ -967,8 +1022,8 @@ async fn setup_with_assistant_repos() -> (
         cron_repo,
         bc,
         stub_conv_repo,
-        assistant_definition_repo,
-        assistant_overlay_repo,
+        assistant_catalog.clone(),
+        assistant_catalog,
     )
 }
 
@@ -998,71 +1053,32 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
 }
 
 async fn seed_assistant_definition(
-    repo: &Arc<dyn IAssistantDefinitionRepository>,
+    catalog: &Arc<TestAssistantCatalog>,
     definition_id: &str,
     assistant_id: &str,
     agent_backend: &str,
 ) {
-    let agent_id = seeded_agent_id(agent_backend);
-    repo.upsert(&UpsertAssistantDefinitionParams {
-        id: definition_id,
-        assistant_id,
-        source: "user",
-        owner_type: "user",
-        source_ref: Some(assistant_id),
-        name: assistant_id,
-        name_i18n: "{}",
-        description: Some("test assistant"),
-        description_i18n: "{}",
-        avatar_type: "emoji",
-        avatar_value: Some("🤖"),
-        agent_id,
-        rule_resource_type: "user_file",
-        rule_resource_ref: None,
-        recommended_prompts: "[]",
-        recommended_prompts_i18n: "{}",
-        default_model_mode: "auto",
-        default_model_value: None,
-        default_permission_mode: "auto",
-        default_permission_value: None,
-        default_thought_level_mode: "auto",
-        default_thought_level_value: None,
-        default_skills_mode: "auto",
-        default_skill_ids: "[]",
-        custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
-        default_mcps_mode: "auto",
-        default_mcp_ids: "[]",
-    })
-    .await
-    .unwrap();
+    catalog.upsert(definition_id, assistant_id, agent_backend);
 }
 
-async fn seed_bare_assistant_definitions(repo: &Arc<dyn IAssistantDefinitionRepository>) {
+async fn seed_bare_assistant_definitions(catalog: &Arc<TestAssistantCatalog>) {
     for (definition_id, assistant_id, agent_backend) in [
         ("asstdef_bare_gemini", "bare:cc126dd5", "gemini"),
         ("asstdef_bare_codex", "bare:8e1acf31", "codex"),
         ("asstdef_bare_tjuaecli", "bare:632f31d2", "tjuaecli"),
     ] {
-        seed_assistant_definition(repo, definition_id, assistant_id, agent_backend).await;
+        seed_assistant_definition(catalog, definition_id, assistant_id, agent_backend).await;
     }
 }
 
 async fn seed_assistant_overlay(
-    repo: &Arc<dyn IAssistantOverlayRepository>,
+    catalog: &Arc<TestAssistantCatalog>,
     definition_id: &str,
     agent_backend_override: Option<&str>,
 ) {
-    let agent_id_override = agent_backend_override.map(seeded_agent_id);
-    repo.upsert(&UpsertAssistantOverlayParams {
-        assistant_definition_id: definition_id,
-        enabled: true,
-        sort_order: 0,
-        agent_id_override,
-        last_used_at: None,
-    })
-    .await
-    .unwrap();
+    if let Some(backend) = agent_backend_override {
+        catalog.override_backend(definition_id, backend);
+    }
 }
 
 fn seeded_agent_id(value: &str) -> &str {

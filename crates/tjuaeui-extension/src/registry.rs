@@ -19,8 +19,8 @@ use crate::resolvers::{resolve_all_contributions, resolve_i18n_for_all};
 use crate::state::ExtensionStateStore;
 use crate::types::{
     ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAcpAdapter,
-    ResolvedAgent, ResolvedAssistant, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
-    ResolvedSettingsTab, ResolvedTheme, WebuiContribution,
+    ResolvedAgent, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider, ResolvedSettingsTab,
+    ResolvedTheme, WebuiContribution,
 };
 
 // Re-export ExtensionSummary from registry_helpers so that
@@ -303,23 +303,6 @@ impl ExtensionRegistry {
     pub async fn get_themes(&self) -> Vec<ResolvedTheme> {
         let guard = self.inner.read().await;
         guard.contributions.themes.clone()
-    }
-
-    pub async fn get_assistants(&self) -> Vec<ResolvedAssistant> {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.clone()
-    }
-
-    /// Return `true` if any extension contributes an assistant with this id.
-    pub async fn has_assistant(&self, id: &str) -> bool {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().any(|a| a.id == id)
-    }
-
-    /// Lookup a single extension-contributed assistant by id.
-    pub async fn get_assistant_by_id(&self, id: &str) -> Option<ResolvedAssistant> {
-        let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().find(|a| a.id == id).cloned()
     }
 
     pub async fn get_acp_adapters(&self) -> Vec<ResolvedAcpAdapter> {

@@ -16,7 +16,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tjuaeui_ai_agent::{agent_routes, remote_agent_routes};
 use tjuaeui_api_types::ErrorResponse;
 use tjuaeui_assets::{AssetRouterState, asset_routes};
-use tjuaeui_assistant::assistant_routes;
+use tjuaeui_assistant::{assistant_asset_routes, assistant_routes};
 use tjuaeui_auth::{
     AuthRouterState, AuthState, auth_middleware, auth_routes, csrf_middleware, security_headers_middleware,
 };
@@ -225,6 +225,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
 
     // Assistant routes protected by auth middleware (T1a skeleton: all
     // handlers return 500 "not implemented"; T1b wires real service)
+    let assistant_assets = assistant_asset_routes(states.assistant.clone());
     let assistant_authenticated =
         assistant_routes(states.assistant).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
@@ -275,6 +276,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     .merge(ws_routes)
     .merge(runtime_team_tools)
     .merge(public_assets)
+    .merge(assistant_assets)
     .layer(middleware::from_fn(security_headers_middleware));
 
     // Raise the default request body limit from axum's 2MB default to

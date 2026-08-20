@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::Arc;
 use tjuaeui_common::AgentType;
+use tjuaeui_db::IAgentMetadataRepository;
 use tjuaeui_db::models::AgentMetadataRow;
-use tjuaeui_db::{IAgentMetadataRepository, resolve_agent_binding_from_rows};
 
 use crate::ports::TeamAssistantCatalogEntry;
 use crate::prompts::AvailableAssistant;
@@ -49,16 +49,6 @@ pub(crate) fn session_mode_for_backend(
     agent_type.full_auto_mode_id(Some(backend)).to_owned()
 }
 
-pub(crate) async fn resolve_runtime_backend(
-    agent_metadata_repo: &Arc<dyn IAgentMetadataRepository>,
-    agent_id: &str,
-) -> Result<String, TeamError> {
-    let rows = agent_metadata_repo.list_all().await?;
-    Ok(resolve_agent_binding_from_rows(&rows, agent_id)
-        .map(|binding| binding.runtime_backend)
-        .unwrap_or_else(|| agent_id.to_owned()))
-}
-
 impl TeamSessionService {
     pub(crate) async fn resolve_team_selectable_assistant(
         &self,
@@ -79,19 +69,13 @@ impl TeamSessionService {
     ) -> Result<(String, String), TeamError> {
         if let Some(assistant_id) = assistant_id.map(str::trim).filter(|value| !value.is_empty()) {
             let selectable = self.resolve_team_selectable_assistant(assistant_id).await?;
-            let definition = self
-                .assistant_definition_repo
-                .get_by_assistant_id(assistant_id)
-                .await?
-                .ok_or_else(|| TeamError::InvalidRequest(format!("找不到预设助手：{assistant_id}")))?;
             let backend = selectable.backend;
             let requested_model = requested_model
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
-            let fixed_model = (definition.default_model_mode == "fixed")
-                .then(|| definition.default_model_value.clone())
-                .flatten()
+            let fixed_model = selectable
+                .model
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty());
             let backend_default_model = self.default_model_for_backend(&backend).await;
@@ -216,11 +200,9 @@ mod tests {
         force_team_workspace, setup_with_factory_metadata_team_repo_and_conversation_repo, single_agent_team_request,
     };
     use std::sync::Arc;
-    use tjuaeui_db::models::{AgentMetadataRow, AssistantDefinitionRow, AssistantOverlayRow, Provider};
+    use tjuaeui_db::models::{AgentMetadataRow, Provider};
     use tjuaeui_db::{
-        DbError, IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-        IProviderRepository, UpdateAgentHandshakeParams, UpsertAgentMetadataParams, UpsertAssistantDefinitionParams,
-        UpsertAssistantOverlayParams,
+        DbError, IAgentMetadataRepository, IProviderRepository, UpdateAgentHandshakeParams, UpsertAgentMetadataParams,
     };
 
     fn agent_metadata_row(backend: &str, yolo_id: Option<&str>) -> AgentMetadataRow {
@@ -262,136 +244,6 @@ mod tests {
             env_override: None,
             created_at: 0,
             updated_at: 0,
-        }
-    }
-
-    #[derive(Clone)]
-    struct SingleAssistantDefinitionRepo {
-        row: AssistantDefinitionRow,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantDefinitionRepository for SingleAssistantDefinitionRepo {
-        async fn list(&self) -> Result<Vec<AssistantDefinitionRow>, DbError> {
-            Ok(vec![self.row.clone()])
-        }
-
-        async fn get_by_assistant_id(&self, assistant_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok((self.row.assistant_id == assistant_id).then_some(self.row.clone()))
-        }
-
-        async fn get_by_id(&self, definition_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok((self.row.id == definition_id).then_some(self.row.clone()))
-        }
-
-        async fn get_by_source_ref(
-            &self,
-            _source: &str,
-            _source_ref: &str,
-        ) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn upsert(
-            &self,
-            _params: &UpsertAssistantDefinitionParams<'_>,
-        ) -> Result<AssistantDefinitionRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn soft_delete(&self, _definition_id: &str, _deleted_at: i64) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Clone)]
-    struct MultiAssistantDefinitionRepo {
-        rows: Vec<AssistantDefinitionRow>,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantDefinitionRepository for MultiAssistantDefinitionRepo {
-        async fn list(&self) -> Result<Vec<AssistantDefinitionRow>, DbError> {
-            Ok(self.rows.clone())
-        }
-
-        async fn get_by_assistant_id(&self, assistant_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(self.rows.iter().find(|row| row.assistant_id == assistant_id).cloned())
-        }
-
-        async fn get_by_id(&self, definition_id: &str) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(self.rows.iter().find(|row| row.id == definition_id).cloned())
-        }
-
-        async fn get_by_source_ref(
-            &self,
-            _source: &str,
-            _source_ref: &str,
-        ) -> Result<Option<AssistantDefinitionRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn upsert(
-            &self,
-            _params: &UpsertAssistantDefinitionParams<'_>,
-        ) -> Result<AssistantDefinitionRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn soft_delete(&self, _definition_id: &str, _deleted_at: i64) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Clone)]
-    struct SingleAssistantOverlayRepo {
-        row: AssistantOverlayRow,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantOverlayRepository for SingleAssistantOverlayRepo {
-        async fn get(&self, definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok((self.row.assistant_definition_id == definition_id).then_some(self.row.clone()))
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(vec![self.row.clone()])
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
-            Ok(false)
-        }
-    }
-
-    #[derive(Clone)]
-    struct MultiAssistantOverlayRepo {
-        rows: Vec<AssistantOverlayRow>,
-    }
-
-    #[async_trait::async_trait]
-    impl IAssistantOverlayRepository for MultiAssistantOverlayRepo {
-        async fn get(&self, definition_id: &str) -> Result<Option<AssistantOverlayRow>, DbError> {
-            Ok(self
-                .rows
-                .iter()
-                .find(|row| row.assistant_definition_id == definition_id)
-                .cloned())
-        }
-
-        async fn list(&self) -> Result<Vec<AssistantOverlayRow>, DbError> {
-            Ok(self.rows.clone())
-        }
-
-        async fn upsert(&self, _params: &UpsertAssistantOverlayParams<'_>) -> Result<AssistantOverlayRow, DbError> {
-            Err(DbError::Init("not implemented".into()))
-        }
-
-        async fn delete(&self, _definition_id: &str) -> Result<bool, DbError> {
-            Ok(false)
         }
     }
 
@@ -533,59 +385,26 @@ mod tests {
         crate::ports::TeamAssistantCatalogEntry {
             assistant_id: assistant_id.into(),
             name: name.into(),
+            name_i18n: Default::default(),
             backend: backend.into(),
             description: String::new(),
+            description_i18n: Default::default(),
             skills: Vec::new(),
-        }
-    }
-
-    fn assistant_definition(assistant_id: &str, agent_id: &str) -> AssistantDefinitionRow {
-        AssistantDefinitionRow {
-            id: format!("def-{assistant_id}"),
-            assistant_id: assistant_id.into(),
-            source: "builtin".into(),
-            owner_type: "system".into(),
-            source_ref: Some(assistant_id.into()),
-            name: assistant_id.into(),
-            name_i18n: "{}".into(),
-            description: None,
-            description_i18n: "{}".into(),
-            avatar_type: "emoji".into(),
-            avatar_value: None,
-            agent_id: agent_id.into(),
-            rule_resource_type: "none".into(),
-            rule_resource_ref: None,
-            recommended_prompts: "[]".into(),
-            recommended_prompts_i18n: "{}".into(),
-            default_model_mode: "auto".into(),
-            default_model_value: None,
-            default_permission_mode: "auto".into(),
-            default_permission_value: None,
-            default_thought_level_mode: "auto".into(),
-            default_thought_level_value: None,
-            default_skills_mode: "auto".into(),
-            default_skill_ids: "[]".into(),
-            custom_skill_names: "[]".into(),
-            default_disabled_builtin_skill_ids: "[]".into(),
-            default_mcps_mode: "auto".into(),
-            default_mcp_ids: "[]".into(),
-            created_at: 0,
-            updated_at: 0,
-            deleted_at: None,
+            model: None,
+            avatar: None,
+            recommended_prompts: Vec::new(),
+            recommended_prompts_i18n: Default::default(),
         }
     }
 
     fn service_with_selectable_catalog(
         assistants: Vec<crate::ports::TeamAssistantCatalogEntry>,
-        definitions: Vec<AssistantDefinitionRow>,
     ) -> Arc<TeamSessionService> {
         let (base, _, _, _) = setup_with_factory_metadata_team_repo_and_conversation_repo();
         TeamSessionService::new(
             base.repo.clone(),
             base.agent_metadata_repo.clone(),
             Arc::new(RowsTeamAssistantCatalog { rows: assistants }),
-            Arc::new(MultiAssistantDefinitionRepo { rows: definitions }),
-            Arc::new(MultiAssistantOverlayRepo { rows: vec![] }),
             Arc::new(SingleProviderRepo {
                 rows: vec![provider_row("openai", &["gpt-5-mini"])],
             }),
@@ -655,8 +474,6 @@ mod tests {
                     "cursor",
                 )],
             }),
-            Arc::new(MultiAssistantDefinitionRepo { rows: vec![] }),
-            Arc::new(MultiAssistantOverlayRepo { rows: vec![] }),
             Arc::new(SingleProviderRepo { rows: vec![] }),
             base.conversation_port.clone(),
             base.projection_store.clone(),
@@ -678,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_team_rejects_assistant_missing_from_team_selectable_catalog() {
-        let svc = service_with_selectable_catalog(vec![], vec![assistant_definition("word-creator", "tjuaecli")]);
+        let svc = service_with_selectable_catalog(vec![]);
         let mut req = single_agent_team_request("Catalog Gate");
         req.agents[0].assistant_id = Some("word-creator".into());
         req.agents[0].backend = None;
@@ -697,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_agent_rejects_assistant_missing_from_team_selectable_catalog() {
-        let svc = service_with_selectable_catalog(vec![], vec![assistant_definition("word-creator", "tjuaecli")]);
+        let svc = service_with_selectable_catalog(vec![]);
         let created = svc
             .create_team("user1", single_agent_team_request("Catalog Gate Add"))
             .await
@@ -726,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_spawn_backend_and_model_rejects_assistant_missing_from_team_selectable_catalog() {
-        let svc = service_with_selectable_catalog(vec![], vec![assistant_definition("word-creator", "tjuaecli")]);
+        let svc = service_with_selectable_catalog(vec![]);
 
         let err = svc
             .resolve_spawn_backend_and_model(Some("word-creator"), None, "gemini", "gemini-2.5-pro")
@@ -783,52 +600,6 @@ mod tests {
             svc.agent_metadata_repo.clone(),
             Arc::new(RowsTeamAssistantCatalog {
                 rows: vec![team_assistant_entry("word-creator", "Word Creator", "tjuaecli")],
-            }),
-            Arc::new(SingleAssistantDefinitionRepo {
-                row: AssistantDefinitionRow {
-                    id: "def-1".into(),
-                    assistant_id: "word-creator".into(),
-                    source: "builtin".into(),
-                    owner_type: "system".into(),
-                    source_ref: Some("word-creator".into()),
-                    name: "Word Creator".into(),
-                    name_i18n: "{}".into(),
-                    description: None,
-                    description_i18n: "{}".into(),
-                    avatar_type: "emoji".into(),
-                    avatar_value: None,
-                    agent_id: "tjuaecli".into(),
-                    rule_resource_type: "none".into(),
-                    rule_resource_ref: None,
-                    recommended_prompts: "[]".into(),
-                    recommended_prompts_i18n: "{}".into(),
-                    default_model_mode: "auto".into(),
-                    default_model_value: None,
-                    default_permission_mode: "auto".into(),
-                    default_permission_value: None,
-                    default_thought_level_mode: "auto".into(),
-                    default_thought_level_value: None,
-                    default_skills_mode: "auto".into(),
-                    default_skill_ids: "[]".into(),
-                    custom_skill_names: "[]".into(),
-                    default_disabled_builtin_skill_ids: "[]".into(),
-                    default_mcps_mode: "auto".into(),
-                    default_mcp_ids: "[]".into(),
-                    created_at: 0,
-                    updated_at: 0,
-                    deleted_at: None,
-                },
-            }),
-            Arc::new(SingleAssistantOverlayRepo {
-                row: AssistantOverlayRow {
-                    assistant_definition_id: "def-1".into(),
-                    enabled: true,
-                    sort_order: 0,
-                    agent_id_override: None,
-                    last_used_at: None,
-                    created_at: 0,
-                    updated_at: 0,
-                },
             }),
             Arc::new(SingleProviderRepo {
                 rows: vec![provider_row("openai", &["gpt-5-mini"])],

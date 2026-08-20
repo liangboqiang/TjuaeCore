@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 
 pub const MANAGED_RESOURCES_CONTRACT_FILE: &str = "manifest.json";
 pub const MANAGED_RESOURCES_CONTRACT_SCHEMA_VERSION: u8 = 2;
-const REQUIRED_CLI_NAMES: [&str; 2] = ["claude", "codex"];
 const SUPPORTED_RUNTIME_KEYS: [&str; 6] = [
     "win32-x64",
     "win32-arm64",
@@ -171,14 +170,6 @@ fn validate_clis_schema(contract: &ManagedResourcesContract) -> Result<(), Manag
         }
     }
 
-    for required_name in REQUIRED_CLI_NAMES {
-        if !names.contains(required_name) {
-            return Err(ManagedResourcesContractError::invalid(format!(
-                "missing required clis name {required_name}"
-            )));
-        }
-    }
-
     Ok(())
 }
 
@@ -332,14 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_contract_rejects_missing_required_cli_name() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn validate_contract_accepts_no_managed_clis() {
         let mut contract = example_contract("win32-x64");
-        contract.clis.retain(|cli| cli.name != "codex");
+        contract.clis.clear();
 
-        let error = validate_contract(temp.path(), &contract).expect_err("missing required name should fail");
-
-        assert!(error.to_string().contains("missing required clis name codex"));
+        validate_clis_schema(&contract).expect("third-party CLIs are optional and resolved from PATH");
     }
 
     #[test]

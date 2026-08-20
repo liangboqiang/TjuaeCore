@@ -17,6 +17,7 @@ members = [
     "crates/tjuaeui-ai-agent",
     "crates/tjuaeui-mcp",
     "crates/tjuaeui-conversation",
+    "crates/tjuaeui-catalog",
     "crates/tjuaeui-extension",
     "crates/tjuaeui-channel",
     "crates/tjuaeui-team-prompts",
@@ -51,6 +52,7 @@ tjuaeui-shell = { path = "crates/tjuaeui-shell" }
 tjuaeui-ai-agent = { path = "crates/tjuaeui-ai-agent" }
 tjuaeui-mcp = { path = "crates/tjuaeui-mcp" }
 tjuaeui-conversation = { path = "crates/tjuaeui-conversation" }
+tjuaeui-catalog = { path = "crates/tjuaeui-catalog" }
 tjuaeui-extension = { path = "crates/tjuaeui-extension" }
 tjuaeui-channel = { path = "crates/tjuaeui-channel" }
 tjuaeui-team-prompts = { path = "crates/tjuaeui-team-prompts" }

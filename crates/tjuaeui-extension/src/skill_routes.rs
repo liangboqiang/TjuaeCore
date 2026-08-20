@@ -7,23 +7,22 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path as AxumPath, Query, State};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use futures_util::future::join_all;
 use tjuaeui_api_types::{
     ApiResponse, CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest,
-    ImportSkillRequest, ReadAssistantRuleRequest, SaveSkillFileRequest, SkillCatalogDetailResponse,
-    SkillCatalogFileContentResponse, SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse,
-    SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse,
-    SkillSourceResponse, SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery,
-    SkillVersionResponse, UpdateSkillPreferencesRequest, WriteAssistantRuleRequest,
+    ImportSkillRequest, SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse,
+    SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
+    SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
+    SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
+    UpdateSkillPreferencesRequest,
 };
 use tjuaeui_common::{ApiError, WorkspaceGitProvisioner};
 use tjuaeui_db::{ISkillUserPreferenceRepository, SkillUserPreferenceRow, UpsertSkillUserPreferenceParams};
 
-use crate::classifier::AssistantRuleDispatcher;
 use crate::error::ExtensionError;
 use crate::skill_package::{SKILL_PACKAGE_MANIFEST, reseal_skill_package, save_skill_manifest_content};
-use crate::skill_storage::{self, SkillPaths};
+use crate::skill_storage::SkillPaths;
 use crate::{CatalogDetail, CatalogSkill, SkillSpace};
 
 #[derive(Clone)]
@@ -32,8 +31,6 @@ pub struct SkillRouterState {
     pub git: Arc<dyn WorkspaceGitProvisioner>,
     pub preferences: Arc<dyn ISkillUserPreferenceRepository>,
     pub can_write_tjuae_hub: bool,
-    #[allow(clippy::type_complexity)]
-    pub assistant_dispatcher: Option<Arc<dyn AssistantRuleDispatcher>>,
 }
 
 pub fn skill_routes(state: SkillRouterState) -> Router {
@@ -69,9 +66,6 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         )
         .route("/api/skills/import", post(import_skill))
         .route("/api/skills/create", post(create_skill))
-        .route("/api/skills/assistant-rule/read", post(read_assistant_rule))
-        .route("/api/skills/assistant-rule/write", post(write_assistant_rule))
-        .route("/api/skills/assistant-rule/{id}", delete(delete_assistant_rule))
         .with_state(state)
 }
 
@@ -691,61 +685,6 @@ fn operation_for_mine(slug: &str, version: &str) -> SkillOperationResponse {
         identity: identity(SkillSourceResponse::Mine, "local".into(), slug.into()),
         version: version.into(),
     }
-}
-
-async fn read_assistant_rule(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<ReadAssistantRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<String>>, ApiError> {
-    let Json(request) = body.map_err(ApiError::from)?;
-    let content = match state.assistant_dispatcher {
-        Some(dispatcher) => {
-            dispatcher
-                .read_rule(&request.assistant_id, request.locale.as_deref())
-                .await?
-        }
-        None => {
-            skill_storage::read_assistant_rule(&state.skill_paths, &request.assistant_id, request.locale.as_deref())
-                .await?
-        }
-    };
-    Ok(Json(ApiResponse::ok(content)))
-}
-
-async fn write_assistant_rule(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<WriteAssistantRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<bool>>, ApiError> {
-    let Json(request) = body.map_err(ApiError::from)?;
-    let written = match state.assistant_dispatcher {
-        Some(dispatcher) => {
-            dispatcher
-                .write_rule(&request.assistant_id, request.locale.as_deref(), &request.content)
-                .await?;
-            true
-        }
-        None => {
-            skill_storage::write_assistant_rule(
-                &state.skill_paths,
-                &request.assistant_id,
-                &request.content,
-                request.locale.as_deref(),
-            )
-            .await?
-        }
-    };
-    Ok(Json(ApiResponse::ok(written)))
-}
-
-async fn delete_assistant_rule(
-    State(state): State<SkillRouterState>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<ApiResponse<bool>>, ApiError> {
-    let deleted = match state.assistant_dispatcher {
-        Some(dispatcher) => dispatcher.delete_rule(&id).await?,
-        None => skill_storage::delete_assistant_rule(&state.skill_paths, &id).await?,
-    };
-    Ok(Json(ApiResponse::ok(deleted)))
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -38,21 +38,19 @@ use tjuaeui_db::models::{
 };
 use tjuaeui_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, DbError, IAcpSessionRepository,
-    IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-    IAssistantPreferenceRepository, IConversationRepository, MessageRowUpdate, MessageSearchRow, PersistedSessionState,
-    SaveRuntimeStateParams, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
-    SqliteAssistantPreferenceRepository, UpdateAgentAvailabilitySnapshotParams, UpsertAssistantDefinitionParams,
-    UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams,
-    init_database_memory,
+    IAgentMetadataRepository, IConversationRepository, MessageRowUpdate, MessageSearchRow, PersistedSessionState,
+    SaveRuntimeStateParams, UpdateAgentAvailabilitySnapshotParams, UpsertConversationAssistantSnapshotParams,
 };
 use tjuaeui_db::{MessagePageCursor, MessagePageDirection, MessagePageParams, MessagePageResult};
-use tjuaeui_extension::{AssistantRuleDispatcher, ExtensionError};
 use tjuaeui_realtime::EventBroadcaster;
 use tokio::sync::{Notify, broadcast};
 
 use crate::service::ConversationService;
 use crate::skill_resolver::{FixedSkillResolver, ResolvedAgentSkill, SkillResolver};
-use crate::{ConversationAgentTurnRequest, ConversationAgentTurnStatus, ConversationError};
+use crate::{
+    AssistantRuntimeCatalogPort, AssistantRuntimePreferenceUpdate, AssistantRuntimeProfile,
+    ConversationAgentTurnRequest, ConversationAgentTurnStatus, ConversationError,
+};
 
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
@@ -61,34 +59,70 @@ struct RecordingSkillResolver {
     links: Arc<Mutex<Vec<()>>>,
 }
 
-struct StaticAssistantDispatcher {
-    rules: std::collections::HashMap<String, String>,
+struct TestAssistantCatalog {
+    profiles: Mutex<HashMap<String, AssistantRuntimeProfile>>,
+    rules: HashMap<String, String>,
+}
+
+impl TestAssistantCatalog {
+    fn new(rules: HashMap<String, String>) -> Self {
+        Self {
+            profiles: Mutex::new(HashMap::new()),
+            rules,
+        }
+    }
+
+    fn upsert(&self, mut profile: AssistantRuntimeProfile) {
+        if profile.rules.is_empty() {
+            profile.rules = self.rules.get(&profile.id).cloned().unwrap_or_default();
+        }
+        self.profiles.lock().unwrap().insert(profile.id.clone(), profile);
+    }
+
+    fn update(&self, id: &str, update: impl FnOnce(&mut AssistantRuntimeProfile)) {
+        let mut profiles = self.profiles.lock().unwrap();
+        update(profiles.get_mut(id).expect("test assistant profile exists"));
+    }
+
+    fn profile(&self, id: &str) -> AssistantRuntimeProfile {
+        self.profiles
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .expect("test assistant profile exists")
+    }
 }
 
 #[async_trait::async_trait]
-impl AssistantRuleDispatcher for StaticAssistantDispatcher {
-    async fn read_rule(&self, id: &str, _locale: Option<&str>) -> Result<String, ExtensionError> {
-        Ok(self.rules.get(id).cloned().unwrap_or_default())
+impl AssistantRuntimeCatalogPort for TestAssistantCatalog {
+    async fn resolve_enabled(
+        &self,
+        assistant_id: &str,
+        _locale: Option<&str>,
+    ) -> Result<Option<AssistantRuntimeProfile>, String> {
+        Ok(self.profiles.lock().unwrap().get(assistant_id).cloned())
     }
 
-    async fn write_rule(&self, _id: &str, _locale: Option<&str>, _content: &str) -> Result<(), ExtensionError> {
+    async fn update_runtime_preferences(
+        &self,
+        assistant_id: &str,
+        updates: AssistantRuntimePreferenceUpdate<'_>,
+    ) -> Result<(), String> {
+        let mut profiles = self.profiles.lock().unwrap();
+        let profile = profiles
+            .get_mut(assistant_id)
+            .ok_or_else(|| format!("missing test assistant profile: {assistant_id}"))?;
+        if let Some(model) = updates.model {
+            profile.model = Some(model.to_owned());
+        }
+        if let Some(permission) = updates.permission {
+            profile.permission = Some(permission.to_owned());
+        }
+        if let Some(thought_level) = updates.thought_level {
+            profile.thought_level = Some(thought_level.to_owned());
+        }
         Ok(())
-    }
-
-    async fn delete_rule(&self, _id: &str) -> Result<bool, ExtensionError> {
-        Ok(true)
-    }
-
-    async fn read_skill(&self, _id: &str, _locale: Option<&str>) -> Result<String, ExtensionError> {
-        Ok(String::new())
-    }
-
-    async fn write_skill(&self, _id: &str, _locale: Option<&str>, _content: &str) -> Result<(), ExtensionError> {
-        Ok(())
-    }
-
-    async fn delete_skill(&self, _id: &str) -> Result<bool, ExtensionError> {
-        Ok(true)
     }
 }
 
@@ -350,7 +384,7 @@ impl IConversationRepository for MockRepo {
     ) -> Result<Option<ConversationAssistantSnapshotRow>, tjuaeui_db::DbError> {
         let row = ConversationAssistantSnapshotRow {
             conversation_id: params.conversation_id.to_owned(),
-            assistant_definition_id: params.assistant_definition_id.to_owned(),
+            assistant_catalog_id: params.assistant_catalog_id.to_owned(),
             assistant_id: params.assistant_id.to_owned(),
             assistant_source: params.assistant_source.to_owned(),
             agent_id: params.agent_id.to_owned(),
@@ -1088,85 +1122,43 @@ async fn make_service_with_mock_task_manager_and_assistant_support(
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<SqliteAssistantDefinitionRepository>,
-    Arc<SqliteAssistantOverlayRepository>,
-    Arc<dyn IAssistantPreferenceRepository>,
+    Arc<TestAssistantCatalog>,
 ) {
     let (svc, broadcaster, repo) = make_service_with_mock_task_manager(task_mgr);
-    let db = init_database_memory().await.unwrap();
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(db.pool().clone()));
-    let overlay_repo = Arc::new(SqliteAssistantOverlayRepository::new(db.pool().clone()));
-    let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
-        Arc::new(SqliteAssistantPreferenceRepository::new(db.pool().clone()));
-
-    svc.with_assistant_definition_repo(definition_repo.clone());
-    svc.with_assistant_state_repo(overlay_repo.clone());
-    svc.with_assistant_preference_repo(preference_repo.clone());
-
-    (svc, broadcaster, repo, definition_repo, overlay_repo, preference_repo)
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    svc.with_assistant_runtime_catalog(catalog.clone());
+    (svc, broadcaster, repo, catalog)
 }
 
 async fn make_service_with_assistant_support(
     skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
-    dispatcher: Arc<dyn AssistantRuleDispatcher>,
+    catalog: Arc<TestAssistantCatalog>,
 ) -> (
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<SqliteAssistantDefinitionRepository>,
-    Arc<SqliteAssistantOverlayRepository>,
-    Arc<dyn IAssistantPreferenceRepository>,
+    Arc<TestAssistantCatalog>,
 ) {
     let (svc, broadcaster, repo, _task_mgr) = make_service_with_resolver(skill_resolver);
-    let db = init_database_memory().await.unwrap();
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(db.pool().clone()));
-    let state_repo = Arc::new(SqliteAssistantOverlayRepository::new(db.pool().clone()));
-    let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
-        Arc::new(SqliteAssistantPreferenceRepository::new(db.pool().clone()));
-
-    svc.with_assistant_definition_repo(definition_repo.clone());
-    svc.with_assistant_state_repo(state_repo.clone());
-    svc.with_assistant_preference_repo(preference_repo.clone());
-    svc.with_assistant_dispatcher(dispatcher);
-
-    (svc, broadcaster, repo, definition_repo, state_repo, preference_repo)
+    svc.with_assistant_runtime_catalog(catalog.clone());
+    (svc, broadcaster, repo, catalog)
 }
 
 async fn make_service_with_assistant_support_and_acp_session_repo(
     skill_resolver: Arc<dyn crate::skill_resolver::SkillResolver>,
-    dispatcher: Arc<dyn AssistantRuleDispatcher>,
+    catalog: Arc<TestAssistantCatalog>,
     acp_session_repo: Arc<StubAcpSessionRepo>,
 ) -> (
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<SqliteAssistantDefinitionRepository>,
-    Arc<SqliteAssistantOverlayRepository>,
-    Arc<dyn IAssistantPreferenceRepository>,
+    Arc<TestAssistantCatalog>,
     Arc<StubAcpSessionRepo>,
 ) {
     let (svc, broadcaster, repo, _task_mgr) =
         make_service_with_resolver_and_acp_session_repo(skill_resolver, acp_session_repo.clone());
-    let db = init_database_memory().await.unwrap();
-    let definition_repo = Arc::new(SqliteAssistantDefinitionRepository::new(db.pool().clone()));
-    let state_repo = Arc::new(SqliteAssistantOverlayRepository::new(db.pool().clone()));
-    let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
-        Arc::new(SqliteAssistantPreferenceRepository::new(db.pool().clone()));
-
-    svc.with_assistant_definition_repo(definition_repo.clone());
-    svc.with_assistant_state_repo(state_repo.clone());
-    svc.with_assistant_preference_repo(preference_repo.clone());
-    svc.with_assistant_dispatcher(dispatcher);
-
-    (
-        svc,
-        broadcaster,
-        repo,
-        definition_repo,
-        state_repo,
-        preference_repo,
-        acp_session_repo,
-    )
+    svc.with_assistant_runtime_catalog(catalog.clone());
+    (svc, broadcaster, repo, catalog, acp_session_repo)
 }
 
 fn make_create_req() -> CreateConversationRequest {
@@ -1226,67 +1218,47 @@ fn assert_dated_workspace_path(workspace_root: &Path, workspace: &Path, expected
     assert_eq!(parts[3], expected_file_name);
 }
 
-async fn upsert_test_assistant_definition(
-    repo: &SqliteAssistantDefinitionRepository,
-    definition_id: &str,
+fn upsert_test_assistant_profile(
+    catalog: &TestAssistantCatalog,
     assistant_id: &str,
     agent_id: &str,
     default_model_mode: &str,
     default_permission_mode: &str,
 ) {
-    upsert_test_assistant_definition_with_thought_level(
-        repo,
-        definition_id,
+    upsert_test_assistant_profile_with_thought_level(
+        catalog,
         assistant_id,
         agent_id,
         default_model_mode,
         default_permission_mode,
         "auto",
-    )
-    .await;
+    );
 }
 
-async fn upsert_test_assistant_definition_with_thought_level(
-    repo: &SqliteAssistantDefinitionRepository,
-    definition_id: &str,
+fn upsert_test_assistant_profile_with_thought_level(
+    catalog: &TestAssistantCatalog,
     assistant_id: &str,
     agent_id: &str,
     default_model_mode: &str,
     default_permission_mode: &str,
     default_thought_level_mode: &str,
 ) {
-    repo.upsert(&UpsertAssistantDefinitionParams {
-        id: definition_id,
-        assistant_id,
-        source: "builtin",
-        owner_type: "system",
-        source_ref: Some(assistant_id),
-        name: assistant_id,
-        name_i18n: "{}",
-        description: Some("desc"),
-        description_i18n: "{}",
-        avatar_type: "emoji",
-        avatar_value: Some("🤖"),
-        agent_id,
-        rule_resource_type: "builtin_asset",
-        rule_resource_ref: Some(assistant_id),
-        recommended_prompts: "[]",
-        recommended_prompts_i18n: "{}",
-        default_model_mode,
-        default_model_value: None,
-        default_permission_mode,
-        default_permission_value: None,
-        default_thought_level_mode,
-        default_thought_level_value: None,
-        default_skills_mode: "auto",
-        default_skill_ids: "[]",
-        custom_skill_names: "[]",
-        default_disabled_builtin_skill_ids: "[]",
-        default_mcps_mode: "auto",
-        default_mcp_ids: "[]",
-    })
-    .await
-    .unwrap();
+    catalog.upsert(AssistantRuntimeProfile {
+        id: assistant_id.to_owned(),
+        source: "mine".to_owned(),
+        name: assistant_id.to_owned(),
+        avatar: "🤖".to_owned(),
+        agent_id: agent_id.to_owned(),
+        rules: String::new(),
+        model_mode: default_model_mode.to_owned(),
+        model: None,
+        permission_mode: default_permission_mode.to_owned(),
+        permission: None,
+        thought_level_mode: default_thought_level_mode.to_owned(),
+        thought_level: None,
+        skill_ids: Vec::new(),
+        mcp_ids: Vec::new(),
+    });
 }
 
 async fn create_assistant_backed_conversation(
@@ -1642,31 +1614,10 @@ async fn create_stores_model_as_json() {
 #[tokio::test]
 async fn create_derives_tjuae_cli_type_from_assistant_backend_when_type_is_missing() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_tjuaecli_missing_type",
-        "assistant-tjuaecli-missing-type",
-        "tjuaecli",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_tjuaecli_missing_type",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-tjuaecli-missing-type", "tjuaecli", "auto", "auto");
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -1693,31 +1644,10 @@ async fn create_derives_tjuae_cli_type_from_assistant_backend_when_type_is_missi
 #[tokio::test]
 async fn create_derives_acp_type_from_assistant_backend_when_type_is_missing() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_acp_missing_type",
-        "assistant-acp-missing-type",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_acp_missing_type",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-acp-missing-type", "codex", "auto", "auto");
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -1739,31 +1669,10 @@ async fn create_derives_acp_type_from_assistant_backend_when_type_is_missing() {
 #[tokio::test]
 async fn create_derives_acp_type_from_openclaw_agent_metadata_when_type_is_missing() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_openclaw_missing_type",
-        "assistant-openclaw-missing-type",
-        "b7e8a9c4",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_openclaw_missing_type",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-openclaw-missing-type", "b7e8a9c4", "auto", "auto");
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -1787,31 +1696,16 @@ async fn create_derives_acp_type_from_openclaw_agent_metadata_when_type_is_missi
 #[tokio::test]
 async fn create_derives_acp_type_from_custom_agent_metadata_when_type_is_missing() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_custom_acp_missing_type",
+    upsert_test_assistant_profile(
+        &catalog,
         "assistant-custom-acp-missing-type",
         "custom-acp-1",
         "auto",
         "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_custom_acp_missing_type",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    );
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -1836,31 +1730,16 @@ async fn create_derives_acp_type_from_custom_agent_metadata_when_type_is_missing
 #[tokio::test]
 async fn create_rejects_assistant_bound_to_deprecated_agent_metadata() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, _repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_openclaw_gateway_deprecated",
+    upsert_test_assistant_profile(
+        &catalog,
         "assistant-openclaw-gateway-deprecated",
         "f9f61666",
         "auto",
         "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_openclaw_gateway_deprecated",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    );
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -1885,31 +1764,10 @@ async fn create_rejects_assistant_bound_to_deprecated_agent_metadata() {
 #[tokio::test]
 async fn create_rejects_assistant_with_unregistered_agent_metadata() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, _repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_missing_agent",
-        "assistant-missing-agent",
-        "missing-agent",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_missing_agent",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-missing-agent", "missing-agent", "auto", "auto");
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -3887,40 +3745,15 @@ async fn command_ack_does_not_persist_assistant_preference_in_core_service() {
 #[tokio::test]
 async fn set_config_option_persists_runtime_model_into_assistant_preference_when_observed() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, catalog) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_acp_auto",
-        "assistant-acp-auto",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_acp_auto",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_acp_auto",
-            last_model_id: Some("legacy-acp-model"),
-            last_permission_value: Some("legacy-mode"),
-            last_thought_level_value: Some("legacy-low"),
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-acp-auto", "codex", "auto", "auto");
+    catalog.update("assistant-acp-auto", |profile| {
+        profile.model = Some("legacy-acp-model".to_owned());
+        profile.permission = Some("legacy-mode".to_owned());
+        profile.thought_level = Some("legacy-low".to_owned());
+    });
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-auto").await;
 
@@ -3939,9 +3772,9 @@ async fn set_config_option_persists_runtime_model_into_assistant_preference_when
         .unwrap();
     assert_eq!(result.confirmation, ConfigOptionConfirmation::Observed);
 
-    let pref_after_model = preference_repo.get("asstdef_acp_auto").await.unwrap().unwrap();
-    assert_eq!(pref_after_model.last_model_id.as_deref(), Some("gpt-5.5"));
-    assert_eq!(pref_after_model.last_permission_value.as_deref(), Some("legacy-mode"));
+    let pref_after_model = catalog.profile("assistant-acp-auto");
+    assert_eq!(pref_after_model.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(pref_after_model.permission.as_deref(), Some("legacy-mode"));
     let snapshot_after_model = repo.get_assistant_snapshot(&conv.id).await.unwrap().unwrap();
     assert_eq!(snapshot_after_model.resolved_model_id.as_deref(), Some("gpt-5.5"));
 
@@ -3954,9 +3787,9 @@ async fn set_config_option_persists_runtime_model_into_assistant_preference_when
     )
     .await
     .unwrap();
-    let pref_after_mode = preference_repo.get("asstdef_acp_auto").await.unwrap().unwrap();
-    assert_eq!(pref_after_mode.last_model_id.as_deref(), Some("gpt-5.5"));
-    assert_eq!(pref_after_mode.last_permission_value.as_deref(), Some("plan"));
+    let pref_after_mode = catalog.profile("assistant-acp-auto");
+    assert_eq!(pref_after_mode.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(pref_after_mode.permission.as_deref(), Some("plan"));
     let snapshot_after_mode = repo.get_assistant_snapshot(&conv.id).await.unwrap().unwrap();
     assert_eq!(snapshot_after_mode.resolved_permission_value.as_deref(), Some("plan"));
 
@@ -3971,10 +3804,10 @@ async fn set_config_option_persists_runtime_model_into_assistant_preference_when
     )
     .await
     .unwrap();
-    let pref_after_thought = preference_repo.get("asstdef_acp_auto").await.unwrap().unwrap();
-    assert_eq!(pref_after_thought.last_model_id.as_deref(), Some("gpt-5.5"));
-    assert_eq!(pref_after_thought.last_permission_value.as_deref(), Some("plan"));
-    assert_eq!(pref_after_thought.last_thought_level_value.as_deref(), Some("high"));
+    let pref_after_thought = catalog.profile("assistant-acp-auto");
+    assert_eq!(pref_after_thought.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(pref_after_thought.permission.as_deref(), Some("plan"));
+    assert_eq!(pref_after_thought.thought_level.as_deref(), Some("high"));
     let snapshot_after_thought = repo.get_assistant_snapshot(&conv.id).await.unwrap().unwrap();
     assert_eq!(
         snapshot_after_thought.resolved_thought_level_value.as_deref(),
@@ -3985,40 +3818,15 @@ async fn set_config_option_persists_runtime_model_into_assistant_preference_when
 #[tokio::test]
 async fn set_config_option_does_not_persist_preference_on_error() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, _repo, catalog) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_acp_auto",
-        "assistant-acp-auto",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_acp_auto",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_acp_auto",
-            last_model_id: Some("original-model"),
-            last_permission_value: Some("original-mode"),
-            last_thought_level_value: Some("original-low"),
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-acp-auto", "codex", "auto", "auto");
+    catalog.update("assistant-acp-auto", |profile| {
+        profile.model = Some("original-model".to_owned());
+        profile.permission = Some("original-mode".to_owned());
+        profile.thought_level = Some("original-low".to_owned());
+    });
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-auto").await;
 
@@ -4043,9 +3851,9 @@ async fn set_config_option_does_not_persist_preference_on_error() {
         .await;
     assert!(result.is_err(), "conflict from agent must surface as error");
 
-    let pref_after = preference_repo.get("asstdef_acp_auto").await.unwrap().unwrap();
+    let pref_after = catalog.profile("assistant-acp-auto");
     assert_eq!(
-        pref_after.last_model_id.as_deref(),
+        pref_after.model.as_deref(),
         Some("original-model"),
         "preference must not be written when set_config_option errors"
     );
@@ -4054,41 +3862,21 @@ async fn set_config_option_does_not_persist_preference_on_error() {
 #[tokio::test]
 async fn set_config_option_skips_preference_write_back_when_default_mode_is_fixed() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, catalog) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
-    upsert_test_assistant_definition_with_thought_level(
-        &definition_repo,
-        "asstdef_acp_fixed",
+    upsert_test_assistant_profile_with_thought_level(
+        &catalog,
         "assistant-acp-fixed",
         "codex",
         "fixed",
         "fixed",
         "fixed",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_acp_fixed",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_acp_fixed",
-            last_model_id: Some("legacy-fixed-model"),
-            last_permission_value: Some("legacy-fixed-mode"),
-            last_thought_level_value: None,
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    );
+    catalog.update("assistant-acp-fixed", |profile| {
+        profile.model = Some("legacy-fixed-model".to_owned());
+        profile.permission = Some("legacy-fixed-mode".to_owned());
+    });
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-fixed").await;
     let agent = Arc::new(MockAgent::new(&conv.id));
@@ -4122,10 +3910,10 @@ async fn set_config_option_skips_preference_write_back_when_default_mode_is_fixe
     .await
     .unwrap();
 
-    let pref = preference_repo.get("asstdef_acp_fixed").await.unwrap().unwrap();
-    assert_eq!(pref.last_model_id.as_deref(), Some("legacy-fixed-model"));
-    assert_eq!(pref.last_permission_value.as_deref(), Some("legacy-fixed-mode"));
-    assert_eq!(pref.last_thought_level_value.as_deref(), None);
+    let pref = catalog.profile("assistant-acp-fixed");
+    assert_eq!(pref.model.as_deref(), Some("legacy-fixed-model"));
+    assert_eq!(pref.permission.as_deref(), Some("legacy-fixed-mode"));
+    assert_eq!(pref.thought_level.as_deref(), None);
     // The snapshot still tracks the runtime override so the active session reflects it,
     // even though the persisted assistant preference must not change for fixed defaults.
     let snapshot = repo.get_assistant_snapshot(&conv.id).await.unwrap().unwrap();
@@ -4137,40 +3925,15 @@ async fn set_config_option_skips_preference_write_back_when_default_mode_is_fixe
 #[tokio::test]
 async fn set_config_option_command_ack_does_not_persist_assistant_preference() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, catalog) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_acp_ack",
-        "assistant-acp-ack",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_acp_ack",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_acp_ack",
-            last_model_id: Some("legacy-ack-model"),
-            last_permission_value: Some("legacy-ack-mode"),
-            last_thought_level_value: Some("legacy-ack-thought"),
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-acp-ack", "codex", "auto", "auto");
+    catalog.update("assistant-acp-ack", |profile| {
+        profile.model = Some("legacy-ack-model".to_owned());
+        profile.permission = Some("legacy-ack-mode".to_owned());
+        profile.thought_level = Some("legacy-ack-thought".to_owned());
+    });
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-ack").await;
     let agent = Arc::new(
@@ -4191,9 +3954,9 @@ async fn set_config_option_command_ack_does_not_persist_assistant_preference() {
     .await
     .unwrap();
 
-    let pref = preference_repo.get("asstdef_acp_ack").await.unwrap().unwrap();
-    assert_eq!(pref.last_model_id.as_deref(), Some("legacy-ack-model"));
-    assert_eq!(pref.last_permission_value.as_deref(), Some("legacy-ack-mode"));
+    let pref = catalog.profile("assistant-acp-ack");
+    assert_eq!(pref.model.as_deref(), Some("legacy-ack-model"));
+    assert_eq!(pref.permission.as_deref(), Some("legacy-ack-mode"));
     let snapshot = repo.get_assistant_snapshot(&conv.id).await.unwrap().unwrap();
     assert_eq!(snapshot.resolved_model_id.as_deref(), Some("legacy-ack-model"));
 }
@@ -4201,40 +3964,13 @@ async fn set_config_option_command_ack_does_not_persist_assistant_preference() {
 #[tokio::test]
 async fn update_tjuae_cli_model_updates_assistant_preference_only_when_snapshot_model_mode_is_auto() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, catalog) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_tjuaecli_auto",
-        "assistant-tjuaecli-auto",
-        "tjuaecli",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_tjuaecli_auto",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_tjuaecli_auto",
-            last_model_id: Some("legacy-tjuaecli-model"),
-            last_permission_value: None,
-            last_thought_level_value: None,
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-tjuaecli-auto", "tjuaecli", "auto", "auto");
+    catalog.update("assistant-tjuaecli-auto", |profile| {
+        profile.model = Some("legacy-tjuaecli-model".to_owned());
+    });
 
     let auto_conv =
         create_assistant_backed_conversation(&svc, "user_1", Some("tjuaecli"), "tjuaecli", "assistant-tjuaecli-auto")
@@ -4262,42 +3998,15 @@ async fn update_tjuae_cli_model_updates_assistant_preference_only_when_snapshot_
         updated.model.as_ref().and_then(|model| model.use_model.as_deref()),
         Some("model-z")
     );
-    let auto_pref = preference_repo.get("asstdef_tjuaecli_auto").await.unwrap().unwrap();
-    assert_eq!(auto_pref.last_model_id.as_deref(), Some("model-z"));
+    let auto_pref = catalog.profile("assistant-tjuaecli-auto");
+    assert_eq!(auto_pref.model.as_deref(), Some("model-z"));
     let auto_snapshot = repo.get_assistant_snapshot(&auto_conv.id).await.unwrap().unwrap();
     assert_eq!(auto_snapshot.resolved_model_id.as_deref(), Some("model-z"));
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_tjuaecli_fixed",
-        "assistant-tjuaecli-fixed",
-        "tjuaecli",
-        "fixed",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_tjuaecli_fixed",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_tjuaecli_fixed",
-            last_model_id: Some("legacy-tjuaecli-fixed-model"),
-            last_permission_value: None,
-            last_thought_level_value: None,
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "assistant-tjuaecli-fixed", "tjuaecli", "fixed", "auto");
+    catalog.update("assistant-tjuaecli-fixed", |profile| {
+        profile.model = Some("legacy-tjuaecli-fixed-model".to_owned());
+    });
 
     let fixed_conv =
         create_assistant_backed_conversation(&svc, "user_1", Some("tjuaecli"), "tjuaecli", "assistant-tjuaecli-fixed")
@@ -4321,8 +4030,8 @@ async fn update_tjuae_cli_model_updates_assistant_preference_only_when_snapshot_
         .await
         .unwrap();
 
-    let fixed_pref = preference_repo.get("asstdef_tjuaecli_fixed").await.unwrap().unwrap();
-    assert_eq!(fixed_pref.last_model_id.as_deref(), Some("legacy-tjuaecli-fixed-model"));
+    let fixed_pref = catalog.profile("assistant-tjuaecli-fixed");
+    assert_eq!(fixed_pref.model.as_deref(), Some("legacy-tjuaecli-fixed-model"));
     let fixed_snapshot = repo.get_assistant_snapshot(&fixed_conv.id).await.unwrap().unwrap();
     assert_eq!(fixed_snapshot.resolved_model_id.as_deref(), Some("model-y"));
 
@@ -6302,72 +6011,27 @@ async fn create_writes_only_assistant_snapshot_and_preset_skills() {
 }
 
 #[tokio::test]
-async fn create_resolves_assistant_snapshot_and_updates_preferences() {
+async fn create_resolves_assistant_snapshot_without_mutating_catalog_preferences() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-1".to_string(), "assistant rule body".to_string())]),
-    });
-    let (svc, _broadcaster, repo, definition_repo, state_repo, preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-1".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_preset_1",
-            assistant_id: "preset-1",
-            source: "builtin",
-            owner_type: "system",
-            source_ref: Some("preset-1"),
-            name: "Preset",
-            name_i18n: "{}",
-            description: Some("desc"),
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🤖"),
-            agent_id: "claude",
-            rule_resource_type: "builtin_asset",
-            rule_resource_ref: Some("preset-1"),
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_1",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: Some("codex"),
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_preset_1",
-            last_model_id: Some("old-model"),
-            last_permission_value: Some("workspace-write"),
-            last_thought_level_value: Some("high"),
-            last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
-            last_mcp_ids: r#"["legacy-mcp"]"#,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-1", "codex", "auto", "auto");
+    catalog.update("preset-1", |profile| {
+        profile.source = "tjuae-hub".to_owned();
+        profile.name = "Preset".to_owned();
+        profile.model = Some("old-model".to_owned());
+        profile.permission = Some("workspace-write".to_owned());
+        profile.thought_level = Some("high".to_owned());
+        profile.skill_ids = vec!["legacy-skill".to_owned()];
+        profile.mcp_ids = vec!["legacy-mcp".to_owned()];
+    });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -6393,7 +6057,7 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
         resp.assistant,
         Some(tjuaeui_api_types::ConversationAssistantIdentityResponse {
             id: "preset-1".into(),
-            source: "builtin".into(),
+            source: "tjuae-hub".into(),
             name: "Preset".into(),
             avatar: "🤖".into(),
             backend: "codex".into(),
@@ -6412,26 +6076,25 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
     assert!(resp.extra.get("assistant_snapshot").is_none());
 
     let snapshot = repo.get_assistant_snapshot(&resp.id).await.unwrap().unwrap();
-    assert_eq!(snapshot.assistant_definition_id, "asstdef_preset_1");
+    assert_eq!(snapshot.assistant_catalog_id, "preset-1");
     assert_eq!(snapshot.assistant_id, "preset-1");
     assert_eq!(snapshot.agent_id, "8e1acf31");
     assert_eq!(snapshot.rules_content, "assistant rule body");
     assert_eq!(snapshot.default_model_mode, "auto");
     assert_eq!(snapshot.resolved_model_id.as_deref(), Some("new-model"));
-    assert_eq!(snapshot.default_skills_mode, "auto");
+    assert_eq!(snapshot.default_skills_mode, "fixed");
     assert_eq!(snapshot.resolved_skill_ids, r#"["pdf"]"#);
 
-    let updated_pref = preference_repo.get("asstdef_preset_1").await.unwrap().unwrap();
-    assert_eq!(updated_pref.last_model_id.as_deref(), Some("new-model"));
-    assert_eq!(updated_pref.last_skill_ids, r#"["pdf"]"#);
-    assert_eq!(updated_pref.last_disabled_builtin_skill_ids, r#"["todo-tracker"]"#);
+    let updated_pref = catalog.profile("preset-1");
+    assert_eq!(updated_pref.model.as_deref(), Some("old-model"));
+    assert_eq!(updated_pref.skill_ids, vec!["legacy-skill"]);
 
     let fetched = svc.get("user-1", &resp.id).await.unwrap();
     assert_eq!(
         fetched.assistant,
         Some(tjuaeui_api_types::ConversationAssistantIdentityResponse {
             id: "preset-1".into(),
-            source: "builtin".into(),
+            source: "tjuae-hub".into(),
             name: "Preset".into(),
             avatar: "🤖".into(),
             backend: "codex".into(),
@@ -6455,7 +6118,7 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
         listed.items[0].assistant,
         Some(tjuaeui_api_types::ConversationAssistantIdentityResponse {
             id: "preset-1".into(),
-            source: "builtin".into(),
+            source: "tjuae-hub".into(),
             name: "Preset".into(),
             avatar: "🤖".into(),
             backend: "codex".into(),
@@ -6466,56 +6129,12 @@ async fn create_resolves_assistant_snapshot_and_updates_preferences() {
 #[tokio::test]
 async fn existing_conversation_reads_current_assistant_identity() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, state_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, _repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_live_identity",
-            assistant_id: "live-identity",
-            source: "user",
-            owner_type: "user",
-            source_ref: Some("live-identity"),
-            name: "Old Name",
-            name_i18n: "{}",
-            description: None,
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🤖"),
-            agent_id: "claude",
-            rule_resource_type: "none",
-            rule_resource_ref: None,
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_live_identity",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "live-identity", "claude", "auto", "auto");
+    catalog.update("live-identity", |profile| profile.name = "Old Name".to_owned());
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -6529,46 +6148,17 @@ async fn existing_conversation_reads_current_assistant_identity() {
     .unwrap();
     let created = svc.create("user-1", req).await.unwrap();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_live_identity",
-            assistant_id: "live-identity",
-            source: "user",
-            owner_type: "user",
-            source_ref: Some("live-identity"),
-            name: "New Name",
-            name_i18n: "{}",
-            description: None,
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🧪"),
-            agent_id: "claude",
-            rule_resource_type: "none",
-            rule_resource_ref: None,
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    catalog.update("live-identity", |profile| {
+        profile.name = "New Name".to_owned();
+        profile.avatar = "🧪".to_owned();
+    });
 
     let fetched = svc.get("user-1", &created.id).await.unwrap();
     assert_eq!(
         fetched.assistant,
         Some(tjuaeui_api_types::ConversationAssistantIdentityResponse {
             id: "live-identity".into(),
-            source: "user".into(),
+            source: "mine".into(),
             name: "New Name".into(),
             avatar: "🧪".into(),
             backend: "claude".into(),
@@ -6593,56 +6183,16 @@ async fn existing_conversation_reads_current_assistant_identity() {
 
 #[tokio::test]
 async fn create_routes_asset_avatar_in_assistant_identity_through_backend() {
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, state_repo, _preference_repo) =
-        make_service_with_assistant_support(Arc::new(FixedSkillResolver { names: vec![] }), dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
+    let (svc, _broadcaster, _repo, catalog) =
+        make_service_with_assistant_support(Arc::new(FixedSkillResolver { names: vec![] }), catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_data_avatar",
-            assistant_id: "custom-data-avatar",
-            source: "user",
-            owner_type: "user",
-            source_ref: Some("custom-data-avatar"),
-            name: "Data Avatar",
-            name_i18n: "{}",
-            description: None,
-            description_i18n: "{}",
-            avatar_type: "user_asset",
-            avatar_value: Some("data:image/svg+xml;base64,PHN2Zy8+"),
-            agent_id: "claude",
-            rule_resource_type: "none",
-            rule_resource_ref: None,
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_data_avatar",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "custom-data-avatar", "claude", "auto", "auto");
+    catalog.update("custom-data-avatar", |profile| {
+        profile.name = "Data Avatar".to_owned();
+        profile.avatar = "/api/assistant-assets/mine/~/custom-data-avatar/avatar.svg".to_owned();
+    });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -6659,38 +6209,20 @@ async fn create_routes_asset_avatar_in_assistant_identity_through_backend() {
 
     assert_eq!(
         resp.assistant.as_ref().map(|assistant| assistant.avatar.as_str()),
-        Some("/api/assistants/custom-data-avatar/avatar")
+        Some("/api/assistant-assets/mine/~/custom-data-avatar/avatar.svg")
     );
 }
 
 #[tokio::test]
 async fn assistant_backed_acp_build_options_include_snapshot_rule_as_preset_context() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-acp-rule".to_string(), "assistant rule body".to_string())]),
-    });
-    let (svc, _broadcaster, repo, definition_repo, state_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-acp-rule".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_preset_acp_rule",
-        "preset-acp-rule",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_acp_rule",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-acp-rule", "codex", "auto", "auto");
 
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "preset-acp-rule").await;
     let row = repo.get(&conv.id).await.unwrap().unwrap();
@@ -6707,34 +6239,13 @@ async fn assistant_backed_acp_build_options_include_snapshot_rule_as_preset_cont
 #[tokio::test]
 async fn assistant_backed_tjuae_cli_build_options_include_snapshot_rule_as_preset_rules() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([(
-            "preset-tjuaecli-rule".to_string(),
-            "assistant rule body".to_string(),
-        )]),
-    });
-    let (svc, _broadcaster, repo, definition_repo, state_repo, _preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-tjuaecli-rule".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_preset_tjuaecli_rule",
-        "preset-tjuaecli-rule",
-        "tjuaecli",
-        "auto",
-        "auto",
-    )
-    .await;
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_tjuaecli_rule",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-tjuaecli-rule", "tjuaecli", "auto", "auto");
 
     let conv =
         create_assistant_backed_conversation(&svc, "user_1", Some("tjuaecli"), "tjuaecli", "preset-tjuaecli-rule")
@@ -6755,68 +6266,22 @@ async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-1".to_string(), "assistant rule body".to_string())]),
-    });
-    let (svc, _broadcaster, repo, definition_repo, state_repo, preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-1".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_preset_legacy_seed",
-            assistant_id: "preset-1",
-            source: "builtin",
-            owner_type: "system",
-            source_ref: Some("preset-1"),
-            name: "Preset",
-            name_i18n: "{}",
-            description: Some("desc"),
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🤖"),
-            agent_id: "claude",
-            rule_resource_type: "builtin_asset",
-            rule_resource_ref: Some("preset-1"),
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "auto",
-            default_skill_ids: "[]",
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_legacy_seed",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: Some("codex"),
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_preset_legacy_seed",
-            last_model_id: Some("preferred-model"),
-            last_permission_value: Some("workspace-write"),
-            last_thought_level_value: Some("medium"),
-            last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
-            last_mcp_ids: r#"["legacy-mcp"]"#,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-1", "codex", "auto", "auto");
+    catalog.update("preset-1", |profile| {
+        profile.name = "Preset".to_owned();
+        profile.model = Some("preferred-model".to_owned());
+        profile.permission = Some("workspace-write".to_owned());
+        profile.thought_level = Some("medium".to_owned());
+        profile.skill_ids = vec!["legacy-skill".to_owned()];
+        profile.mcp_ids = vec!["legacy-mcp".to_owned()];
+    });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -6852,32 +6317,12 @@ async fn create_prefers_assistant_snapshot_over_legacy_runtime_seed_fields() {
 #[tokio::test]
 async fn create_prefers_snapshot_runtime_identity_over_legacy_extra_identity() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::new(),
-    });
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::new()));
     let acp_repo = Arc::new(StubAcpSessionRepo::default());
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, _preference_repo, acp_repo) =
-        make_service_with_assistant_support_and_acp_session_repo(resolver, dispatcher, acp_repo).await;
+    let (svc, _broadcaster, _repo, catalog, acp_repo) =
+        make_service_with_assistant_support_and_acp_session_repo(resolver, catalog, acp_repo).await;
 
-    upsert_test_assistant_definition(
-        &definition_repo,
-        "asstdef_snapshot_identity",
-        "preset-snapshot-identity",
-        "codex",
-        "auto",
-        "auto",
-    )
-    .await;
-    overlay_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_snapshot_identity",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: None,
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-snapshot-identity", "codex", "auto", "auto");
 
     let workspace = ensure_test_workspace_path();
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -6912,72 +6357,26 @@ async fn create_prefers_snapshot_runtime_identity_over_legacy_extra_identity() {
 }
 
 #[tokio::test]
-async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
+async fn create_conversation_overrides_do_not_mutate_catalog_preferences() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-fixed".to_string(), "assistant rule body".to_string())]),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, state_repo, preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-fixed".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, _repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_preset_fixed",
-            assistant_id: "preset-fixed",
-            source: "builtin",
-            owner_type: "system",
-            source_ref: Some("preset-fixed"),
-            name: "Preset Fixed",
-            name_i18n: "{}",
-            description: Some("desc"),
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🤖"),
-            agent_id: "claude",
-            rule_resource_type: "builtin_asset",
-            rule_resource_ref: Some("preset-fixed"),
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "fixed",
-            default_skill_ids: r#"["pdf"]"#,
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: r#"["todo-tracker"]"#,
-            default_mcps_mode: "fixed",
-            default_mcp_ids: r#"["mcp-fixed"]"#,
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_fixed",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: Some("codex"),
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_preset_fixed",
-            last_model_id: Some("legacy-model"),
-            last_permission_value: Some("workspace-write"),
-            last_thought_level_value: Some("legacy-thought"),
-            last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
-            last_mcp_ids: r#"["legacy-mcp"]"#,
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile_with_thought_level(&catalog, "preset-fixed", "codex", "auto", "auto", "auto");
+    catalog.update("preset-fixed", |profile| {
+        profile.name = "Preset Fixed".to_owned();
+        profile.model = Some("legacy-model".to_owned());
+        profile.permission = Some("workspace-write".to_owned());
+        profile.thought_level = Some("legacy-thought".to_owned());
+        profile.skill_ids = vec!["legacy-skill".to_owned()];
+        profile.mcp_ids = vec!["legacy-mcp".to_owned()];
+    });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -7001,12 +6400,11 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
     .unwrap();
     let _resp = svc.create("user-1", req).await.unwrap();
 
-    let updated_pref = preference_repo.get("asstdef_preset_fixed").await.unwrap().unwrap();
-    assert_eq!(updated_pref.last_model_id.as_deref(), Some("new-model"));
-    assert_eq!(updated_pref.last_permission_value.as_deref(), Some("workspace-read"));
-    assert_eq!(updated_pref.last_skill_ids, r#"["legacy-skill"]"#);
-    assert_eq!(updated_pref.last_disabled_builtin_skill_ids, r#"["legacy-disabled"]"#);
-    assert_eq!(updated_pref.last_mcp_ids, r#"["legacy-mcp"]"#);
+    let updated_pref = catalog.profile("preset-fixed");
+    assert_eq!(updated_pref.model.as_deref(), Some("legacy-model"));
+    assert_eq!(updated_pref.permission.as_deref(), Some("workspace-write"));
+    assert_eq!(updated_pref.skill_ids, vec!["legacy-skill"]);
+    assert_eq!(updated_pref.mcp_ids, vec!["legacy-mcp"]);
 }
 
 #[tokio::test]
@@ -7014,68 +6412,18 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-auto".to_string(), "assistant rule body".to_string())]),
-    });
-    let (svc, _broadcaster, _repo, definition_repo, state_repo, preference_repo) =
-        make_service_with_assistant_support(resolver, dispatcher).await;
+    let catalog = Arc::new(TestAssistantCatalog::new(HashMap::from([(
+        "preset-auto".to_string(),
+        "assistant rule body".to_string(),
+    )])));
+    let (svc, _broadcaster, _repo, catalog) = make_service_with_assistant_support(resolver, catalog).await;
     let workspace = ensure_test_workspace_path();
 
-    definition_repo
-        .upsert(&UpsertAssistantDefinitionParams {
-            id: "asstdef_preset_auto",
-            assistant_id: "preset-auto",
-            source: "builtin",
-            owner_type: "system",
-            source_ref: Some("preset-auto"),
-            name: "Preset Unset",
-            name_i18n: "{}",
-            description: Some("desc"),
-            description_i18n: "{}",
-            avatar_type: "emoji",
-            avatar_value: Some("🤖"),
-            agent_id: "claude",
-            rule_resource_type: "builtin_asset",
-            rule_resource_ref: Some("preset-auto"),
-            recommended_prompts: "[]",
-            recommended_prompts_i18n: "{}",
-            default_model_mode: "auto",
-            default_model_value: None,
-            default_permission_mode: "auto",
-            default_permission_value: None,
-            default_thought_level_mode: "auto",
-            default_thought_level_value: None,
-            default_skills_mode: "fixed",
-            default_skill_ids: r#"["pdf"]"#,
-            custom_skill_names: "[]",
-            default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "auto",
-            default_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
-    state_repo
-        .upsert(&UpsertAssistantOverlayParams {
-            assistant_definition_id: "asstdef_preset_auto",
-            enabled: true,
-            sort_order: 0,
-            agent_id_override: Some("codex"),
-            last_used_at: None,
-        })
-        .await
-        .unwrap();
-    preference_repo
-        .upsert(&UpsertAssistantPreferenceParams {
-            assistant_definition_id: "asstdef_preset_auto",
-            last_model_id: None,
-            last_permission_value: None,
-            last_thought_level_value: None,
-            last_skill_ids: "[]",
-            last_disabled_builtin_skill_ids: "[]",
-            last_mcp_ids: "[]",
-        })
-        .await
-        .unwrap();
+    upsert_test_assistant_profile(&catalog, "preset-auto", "codex", "auto", "auto");
+    catalog.update("preset-auto", |profile| {
+        profile.name = "Preset Unset".to_owned();
+        profile.skill_ids = vec!["pdf".to_owned()];
+    });
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -7096,10 +6444,10 @@ async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_va
     assert!(resp.extra.get("permission_mode").is_none());
     assert!(resp.extra.get("assistant_snapshot").is_none());
 
-    let updated_pref = preference_repo.get("asstdef_preset_auto").await.unwrap().unwrap();
-    assert_eq!(updated_pref.last_model_id, None);
-    assert_eq!(updated_pref.last_permission_value, None);
-    assert_eq!(updated_pref.last_mcp_ids, "[]");
+    let updated_pref = catalog.profile("preset-auto");
+    assert_eq!(updated_pref.model, None);
+    assert_eq!(updated_pref.permission, None);
+    assert!(updated_pref.mcp_ids.is_empty());
 }
 
 #[tokio::test]
@@ -7378,7 +6726,7 @@ async fn seed_tjuae_cli_conversation_with_snapshot(
     repo.create(&row).await.unwrap();
     repo.upsert_assistant_snapshot(&UpsertConversationAssistantSnapshotParams {
         conversation_id: &row.id,
-        assistant_definition_id: "asstdef-seed",
+        assistant_catalog_id: "mine:seed",
         assistant_id: "assistant-seed",
         assistant_source: "builtin",
         agent_id: "agent-seed",
