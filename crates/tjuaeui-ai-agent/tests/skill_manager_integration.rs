@@ -59,7 +59,7 @@ async fn discovers_only_skills_named_by_the_assistant_snapshot() {
     );
     assert_eq!(
         manager.get_skill("optional").await.unwrap().body.as_deref(),
-        Some("# optional\n\noptional body")
+        Some("# optional\n\noptional body\n")
     );
 }
 
