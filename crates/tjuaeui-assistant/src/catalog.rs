@@ -147,7 +147,14 @@ impl AssistantCatalogService {
                 let _ = tokio::fs::remove_dir_all(&backup).await;
                 manifest
             } else {
-                rename_assistant_directory(&temporary, &root).await?;
+                // A first install has no previous directory to preserve. On
+                // Windows, antivirus/indexers can transiently deny renaming a
+                // freshly written directory even though creating and copying
+                // its files is allowed. Copy the already validated two-file
+                // package into place; an interrupted copy is repaired by this
+                // same routine on the next startup.
+                copy_directory(&temporary, &root)?;
+                tokio::fs::remove_dir_all(&temporary).await?;
                 manifest
             };
 
