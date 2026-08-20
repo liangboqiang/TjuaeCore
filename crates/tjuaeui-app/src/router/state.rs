@@ -603,9 +603,11 @@ async fn build_channel_message_service(
         .flatten()
         .map(|u| u.id)
         .unwrap_or_else(|| "system_default_user".to_string());
+    let conversation_service = services.conversation_service.clone();
+    attach_assistant_runtime_catalog(services, &conversation_service);
 
     Arc::new(tjuaeui_channel::message_service::ChannelMessageService::new(
-        Arc::new(services.conversation_service.clone()),
+        Arc::new(conversation_service),
         services.worker_task_manager.clone(),
         channel_settings,
         owner_user_id,
@@ -1116,7 +1118,7 @@ mod tests {
 
     async fn seed_channel_state_assistant(services: &AppServices) -> String {
         let catalog = build_assistant_catalog(services);
-        let detail = catalog
+        catalog
             .create_mine(CreateMineAssistantRequest {
                 slug: "bare-channel-tjuaecli".to_owned(),
                 name: "Bare Channel TjuaeCLI".to_owned(),
@@ -1124,13 +1126,20 @@ mod tests {
             })
             .await
             .unwrap();
-        let mut manifest = serde_json::to_value(detail.manifest).unwrap();
-        manifest["defaults"]["agent"] = serde_json::Value::String("632f31d2".to_owned());
         let identity = AssistantIdentityResponse {
             source: AssistantSourceResponse::Mine,
             namespace: String::new(),
             slug: "bare-channel-tjuaecli".to_owned(),
         };
+        let mut manifest: serde_json::Value = serde_json::from_str(
+            &catalog
+                .file_content(&identity, None, "_meta.json")
+                .await
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        manifest["defaults"]["agent"] = serde_json::Value::String("632f31d2".to_owned());
         catalog
             .save_file(
                 &identity,
