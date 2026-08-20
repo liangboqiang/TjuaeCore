@@ -182,7 +182,7 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
     )
     .bind("conv-deleted-assistant")
     .bind("system_default_user")
-    .bind("Deleted assistant direct conversation should not be returned")
+    .bind("Conversation keeps its frozen assistant snapshot")
     .bind("tjuaecli")
     .bind(json!({"agentId":"opencode"}).to_string())
     .bind(json!({"providerId":"prov-secret","modelId":"deleted/assistant-model"}).to_string())
@@ -210,7 +210,7 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
         json!({
             "error": {
                 "code": "DeletedAssistantConversationError",
-                "message": "deleted assistant conversation error should not be returned"
+                "message": "frozen assistant conversation error"
             }
         })
         .to_string(),
@@ -453,62 +453,6 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
     .await
     .unwrap();
 
-    for (definition_id, assistant_id, deleted_at) in [
-        ("assistant-def-team", "assistant-team", None),
-        ("assistant-def-direct", "assistant-direct", None),
-        (
-            "assistant-def-deleted",
-            "assistant-deleted",
-            Some(ANCHOR_UPDATED_AT + 1_000),
-        ),
-    ] {
-        sqlx::query(
-            "INSERT INTO assistant_definitions \
-                (id, assistant_id, source, owner_type, source_ref, \
-                 name, name_i18n, description, description_i18n, avatar_type, avatar_value, \
-                 agent_id, rule_resource_type, rule_resource_ref, \
-                 recommended_prompts, recommended_prompts_i18n, default_model_mode, default_model_value, \
-                 default_permission_mode, default_permission_value, default_skills_mode, default_skill_ids, \
-                 custom_skill_names, default_disabled_builtin_skill_ids, default_mcps_mode, default_mcp_ids, \
-                 created_at, updated_at, deleted_at, default_thought_level_mode, default_thought_level_value) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(definition_id)
-        .bind(assistant_id)
-        .bind("user")
-        .bind("user")
-        .bind(None::<String>)
-        .bind(assistant_id)
-        .bind("{}")
-        .bind(None::<String>)
-        .bind("{}")
-        .bind("none")
-        .bind(None::<String>)
-        .bind("opencode")
-        .bind("none")
-        .bind(None::<String>)
-        .bind("[]")
-        .bind("{}")
-        .bind("auto")
-        .bind(None::<String>)
-        .bind("auto")
-        .bind(None::<String>)
-        .bind("auto")
-        .bind("[]")
-        .bind("[]")
-        .bind("[]")
-        .bind("auto")
-        .bind("[]")
-        .bind(ANCHOR_CREATED_AT)
-        .bind(ANCHOR_UPDATED_AT)
-        .bind(deleted_at)
-        .bind("auto")
-        .bind(None::<String>)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     sqlx::query(
         "INSERT INTO client_preferences (key, value, updated_at) VALUES (?, ?, ?) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
@@ -542,24 +486,11 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
     .await
     .unwrap();
 
-    for (conversation_id, definition_id, assistant_id, resolved_model_id, thought_level) in [
-        (
-            "conv-auth",
-            "assistant-def-team",
-            "assistant-team",
-            "sakana/fugu-ultra",
-            Some("high"),
-        ),
-        (
-            "conv-nearby",
-            "assistant-def-direct",
-            "assistant-direct",
-            "anthropic/claude-sonnet-4",
-            None,
-        ),
+    for (conversation_id, assistant_id, resolved_model_id, thought_level) in [
+        ("conv-auth", "assistant-team", "sakana/fugu-ultra", Some("high")),
+        ("conv-nearby", "assistant-direct", "anthropic/claude-sonnet-4", None),
         (
             "conv-deleted-assistant",
-            "assistant-def-deleted",
             "assistant-deleted",
             "deleted/assistant-model",
             None,
@@ -567,17 +498,18 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
     ] {
         sqlx::query(
             "INSERT INTO conversation_assistant_snapshots \
-                (conversation_id, assistant_definition_id, assistant_id, assistant_source, agent_id, \
+                (conversation_id, assistant_catalog_id, assistant_id, assistant_source, agent_id, \
                  rules_content, default_model_mode, resolved_model_id, default_permission_mode, \
-                 resolved_permission_value, default_skills_mode, resolved_skill_ids, \
+                 resolved_permission_value, default_thought_level_mode, resolved_thought_level_value, \
+                 default_skills_mode, resolved_skill_ids, \
                  resolved_disabled_builtin_skill_ids, default_mcps_mode, resolved_mcp_ids, \
-                 created_at, updated_at, default_thought_level_mode, resolved_thought_level_value) \
+                 created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(conversation_id)
-        .bind(definition_id)
+        .bind(format!("mine::{assistant_id}"))
         .bind(assistant_id)
-        .bind("user")
+        .bind("mine")
         .bind("opencode")
         .bind("rules should not leak")
         .bind("auto")
@@ -585,14 +517,14 @@ async fn insert_feedback_fixture(db: &tjuaeui_db::Database) {
         .bind("auto")
         .bind(None::<String>)
         .bind("auto")
+        .bind(thought_level)
+        .bind("auto")
         .bind("[]")
         .bind("[]")
         .bind("auto")
         .bind("[]")
         .bind(ANCHOR_CREATED_AT)
         .bind(ANCHOR_UPDATED_AT)
-        .bind("auto")
-        .bind(thought_level)
         .execute(pool)
         .await
         .unwrap();
@@ -703,12 +635,12 @@ async fn collects_conversation_auth_signals_without_sensitive_payloads() {
         .iter()
         .map(|item| item["id"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(recent_ids, vec!["conv-auth", "conv-nearby"]);
+    assert_eq!(recent_ids, vec!["conv-auth", "conv-deleted-assistant", "conv-nearby"]);
     assert_eq!(
-        recent_conversations[1]["title"],
+        recent_conversations[2]["title"],
         "Nearby conversation shown in screenshot"
     );
-    assert_eq!(recent_conversations[1]["latest_error_code"], "NearbyProviderTimeout");
+    assert_eq!(recent_conversations[2]["latest_error_code"], "NearbyProviderTimeout");
 
     let model_auth = result
         .profiles
@@ -850,15 +782,15 @@ async fn global_summary_includes_recent_diagnostics_without_sensitive_payloads()
         .find(|profile| profile.name == "global-summary")
         .expect("global summary profile should exist");
     assert_eq!(global.mode, "summary");
-    assert_eq!(global.data["conversation_count"], 3);
-    assert_eq!(global.data["message_count"], 4);
+    assert_eq!(global.data["conversation_count"], 4);
+    assert_eq!(global.data["message_count"], 5);
     let status_count_total = global.data["conversation_status_counts"]
         .as_array()
         .expect("conversation status counts should be included")
         .iter()
         .map(|item| item["count"].as_i64().unwrap())
         .sum::<i64>();
-    assert_eq!(status_count_total, 3);
+    assert_eq!(status_count_total, 4);
 
     let direct_conversations = global.data["recent_conversations"]["direct"]["items"]
         .as_array()
@@ -867,20 +799,19 @@ async fn global_summary_includes_recent_diagnostics_without_sensitive_payloads()
         .iter()
         .map(|item| item["id"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(direct_ids, vec!["conv-nearby", "conv-old"]);
-    assert!(!direct_ids.contains(&"conv-deleted-assistant"));
+    assert_eq!(direct_ids, vec!["conv-deleted-assistant", "conv-nearby", "conv-old"]);
     assert_eq!(
-        direct_conversations[0]["title"],
+        direct_conversations[1]["title"],
         "Nearby conversation shown in screenshot"
     );
-    assert_eq!(direct_conversations[0]["assistant_id"], "assistant-direct");
-    assert_eq!(direct_conversations[0]["agent_id"], "opencode");
-    assert_eq!(direct_conversations[0]["current_model_id"], "anthropic/claude-sonnet-4");
+    assert_eq!(direct_conversations[1]["assistant_id"], "assistant-direct");
+    assert_eq!(direct_conversations[1]["agent_id"], "opencode");
+    assert_eq!(direct_conversations[1]["current_model_id"], "anthropic/claude-sonnet-4");
     assert_eq!(
-        direct_conversations[0]["recent_errors"][0]["content"]["error"]["message"],
+        direct_conversations[1]["recent_errors"][0]["content"]["error"]["message"],
         "Nearby raw provider timeout should not leak"
     );
-    assert_eq!(direct_conversations[0]["message_count"], 1);
+    assert_eq!(direct_conversations[1]["message_count"], 1);
 
     let teams = global.data["recent_conversations"]["team"]["items"]
         .as_array()
@@ -964,9 +895,8 @@ async fn global_summary_includes_recent_diagnostics_without_sensitive_payloads()
     assert!(
         recent_errors
             .iter()
-            .all(|item| item["conversation_id"] != "conv-deleted-team"
-                && item["conversation_id"] != "conv-deleted-assistant"),
-        "deleted data conversations should be excluded from recent errors"
+            .all(|item| item["conversation_id"] != "conv-deleted-team"),
+        "deleted team conversations should be excluded from recent errors"
     );
 
     let agent_items = global.data["agent_health"]["items"]

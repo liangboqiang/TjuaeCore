@@ -561,8 +561,8 @@ async fn config_provider_update_reads_collection_before_and_after_write() {
     assert!(!stdout_text.contains("sk-input-secret"));
     assert!(!stdout_text.contains("sk-provider-secret"));
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(stdout["meta"]["before"].is_object());
-    assert!(stdout["meta"]["after"].is_object());
+    assert!(stdout["meta"]["before"].is_array());
+    assert!(stdout["meta"]["after"].is_array());
 }
 
 #[tokio::test]

@@ -23,12 +23,16 @@ use common::{
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const DEFAULT_CRON_ASSISTANT_ID: &str = "cron-e2e-assistant";
+const DEFAULT_CRON_ASSISTANT_ID: &str = "mine::tjuaeui-assistant";
 
 fn default_assistant_agent_config(name: &str) -> serde_json::Value {
     json!({
         "name": name,
-        "assistant_id": DEFAULT_CRON_ASSISTANT_ID
+        "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
+        "model": {
+            "provider_id": "cron-test-provider",
+            "model": "cron-test-model"
+        }
     })
 }
 
@@ -66,32 +70,18 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
     })
 }
 
-async fn ensure_default_assistant(app: &mut axum::Router, token: &str, csrf: &str) {
-    let req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": DEFAULT_CRON_ASSISTANT_ID,
-            "name": "Cron E2E Assistant",
-            "agent_id": "2d23ff1c"
-        }),
-        token,
-        csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert!(
-        resp.status() == StatusCode::CREATED || resp.status() == StatusCode::CONFLICT,
-        "expected assistant seed to be created or already exist, got {}",
-        resp.status()
-    );
+async fn ensure_default_assistant(_app: &mut axum::Router, _token: &str, _csrf: &str) {
+    // Application bootstrap creates and activates the canonical system
+    // assistant for every isolated test database.
 }
 
 async fn create_job(app: &mut axum::Router, token: &str, csrf: &str, body: serde_json::Value) -> serde_json::Value {
     ensure_default_assistant(app, token, csrf).await;
     let req = json_with_token("POST", "/api/cron/jobs", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "cron create response: {json}");
     assert_eq!(json["success"], true);
     json["data"].clone()
 }
@@ -235,6 +225,8 @@ async fn cj3b_create_accepts_workspace_with_whitespace_segment() {
     std::fs::create_dir(&dir).unwrap();
     let workspace = dir.join("Archive ");
     std::fs::create_dir(&workspace).unwrap();
+    let mut agent_config = default_assistant_agent_config("Cron Agent");
+    agent_config["workspace"] = json!(workspace.to_string_lossy());
 
     let body = json!({
         "name": "Whitespace Workspace",
@@ -243,11 +235,7 @@ async fn cj3b_create_accepts_workspace_with_whitespace_segment() {
         "conversation_id": "",
         "created_by": "user",
         "execution_mode": "new_conversation",
-        "agent_config": {
-            "name": "Cron Agent",
-            "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
-            "workspace": workspace.to_string_lossy()
-        }
+        "agent_config": agent_config
     });
 
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
@@ -264,6 +252,8 @@ async fn cj3c_create_rejects_missing_workspace_path() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     ensure_default_assistant(&mut app, &token, &csrf).await;
+    let mut agent_config = default_assistant_agent_config("Claude Code");
+    agent_config["workspace"] = json!("/tmp/cron-job-workspace-missing-path");
 
     let body = json!({
         "name": "Missing Workspace",
@@ -272,11 +262,7 @@ async fn cj3c_create_rejects_missing_workspace_path() {
         "conversation_id": "",
         "created_by": "user",
         "execution_mode": "new_conversation",
-        "agent_config": {
-            "name": "Claude Code",
-            "assistant_id": DEFAULT_CRON_ASSISTANT_ID,
-            "workspace": "/tmp/cron-job-workspace-missing-path"
-        }
+        "agent_config": agent_config
     });
 
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
@@ -688,25 +674,30 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
         .await
         .expect("create extra mcp");
 
-    let create_assistant_req = json_with_token(
-        "POST",
-        "/api/assistants",
+    let update_assistant_req = json_with_token(
+        "PUT",
+        "/api/assistants/catalog/mine/~/tjuaeui-assistant/settings",
         json!({
-            "id": "u-fixed-mcp",
             "name": "Cron MCP Assistant",
-            "agent_id": "8e1acf31",
+            "description": "Cron assistant with a fixed MCP binding",
+            "avatar": null,
+            "avatarDataUrl": null,
             "defaults": {
-                "mcps": {
-                    "mode": "fixed",
-                    "value": [fixed_mcp.id]
-                }
-            }
+                "agent": "8e1acf31",
+                "model": { "mode": "auto", "value": null },
+                "permission": { "mode": "auto", "value": null },
+                "thoughtLevel": { "mode": "auto", "value": null },
+                "skills": [],
+                "mcps": [fixed_mcp.id]
+            },
+            "recommendedPrompts": [],
+            "rules": "Use the configured MCP server."
         }),
         &token,
         &csrf,
     );
-    let create_assistant_resp = app.clone().oneshot(create_assistant_req).await.unwrap();
-    assert_eq!(create_assistant_resp.status(), StatusCode::CREATED);
+    let update_assistant_resp = app.clone().oneshot(update_assistant_req).await.unwrap();
+    assert_eq!(update_assistant_resp.status(), StatusCode::OK);
 
     let create_job_req = json_with_token(
         "POST",
@@ -720,7 +711,7 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
             "execution_mode": "new_conversation",
             "agent_config": {
                 "name": "Cron MCP Assistant",
-                "assistant_id": "u-fixed-mcp"
+                "assistant_id": DEFAULT_CRON_ASSISTANT_ID
             }
         }),
         &token,
@@ -786,7 +777,7 @@ async fn rn1c_run_now_new_conversation_preset_assistant_uses_fixed_assistant_mcp
         .await
         .expect("load assistant snapshot")
         .expect("preset assistant cron conversation should persist snapshot");
-    assert_eq!(snapshot.assistant_id, "u-fixed-mcp");
+    assert_eq!(snapshot.assistant_id, DEFAULT_CRON_ASSISTANT_ID);
     assert_eq!(snapshot.resolved_mcp_ids, json!([fixed_mcp.id]).to_string());
 }
 

@@ -139,15 +139,15 @@ impl AssistantCatalogService {
                 tokio::fs::remove_dir_all(&temporary).await?;
                 existing
             } else if root.is_dir() {
-                tokio::fs::rename(&root, &backup).await?;
-                if let Err(error) = tokio::fs::rename(&temporary, &root).await {
-                    let _ = tokio::fs::rename(&backup, &root).await;
-                    return Err(error.into());
+                rename_assistant_directory(&root, &backup).await?;
+                if let Err(error) = rename_assistant_directory(&temporary, &root).await {
+                    let _ = rename_assistant_directory(&backup, &root).await;
+                    return Err(error);
                 }
                 let _ = tokio::fs::remove_dir_all(&backup).await;
                 manifest
             } else {
-                tokio::fs::rename(&temporary, &root).await?;
+                rename_assistant_directory(&temporary, &root).await?;
                 manifest
             };
 
@@ -2214,6 +2214,21 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), AssistantErro
         }
     }
     Ok(())
+}
+
+async fn rename_assistant_directory(source: &Path, target: &Path) -> Result<(), AssistantError> {
+    let mut last_error = None;
+    for delay_ms in [0, 25, 50, 100, 200, 400] {
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        match tokio::fs::rename(source, target).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => last_error = Some(error),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(last_error.expect("rename retry records an error").into())
 }
 
 #[cfg(test)]

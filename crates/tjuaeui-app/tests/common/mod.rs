@@ -12,16 +12,26 @@ use tjuaeui_app::{AppConfig, AppServices, build_module_states, create_router, cr
 use tjuaeui_file::FileService;
 use tjuaeui_system::VersionCheckService;
 
+fn isolated_app_config() -> AppConfig {
+    let root = std::env::temp_dir().join(format!("tjuaeui-app-e2e-{}", tjuaeui_common::generate_id()));
+    std::fs::create_dir_all(&root).expect("create isolated app test directory");
+    AppConfig {
+        data_dir: root.join("data"),
+        work_dir: root.join("work"),
+        ..AppConfig::default()
+    }
+}
+
 pub async fn build_app() -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let router = create_router(&services).await.expect("build router");
     (router, services)
 }
 
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.shell.shell_service = std::sync::Arc::new(tjuaeui_shell::ShellService::new(std::sync::Arc::new(
         tjuaeui_shell::NoopSystemOpener,
@@ -32,7 +42,7 @@ pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
 
 pub async fn build_app_with_file_roots(allowed_roots: Vec<std::path::PathBuf>) -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.file.file_service = std::sync::Arc::new(FileService::new(services.event_bus.clone(), allowed_roots));
     let router = create_router_with_states(&services, states);
@@ -44,7 +54,7 @@ pub async fn build_app_with_mock_version(
     mock_server: &MockServer,
 ) -> (axum::Router, AppServices) {
     let db = tjuaeui_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_app_config()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.system.version_check_service =
         VersionCheckService::with_api_base(reqwest::Client::new(), current_version.to_owned(), mock_server.uri());
@@ -74,7 +84,7 @@ pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
     });
     let wtm: std::sync::Arc<dyn tjuaeui_ai_agent::IWorkerTaskManager> =
         std::sync::Arc::new(WorkerTaskManagerImpl::new(factory));
-    let services = AppServices::from_config(db, &AppConfig::default())
+    let services = AppServices::from_config(db, &isolated_app_config())
         .await
         .unwrap()
         .with_worker_task_manager(wtm);

@@ -13,8 +13,8 @@ use common::{
 use tjuaeui_api_types::TeamMcpStdioConfig;
 use tjuaeui_team::mcp::protocol::{read_frame, write_frame};
 
-const DEFAULT_TEAM_ASSISTANT_ID: &str = "team-e2e-assistant";
-const DEFAULT_TEAM_AGENT_ID: &str = "2d23ff1c";
+const DEFAULT_TEAM_ASSISTANT_ID: &str = "mine::tjuaeui-assistant";
+const DEFAULT_TEAM_AGENT_ID: &str = "8e1acf31";
 
 fn team_agent(name: &str, role: &str) -> serde_json::Value {
     json!({
@@ -35,16 +35,24 @@ fn two_agent_body() -> serde_json::Value {
     })
 }
 
-async fn ensure_default_team_agent_installed(services: &tjuaeui_app::AppServices) {
+async fn ensure_default_team_assistant(
+    _app: &mut axum::Router,
+    services: &tjuaeui_app::AppServices,
+    _token: &str,
+    _csrf: &str,
+) {
+    // Application bootstrap creates the canonical system assistant. Make its
+    // bundled TjuaeCLI runtime deterministically available inside the test
+    // process without depending on a developer machine installation.
     let command = std::env::current_exe()
         .expect("test executable path")
         .to_string_lossy()
         .to_string();
     let source_info = json!({ "binary_name": command }).to_string();
-
     sqlx::query(
         "UPDATE agent_metadata \
          SET agent_source = 'custom', agent_source_info = ?, command = ?, args = '[]', env = '[]', \
+             last_check_status = 'online', last_check_kind = 'manual', last_check_error_code = NULL, \
              updated_at = unixepoch('now','subsec') * 1000 \
          WHERE id = ?",
     )
@@ -53,39 +61,12 @@ async fn ensure_default_team_agent_installed(services: &tjuaeui_app::AppServices
     .bind(DEFAULT_TEAM_AGENT_ID)
     .execute(services.database.pool())
     .await
-    .expect("seed deterministic team agent");
-
+    .expect("seed deterministic team runtime");
     services
         .agent_registry
         .reload_one(DEFAULT_TEAM_AGENT_ID)
         .await
-        .expect("reload deterministic team agent");
-}
-
-async fn ensure_default_team_assistant(
-    app: &mut axum::Router,
-    services: &tjuaeui_app::AppServices,
-    token: &str,
-    csrf: &str,
-) {
-    ensure_default_team_agent_installed(services).await;
-    let req = json_with_token(
-        "POST",
-        "/api/assistants",
-        json!({
-            "id": DEFAULT_TEAM_ASSISTANT_ID,
-            "name": "Team E2E Assistant",
-            "agent_id": DEFAULT_TEAM_AGENT_ID
-        }),
-        token,
-        csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert!(
-        resp.status() == StatusCode::CREATED || resp.status() == StatusCode::CONFLICT,
-        "expected team assistant seed to be created or already exist, got {}",
-        resp.status()
-    );
+        .expect("reload deterministic team runtime");
 }
 
 async fn mark_claude_backend_team_mcp_stdio_capable(services: &tjuaeui_app::AppServices) {
@@ -118,8 +99,9 @@ async fn create_team(
     ensure_default_team_assistant(app, services, token, csrf).await;
     let req = json_with_token("POST", "/api/teams", two_agent_body(), token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "team create response: {json}");
     assert!(json["success"].as_bool().unwrap());
     json["data"].clone()
 }
@@ -260,7 +242,7 @@ async fn tc3_each_agent_has_conversation_id() {
 }
 
 #[tokio::test]
-async fn tc3b_create_team_writes_legacy_extra_shape() {
+async fn tc3b_create_team_writes_runtime_binding_extra() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -274,9 +256,9 @@ async fn tc3b_create_team_writes_legacy_extra_shape() {
     assert_eq!(extra["teamId"], data["id"]);
     assert!(extra["slot_id"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(extra["role"], "lead");
-    assert_eq!(extra["backend"], "claude");
-    assert_eq!(extra["session_mode"], "bypassPermissions");
-    assert_eq!(extra["current_model_id"], "claude");
+    assert_eq!(extra["backend"], "tjuaecli");
+    assert_eq!(extra["session_mode"], "yolo");
+    assert!(extra["current_model_id"].is_null());
 }
 
 #[tokio::test]
@@ -1054,7 +1036,7 @@ async fn es1b_team_mcp_list_assistants_matches_assistant_projection() {
 
     let assistants_resp = app
         .clone()
-        .oneshot(get_with_token("/api/assistants", &token))
+        .oneshot(get_with_token("/api/assistant-runtime/options", &token))
         .await
         .unwrap();
     assert_eq!(assistants_resp.status(), StatusCode::OK);
@@ -1063,14 +1045,14 @@ async fn es1b_team_mcp_list_assistants_matches_assistant_projection() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|assistant| assistant["team_selectable"].as_bool().unwrap_or(false))
+        .filter(|assistant| assistant["teamSelectable"].as_bool().unwrap_or(false))
         .filter(|assistant| assistant["agent"].is_object())
         .map(|assistant| assistant["id"].as_str().unwrap().to_owned())
         .collect();
     expected_ids.sort();
     assert!(
         !expected_ids.is_empty(),
-        "fixture must expose at least one team-selectable assistant via /api/assistants: {assistants_body}"
+        "fixture must expose at least one team-selectable assistant via runtime options: {assistants_body}"
     );
     assert!(
         expected_ids.contains(&DEFAULT_TEAM_ASSISTANT_ID.to_owned()),
@@ -1115,7 +1097,7 @@ async fn es1b_team_mcp_list_assistants_matches_assistant_projection() {
 
     assert_eq!(
         runtime_ids, expected_ids,
-        "Team MCP runtime assistant list must match /api/assistants team_selectable projection"
+        "Team MCP runtime assistant list must match the runtime-options team-selectable projection"
     );
 
     let stop_req = delete_with_token(&format!("/api/teams/{team_id}/session"), &token, &csrf);
