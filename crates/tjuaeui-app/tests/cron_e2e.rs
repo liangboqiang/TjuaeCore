@@ -146,7 +146,7 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["target"]["payload"]["kind"], "message");
     assert_eq!(data["target"]["payload"]["text"], "test message");
     assert_eq!(data["metadata"]["conversation_id"], "conv_1");
-    assert_eq!(data["metadata"]["agent_type"], "acp");
+    assert_eq!(data["metadata"]["agent_type"], "tjuaecli");
     assert_eq!(data["metadata"]["created_by"], "user");
 }
 
