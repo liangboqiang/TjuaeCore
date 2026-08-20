@@ -328,16 +328,13 @@ async fn get_channel_settings_defaults_to_generated_tjuae_cli_assistant() {
     let json = body_json(resp).await;
     assert!(json["success"].as_bool().unwrap());
     assert_eq!(json["data"]["platform"], "telegram");
-    // With no explicit binding the platform now falls back to the generated
-    // tjuae_cli bare assistant (see channel "default to bare assistant bindings");
-    // only the assistant_id is canonical, legacy fields are omitted.
+    // With no explicit binding the platform falls back to the generated,
+    // activated TjuaeUI assistant. Only the canonical assistant identity is
+    // persisted; legacy bare assistant identities are not accepted.
     let assistant_id = json["data"]["assistant"]["assistant_id"]
         .as_str()
-        .expect("default channel assistant should be the generated tjuaecli bare assistant");
-    assert!(
-        assistant_id.starts_with("bare:"),
-        "expected bare assistant id, got {assistant_id}"
-    );
+        .expect("default channel assistant should be the generated TjuaeUI assistant");
+    assert_eq!(assistant_id, "mine::tjuaeui-assistant");
     assert!(json["data"]["assistant"]["backend"].is_null());
     assert!(json["data"]["assistant"]["agent_type"].is_null());
     assert!(json["data"]["default_model"].is_null());
@@ -352,8 +349,8 @@ async fn put_channel_assistant_setting_persists_binding() {
         "PUT",
         "/api/channel/settings/telegram/assistant",
         json!({
-            "assistant_id": "bare-claude",
-            "name": "Claude",
+            "assistant_id": "mine::tjuaeui-assistant",
+            "name": "TjuaeUI管家",
         }),
         &token,
         &csrf,
@@ -369,8 +366,8 @@ async fn put_channel_assistant_setting_persists_binding() {
     assert_eq!(
         json["data"]["assistant"],
         json!({
-            "assistant_id": "bare-claude",
-            "name": "Claude",
+            "assistant_id": "mine::tjuaeui-assistant",
+            "name": "TjuaeUI管家",
         })
     );
 }
@@ -445,7 +442,7 @@ async fn put_channel_assistant_setting_clears_active_sessions() {
         "PUT",
         "/api/channel/settings/lark/assistant",
         json!({
-            "assistant_id": "assistant-1",
+            "assistant_id": "mine::tjuaeui-assistant",
         }),
         &token,
         &csrf,
