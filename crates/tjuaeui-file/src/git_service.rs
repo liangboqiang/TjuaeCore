@@ -534,6 +534,18 @@ impl IGitService for GitService {
         self.read_repository_info(&context).await
     }
 
+    async fn materialize_repository_path(
+        &self,
+        repository_url: &str,
+        revision: &str,
+        source_path: &str,
+        destination: &Path,
+    ) -> Result<(), FileError> {
+        WorkspaceGitProvisioner::materialize_repository_path(self, repository_url, revision, source_path, destination)
+            .await
+            .map_err(FileError::Internal)
+    }
+
     async fn repository_info(&self, workspace: &str) -> Result<GitRepositoryInfo, FileError> {
         let context = self.context(workspace).await?;
         self.read_repository_info(&context).await

@@ -197,6 +197,15 @@ pub trait IGitService: Send + Sync {
         repository_url: &str,
         parent_directory: &str,
     ) -> Result<GitRepositoryInfo, FileError>;
+    async fn materialize_repository_path(
+        &self,
+        _repository_url: &str,
+        _revision: &str,
+        _source_path: &str,
+        _destination: &Path,
+    ) -> Result<(), FileError> {
+        Err(FileError::Internal("当前 Git 服务不支持检出远程仓库目录".to_owned()))
+    }
     async fn commit(&self, workspace: &str, message: &str, include_unstaged: bool) -> Result<String, FileError>;
     async fn fetch(&self, workspace: &str) -> Result<(), FileError>;
     async fn pull(&self, workspace: &str) -> Result<(), FileError>;

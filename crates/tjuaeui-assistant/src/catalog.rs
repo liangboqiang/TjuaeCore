@@ -205,7 +205,16 @@ impl AssistantCatalogService {
                 namespace: preference.namespace.clone(),
                 slug: preference.slug.clone(),
             };
-            profiles.push(self.runtime_profile_from_preference(identity, preference).await?);
+            match self.runtime_profile_from_preference(identity.clone(), preference).await {
+                Ok(profile) => profiles.push(profile),
+                Err(error) => tracing::warn!(
+                    source = source_id(identity.source),
+                    namespace = identity.namespace,
+                    slug = identity.slug,
+                    %error,
+                    "跳过无法加载的助手运行配置"
+                ),
+            }
         }
         profiles.sort_by(|left, right| {
             left.sort_order
@@ -418,7 +427,7 @@ impl AssistantCatalogService {
             )
             .await?;
             read_manifest_as(&temporary, &request.slug).await?;
-            tokio::fs::rename(&temporary, &root).await?;
+            rename_assistant_directory(&temporary, &root).await?;
             Ok::<(), AssistantError>(())
         }
         .await;
@@ -480,7 +489,7 @@ impl AssistantCatalogService {
             )
             .await?;
             let slug = manifest.id.clone();
-            tokio::fs::rename(&package_root, &target).await?;
+            rename_assistant_directory(&package_root, &target).await?;
             let identity = identity(AssistantSourceResponse::Mine, "", &slug);
             self.detail(&identity, None).await
         }
@@ -508,7 +517,7 @@ impl AssistantCatalogService {
         let backup = parent.join(format!(".{}.backup.{}", identity.slug, uuid::Uuid::now_v7()));
         let source = root.clone();
         let destination = temporary.clone();
-        tokio::task::spawn_blocking(move || copy_directory(&source, &destination))
+        tokio::task::spawn_blocking(move || copy_workspace_directory(&source, &destination))
             .await
             .map_err(|error| AssistantError::Internal(error.to_string()))??;
 
@@ -525,17 +534,17 @@ impl AssistantCatalogService {
             )
             .await?;
             read_manifest_as(&temporary, &identity.slug).await?;
-            tokio::fs::rename(&root, &backup).await?;
-            if let Err(error) = tokio::fs::rename(&temporary, &root).await {
-                let _ = tokio::fs::rename(&backup, &root).await;
-                return Err(error.into());
+            rename_assistant_directory(&root, &backup).await?;
+            if let Err(error) = rename_assistant_directory(&temporary, &root).await {
+                let _ = rename_assistant_directory(&backup, &root).await;
+                return Err(error);
             }
             if let Err(error) = self
                 .refresh_activation_after_edit(identity, &manifest.content_hash)
                 .await
             {
                 let _ = tokio::fs::remove_dir_all(&root).await;
-                let _ = tokio::fs::rename(&backup, &root).await;
+                let _ = rename_assistant_directory(&backup, &root).await;
                 return Err(error);
             }
             let _ = tokio::fs::remove_dir_all(&backup).await;
@@ -581,7 +590,7 @@ impl AssistantCatalogService {
         let backup = parent.join(format!(".{}.backup.{}", identity.slug, uuid::Uuid::now_v7()));
         let source = root.clone();
         let destination = temporary.clone();
-        tokio::task::spawn_blocking(move || copy_directory(&source, &destination))
+        tokio::task::spawn_blocking(move || copy_workspace_directory(&source, &destination))
             .await
             .map_err(|error| AssistantError::Internal(error.to_string()))??;
 
@@ -623,17 +632,17 @@ impl AssistantCatalogService {
             )
             .await?;
             read_manifest_as(&temporary, &identity.slug).await?;
-            tokio::fs::rename(&root, &backup).await?;
-            if let Err(error) = tokio::fs::rename(&temporary, &root).await {
-                let _ = tokio::fs::rename(&backup, &root).await;
-                return Err(error.into());
+            rename_assistant_directory(&root, &backup).await?;
+            if let Err(error) = rename_assistant_directory(&temporary, &root).await {
+                let _ = rename_assistant_directory(&backup, &root).await;
+                return Err(error);
             }
             if let Err(error) = self
                 .refresh_activation_after_edit(identity, &manifest.content_hash)
                 .await
             {
                 let _ = tokio::fs::remove_dir_all(&root).await;
-                let _ = tokio::fs::rename(&backup, &root).await;
+                let _ = rename_assistant_directory(&backup, &root).await;
                 return Err(error);
             }
             let _ = tokio::fs::remove_dir_all(&backup).await;
@@ -751,28 +760,47 @@ impl AssistantCatalogService {
         if tokio::fs::try_exists(&target).await? {
             return Err(AssistantError::Conflict(format!("助手 {} 已存在", request.target_slug)));
         }
-        tokio::fs::create_dir(&temporary).await?;
         let result = async {
-            for file in &detail.files {
-                tjuaeui_catalog::validate_relative_file(&file.path, 0)?;
-                let destination = temporary.join(&file.path);
-                if let Some(parent) = destination.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+            if source_identity.source == AssistantSourceResponse::TjuaeHub && self.hub_worktree.is_none() {
+                let index = self.hub_index().await?;
+                let entry = index
+                    .assistants
+                    .iter()
+                    .find(|entry| entry.id == source_identity.slug)
+                    .ok_or_else(|| AssistantError::NotFound(source_identity.slug.clone()))?;
+                let selected = entry
+                    .version(&detail.manifest.version)
+                    .ok_or_else(|| AssistantError::NotFound(detail.manifest.version.clone()))?;
+                self.git
+                    .materialize_repository_path(&index.repository, &selected.revision, &entry.path, &temporary)
+                    .await
+                    .map_err(|error| AssistantError::Internal(error.to_string()))?;
+            } else {
+                tokio::fs::create_dir(&temporary).await?;
+                for file in &detail.files {
+                    tjuaeui_catalog::validate_relative_file(&file.path, 0)?;
+                    let destination = temporary.join(&file.path);
+                    if let Some(parent) = destination.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    let bytes = self
+                        .file_bytes(source_identity, Some(&detail.manifest.version), &file.path)
+                        .await?;
+                    tokio::fs::write(destination, bytes).await?;
                 }
-                let mut bytes = self
-                    .file_bytes(source_identity, Some(&detail.manifest.version), &file.path)
-                    .await?;
-                if file.path == MANIFEST_FILE {
-                    let mut manifest: AssistantManifest = serde_json::from_slice(&bytes)
-                        .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
-                    manifest.id.clone_from(&request.target_slug);
-                    bytes = serde_json::to_vec_pretty(&manifest)
-                        .map_err(|error| AssistantError::Internal(error.to_string()))?;
-                }
-                tokio::fs::write(destination, bytes).await?;
             }
+            let manifest_path = temporary.join(MANIFEST_FILE);
+            let mut manifest: AssistantManifest = serde_json::from_slice(&tokio::fs::read(&manifest_path).await?)
+                .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+            manifest.id.clone_from(&request.target_slug);
+            manifest.content_hash = assistant_directory_digest(&temporary)?;
+            tokio::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).map_err(|error| AssistantError::Internal(error.to_string()))?,
+            )
+            .await?;
             read_manifest_as(&temporary, &request.target_slug).await?;
-            tokio::fs::rename(&temporary, &target).await?;
+            rename_assistant_directory(&temporary, &target).await?;
             Ok::<(), AssistantError>(())
         }
         .await;
@@ -892,7 +920,7 @@ impl AssistantCatalogService {
         let backup = parent.join(format!(".{}.backup.{}", identity.slug, uuid::Uuid::now_v7()));
         let source = root.clone();
         let destination = temporary.clone();
-        tokio::task::spawn_blocking(move || copy_directory(&source, &destination))
+        tokio::task::spawn_blocking(move || copy_workspace_directory(&source, &destination))
             .await
             .map_err(|error| AssistantError::Internal(error.to_string()))??;
         let result = async {
@@ -920,17 +948,17 @@ impl AssistantCatalogService {
                 serde_json::to_vec_pretty(&manifest).map_err(|error| AssistantError::Internal(error.to_string()))?,
             )
             .await?;
-            tokio::fs::rename(&root, &backup).await?;
-            if let Err(error) = tokio::fs::rename(&temporary, &root).await {
-                let _ = tokio::fs::rename(&backup, &root).await;
-                return Err(error.into());
+            rename_assistant_directory(&root, &backup).await?;
+            if let Err(error) = rename_assistant_directory(&temporary, &root).await {
+                let _ = rename_assistant_directory(&backup, &root).await;
+                return Err(error);
             }
             if let Err(error) = self
                 .refresh_activation_after_edit(identity, &manifest.content_hash)
                 .await
             {
                 let _ = tokio::fs::remove_dir_all(&root).await;
-                let _ = tokio::fs::rename(&backup, &root).await;
+                let _ = rename_assistant_directory(&backup, &root).await;
                 return Err(error);
             }
             let _ = tokio::fs::remove_dir_all(&backup).await;
@@ -1306,6 +1334,7 @@ impl AssistantCatalogService {
             if !entry.file_type().await?.is_dir() {
                 continue;
             }
+            repair_obsolete_local_manifest(&entry.path()).await?;
             let manifest = match read_manifest(&entry.path()).await {
                 Ok(manifest) => manifest,
                 Err(error) => {
@@ -1354,6 +1383,7 @@ impl AssistantCatalogService {
         preferences: &HashMap<IdentityKey, AssistantUserPreferenceRow>,
     ) -> Result<AssistantCatalogDetailResponse, AssistantError> {
         let root = self.mine_root.join(&identity.slug);
+        repair_obsolete_local_manifest(&root).await?;
         let workspace = root.to_string_lossy();
         self.git
             .ensure(&workspace)
@@ -2272,6 +2302,57 @@ async fn read_manifest(root: &Path) -> Result<AssistantManifest, AssistantError>
     read_manifest_as(root, expected).await
 }
 
+/// Repairs the single obsolete `tags` field emitted by an earlier TjuaeUI
+/// build in the user's private workspace. Public packages and imports remain
+/// strict: this is a one-time local data repair, not protocol compatibility.
+async fn repair_obsolete_local_manifest(root: &Path) -> Result<bool, AssistantError> {
+    let path = root.join(MANIFEST_FILE);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if serde_json::from_slice::<AssistantManifest>(&bytes).is_ok() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AssistantError::BadRequest("助手清单必须是 JSON 对象".to_owned()))?;
+    let Some(tags) = object.remove("tags") else {
+        return Ok(false);
+    };
+    let categories_empty = object
+        .get("categories")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if categories_empty {
+        let mut seen = BTreeSet::new();
+        let categories = tags
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && seen.insert((*value).to_owned()))
+            .map(|value| serde_json::Value::String(value.to_owned()))
+            .collect::<Vec<_>>();
+        object.insert("categories".to_owned(), serde_json::Value::Array(categories));
+    }
+    let manifest: AssistantManifest =
+        serde_json::from_value(value).map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+    let expected = root.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+    validate_manifest(&manifest, expected)?;
+    tokio::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&manifest).map_err(|error| AssistantError::Internal(error.to_string()))?,
+    )
+    .await?;
+    tracing::info!(path = %path.display(), "已修复本地助手清单中的废弃字段");
+    Ok(true)
+}
+
 async fn read_manifest_as(root: &Path, expected: &str) -> Result<AssistantManifest, AssistantError> {
     let bytes = tokio::fs::read(root.join(MANIFEST_FILE)).await?;
     let manifest: AssistantManifest =
@@ -2467,10 +2548,18 @@ fn collect_portable_directory(
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<(), AssistantError> {
+    copy_directory_entries(source, destination, false)
+}
+
+fn copy_workspace_directory(source: &Path, destination: &Path) -> Result<(), AssistantError> {
+    copy_directory_entries(source, destination, true)
+}
+
+fn copy_directory_entries(source: &Path, destination: &Path, include_git: bool) -> Result<(), AssistantError> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        if !include_git && entry.file_name() == ".git" {
             continue;
         }
         let file_type = entry.file_type()?;
@@ -2482,7 +2571,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), AssistantErro
         }
         let target = destination.join(entry.file_name());
         if file_type.is_dir() {
-            copy_directory(&entry.path(), &target)?;
+            copy_directory_entries(&entry.path(), &target, include_git)?;
         } else if file_type.is_file() {
             std::fs::copy(entry.path(), target)?;
         }
@@ -2582,6 +2671,120 @@ mod tests {
             service.delete_mine(&identity).await,
             Err(AssistantError::Forbidden(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn local_catalog_repairs_the_obsolete_tags_field_once() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        let service = AssistantCatalogService::new(
+            Arc::new(SqliteAssistantUserPreferenceRepository::new(database.pool().clone())),
+            temp.path(),
+            None,
+            None,
+            false,
+            Arc::new(GitService::new()),
+        );
+        service
+            .create_mine(CreateMineAssistantRequest {
+                slug: "legacy-helper".to_owned(),
+                name: "Legacy Helper".to_owned(),
+                description: "repair".to_owned(),
+            })
+            .await
+            .unwrap();
+        let manifest_path = service.mine_root().join("legacy-helper").join(MANIFEST_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&manifest_path).await.unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("categories");
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("tags".to_owned(), serde_json::json!(["写作", "写作", "办公"]));
+        tokio::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap())
+            .await
+            .unwrap();
+
+        let page = service
+            .list(AssistantSourceResponse::Mine, "", "name", None, 100)
+            .await
+            .unwrap();
+        let repaired = page
+            .items
+            .iter()
+            .find(|item| item.identity.slug == "legacy-helper")
+            .unwrap();
+        assert_eq!(repaired.categories, vec!["写作", "办公"]);
+        let repaired_value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(manifest_path).await.unwrap()).unwrap();
+        assert!(repaired_value.get("tags").is_none());
+    }
+
+    #[tokio::test]
+    async fn saving_then_publishing_keeps_the_assistant_git_history() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        let git: GitServiceRef = Arc::new(GitService::new());
+        let service = AssistantCatalogService::new(
+            Arc::new(SqliteAssistantUserPreferenceRepository::new(database.pool().clone())),
+            temp.path(),
+            None,
+            None,
+            false,
+            git.clone(),
+        );
+        let created = service
+            .create_mine(CreateMineAssistantRequest {
+                slug: "versioned-helper".to_owned(),
+                name: "Versioned Helper".to_owned(),
+                description: "Initial".to_owned(),
+            })
+            .await
+            .unwrap();
+        let identity = identity(AssistantSourceResponse::Mine, "", "versioned-helper");
+        let root = service.mine_root().join("versioned-helper");
+        let workspace = root.to_string_lossy().into_owned();
+        let initial_history = git.history(&workspace, None, None, 20).await.unwrap();
+
+        service
+            .update_settings(
+                &identity,
+                UpdateAssistantCatalogSettingsRequest {
+                    name: "Versioned Helper".to_owned(),
+                    description: "Saved before publishing".to_owned(),
+                    avatar: created.manifest.avatar,
+                    avatar_data_url: None,
+                    categories: vec!["效率".to_owned()],
+                    defaults: created.manifest.defaults,
+                    recommended_prompts: vec!["测试发布".to_owned()],
+                    rules: "# Saved rules".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(root.join(".git").exists());
+        assert_eq!(
+            git.history(&workspace, None, None, 20).await.unwrap().len(),
+            initial_history.len()
+        );
+        service
+            .publish_hub(
+                &identity,
+                PublishAssistantCatalogRequest {
+                    version: "0.2.0".to_owned(),
+                    message: "发布保存后的版本".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let history = git.history(&workspace, None, None, 20).await.unwrap();
+        assert_eq!(history.len(), initial_history.len() + 1);
+        let published = service.detail(&identity, None).await.unwrap();
+        assert_eq!(published.manifest.version, "0.2.0");
+        assert!(published.versions.iter().any(|version| version.version == "0.1.0"));
+        assert!(published.versions.iter().any(|version| version.version == "0.2.0"));
     }
 
     #[tokio::test]

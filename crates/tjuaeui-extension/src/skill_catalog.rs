@@ -442,7 +442,6 @@ async fn write_catalog_snapshot(
     if target.exists() {
         tokio::fs::remove_dir_all(target).await?;
     }
-    tokio::fs::create_dir_all(target).await?;
     let transport_namespace = resolve_transport_namespace(request.space, request.namespace, request.slug).await?;
     let detail = catalog_detail(
         request.mine_root,
@@ -456,6 +455,43 @@ async fn write_catalog_snapshot(
     if detail.files.len() > MAX_FILE_COUNT {
         return Err(ExtensionError::InvalidRequest("技能文件数量超过 2000".to_owned()));
     }
+    if request.space == SkillSpace::TjuaeHub {
+        let index = tjuae_hub_index().await?;
+        let entry = index
+            .skills
+            .iter()
+            .find(|entry| entry.id == request.slug)
+            .ok_or_else(|| ExtensionError::SkillNotFound(request.slug.to_owned()))?;
+        let selected = entry
+            .version(request.version)
+            .ok_or_else(|| ExtensionError::InvalidVersion {
+                version: request.version.to_owned(),
+                reason: "TjuaeHub 索引中没有这个版本".to_owned(),
+            })?;
+        git.materialize_repository_path(&index.repository, &selected.revision, &entry.path, target)
+            .await
+            .map_err(ExtensionError::Internal)?;
+        let mut total = 0_u64;
+        for file in &detail.files {
+            validate_catalog_file(&file.path, file.size)?;
+            let bytes = tokio::fs::read(target.join(Path::new(&file.path))).await?;
+            total = total.saturating_add(bytes.len() as u64);
+            if total > MAX_PACKAGE_SIZE {
+                return Err(ExtensionError::InvalidRequest("技能包超过 20 MB".to_owned()));
+            }
+            if let Some(expected) = file.sha256.as_deref() {
+                let actual = hex::encode(Sha256::digest(&bytes));
+                if !actual.eq_ignore_ascii_case(expected) {
+                    return Err(ExtensionError::InvalidRequest(format!(
+                        "技能文件校验失败：{}",
+                        file.path
+                    )));
+                }
+            }
+        }
+        return seal_skill_package(target, request.target_slug, request.version, detail.skill.categories).await;
+    }
+    tokio::fs::create_dir_all(target).await?;
     let mut total = 0_u64;
     for file in &detail.files {
         if file.path == "_meta.json" {

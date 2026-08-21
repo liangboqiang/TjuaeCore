@@ -92,9 +92,18 @@ impl AssistantActivationService {
         identity: &AssistantIdentityResponse,
         request: PublishAssistantCatalogRequest,
     ) -> Result<PublishAssistantCatalogResponse, AssistantError> {
-        let files = self.portable_resource_files(identity, None).await?;
-        self.catalog.replace_embedded_resources(identity, files).await?;
-        self.catalog.publish_hub(identity, request).await
+        let files = self
+            .portable_resource_files(identity, None)
+            .await
+            .map_err(|error| publish_stage_error("collect_resources", error))?;
+        self.catalog
+            .replace_embedded_resources(identity, files)
+            .await
+            .map_err(|error| publish_stage_error("replace_resources", error))?;
+        self.catalog
+            .publish_hub(identity, request)
+            .await
+            .map_err(|error| publish_stage_error("commit_version", error))
     }
 
     async fn portable_resource_files(
@@ -817,6 +826,13 @@ impl AssistantActivationService {
     }
 }
 
+fn publish_stage_error(stage: &str, error: AssistantError) -> AssistantError {
+    match error {
+        AssistantError::Internal(message) => AssistantError::Internal(format!("{stage}: {message}")),
+        other => other,
+    }
+}
+
 fn group(
     kind: AssistantRequirementKind,
     items: Vec<AssistantActivationItemResponse>,
@@ -1280,6 +1296,42 @@ mod tests {
             AssistantRequirementKind::Model,
             AssistantRequirementKind::Agent,
         ]
+    }
+
+    #[tokio::test]
+    async fn publishing_after_refreshing_embedded_resources_keeps_version_history() {
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture
+            .catalog
+            .create_mine(CreateMineAssistantRequest {
+                slug: "publish-after-save".to_owned(),
+                name: "Publish after save".to_owned(),
+                description: "Initial version".to_owned(),
+            })
+            .await
+            .unwrap();
+        let identity = AssistantIdentityResponse {
+            source: AssistantSourceResponse::Mine,
+            namespace: String::new(),
+            slug: "publish-after-save".to_owned(),
+        };
+
+        fixture
+            .activation
+            .publish(
+                &identity,
+                PublishAssistantCatalogRequest {
+                    version: "0.2.0".to_owned(),
+                    message: "Publish refreshed portable resources".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let detail = fixture.catalog.detail(&identity, None).await.unwrap();
+        assert_eq!(detail.manifest.version, "0.2.0");
+        assert!(detail.versions.iter().any(|version| version.version == "0.1.0"));
+        assert!(detail.versions.iter().any(|version| version.version == "0.2.0"));
     }
 
     #[test]

@@ -315,6 +315,7 @@ pub async fn list_installed_skills(root: &Path) -> Result<Vec<InstalledSkill>, E
         if !entry.path().join(SKILL_PACKAGE_MANIFEST).is_file() {
             continue;
         }
+        repair_obsolete_local_manifest(&entry.path()).await?;
         match load_installed_skill(&entry.path()).await {
             Ok(skill) => skills.push(skill),
             Err(error) => warn!(path = %entry.path().display(), %error, "忽略无效技能工作区"),
@@ -805,6 +806,50 @@ async fn read_manifest(directory: &Path) -> Result<SkillManifest, ExtensionError
     )?)
 }
 
+/// Repairs the obsolete `tags` property written by an earlier desktop build
+/// in private local workspaces. Imported and remote packages still use the
+/// strict public manifest parser; this does not add a legacy protocol branch.
+async fn repair_obsolete_local_manifest(directory: &Path) -> Result<bool, ExtensionError> {
+    let path = directory.join(SKILL_PACKAGE_MANIFEST);
+    let bytes = tokio::fs::read(&path).await?;
+    if serde_json::from_slice::<SkillManifest>(&bytes).is_ok() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| ExtensionError::ManifestValidation("技能清单必须是 JSON 对象".to_owned()))?;
+    let Some(tags) = object.remove("tags") else {
+        return Ok(false);
+    };
+    let categories_empty = object
+        .get("categories")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if categories_empty {
+        let mut seen = HashSet::new();
+        let categories = tags
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && seen.insert((*value).to_owned()))
+            .map(|value| serde_json::Value::String(value.to_owned()))
+            .collect::<Vec<_>>();
+        object.insert("categories".to_owned(), serde_json::Value::Array(categories));
+    }
+    let manifest: SkillManifest = serde_json::from_value(value)?;
+    let slug = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExtensionError::InvalidSkillPath(directory.display().to_string()))?;
+    validate_manifest_identity(&manifest, slug)?;
+    write_manifest(&path, &manifest).await?;
+    tracing::info!(path = %path.display(), "已修复本地技能清单中的废弃字段");
+    Ok(true)
+}
+
 async fn write_manifest(path: &Path, manifest: &SkillManifest) -> Result<(), ExtensionError> {
     let bytes = serde_json::to_vec_pretty(manifest)?;
     let temporary = path.with_extension("json.tmp");
@@ -1086,6 +1131,32 @@ mod tests {
             .unwrap();
         assert!(created.path.join(SKILL_PACKAGE_MANIFEST).is_file());
         assert_eq!(list_installed_skills(temp.path()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn local_skill_catalog_repairs_the_obsolete_tags_field_once() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "legacy", "legacy", "test", git)
+            .await
+            .unwrap();
+        let manifest_path = created.path.join(SKILL_PACKAGE_MANIFEST);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&manifest_path).await.unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("categories");
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("tags".to_owned(), serde_json::json!(["开发", "开发", "效率"]));
+        tokio::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap())
+            .await
+            .unwrap();
+
+        let skills = list_installed_skills(temp.path()).await.unwrap();
+        assert_eq!(skills[0].categories, vec!["开发", "效率"]);
+        let repaired: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(manifest_path).await.unwrap()).unwrap();
+        assert!(repaired.get("tags").is_none());
     }
 
     #[tokio::test]
