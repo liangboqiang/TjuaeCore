@@ -1781,6 +1781,32 @@ mod tests {
         }
     }
 
+    struct EmptyHistoryGit;
+
+    #[async_trait::async_trait]
+    impl WorkspaceGitProvisioner for EmptyHistoryGit {
+        async fn ensure_workspace_git(
+            &self,
+            workspace: &Path,
+        ) -> Result<tjuaeui_common::WorkspaceGitProvision, String> {
+            Ok(tjuaeui_common::WorkspaceGitProvision {
+                repository_root: workspace.to_string_lossy().into_owned(),
+                workspace_path: workspace.to_string_lossy().into_owned(),
+                branch: "main".to_owned(),
+                head_commit: "test".to_owned(),
+            })
+        }
+
+        async fn workspace_revision_history(
+            &self,
+            _workspace: &Path,
+            _file_path: &str,
+            _limit: usize,
+        ) -> Result<Vec<tjuaeui_common::WorkspaceRevisionCommit>, String> {
+            Ok(Vec::new())
+        }
+    }
+
     #[test]
     fn catalog_file_rejects_escape_and_oversized_input() {
         assert!(validate_catalog_file("../SKILL.md", 1).is_err());
@@ -1924,7 +1950,7 @@ mod tests {
             "draft",
             "1.2.3",
             "published",
-            Arc::new(RejectGit),
+            Arc::new(EmptyHistoryGit),
         )
         .await
         .unwrap();
