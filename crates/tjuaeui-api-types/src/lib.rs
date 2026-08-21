@@ -157,6 +157,7 @@ pub use skill::{
     SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse,
     SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse, SkillVersionComparisonResponse,
     SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse, UpdateSkillPreferencesRequest,
+    UpdateSkillProfileRequest,
 };
 pub use system::{
     ClientPreferencesResponse, DEFAULT_NETWORK_PROXY_BYPASS, FeedbackDiagnosticsContextResponse,

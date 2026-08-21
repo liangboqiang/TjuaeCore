@@ -591,6 +591,8 @@ impl AssistantCatalogService {
                 .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
             manifest.name = name.to_owned();
             manifest.description = description.to_owned();
+            manifest.categories = unique_manifest_values(request.categories, 20, 60, "分类")?;
+            manifest.tags = unique_manifest_values(request.tags, 40, 60, "标签")?;
             manifest.recommended_prompts = request
                 .recommended_prompts
                 .into_iter()
@@ -1347,6 +1349,7 @@ impl AssistantCatalogService {
                 preferences.get(&IdentityKey::from(identity)),
             );
             detail.item.editable = self.can_write_hub;
+            detail.item.latest_version.clone_from(&entry.latest_version);
             detail.versions = entry.versions.iter().map(version_response).collect();
             return Ok(detail);
         }
@@ -1372,15 +1375,17 @@ impl AssistantCatalogService {
                 .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?
         };
         validate_manifest(&manifest, &entry.id)?;
+        let mut item = item_from_manifest(
+            identity.clone(),
+            &manifest,
+            entry.avatar.as_deref(),
+            Some(selected_version),
+            false,
+            preferences.get(&IdentityKey::from(identity)),
+        );
+        item.latest_version.clone_from(&entry.latest_version);
         Ok(AssistantCatalogDetailResponse {
-            item: item_from_manifest(
-                identity.clone(),
-                &manifest,
-                entry.avatar.as_deref(),
-                Some(selected_version),
-                false,
-                preferences.get(&IdentityKey::from(identity)),
-            ),
+            item,
             manifest: manifest_response(&manifest),
             readme: selected.readme.clone(),
             files: selected.files.iter().cloned().map(file_response).collect(),
@@ -1756,6 +1761,26 @@ fn decode_avatar_data_url(data_url: &str) -> Result<(&'static str, Vec<u8>), Ass
     Ok((extension, bytes))
 }
 
+fn unique_manifest_values(
+    values: Vec<String>,
+    max_items: usize,
+    max_length: usize,
+    label: &str,
+) -> Result<Vec<String>, AssistantError> {
+    let mut seen = BTreeSet::new();
+    let values = values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect::<Vec<_>>();
+    if values.len() > max_items || values.iter().any(|value| value.chars().count() > max_length) {
+        return Err(AssistantError::BadRequest(format!(
+            "{label}最多 {max_items} 项，单项不能超过 {max_length} 个字符"
+        )));
+    }
+    Ok(values)
+}
+
 fn source_id(source: AssistantSourceResponse) -> &'static str {
     match source {
         AssistantSourceResponse::Mine => "mine",
@@ -2074,6 +2099,8 @@ fn manifest_response(manifest: &AssistantManifest) -> AssistantManifestResponse 
         name_i18n: manifest.name_i18n.clone(),
         description: manifest.description.clone(),
         description_i18n: manifest.description_i18n.clone(),
+        categories: manifest.categories.clone(),
+        tags: manifest.tags.clone(),
         avatar: manifest.avatar.clone(),
         defaults: AssistantDefaultsCatalogResponse {
             agent: manifest.defaults.agent.clone(),
@@ -2486,6 +2513,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn copy_to_mine_returns_the_new_identity_and_keeps_the_source() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = tjuaeui_db::init_database_memory().await.unwrap();
+        let service = AssistantCatalogService::new(
+            Arc::new(SqliteAssistantUserPreferenceRepository::new(database.pool().clone())),
+            temp.path(),
+            None,
+            None,
+            false,
+            Arc::new(GitService::new()),
+        );
+        service
+            .create_mine(CreateMineAssistantRequest {
+                slug: "source-helper".to_owned(),
+                name: "Source Helper".to_owned(),
+                description: "Source".to_owned(),
+            })
+            .await
+            .unwrap();
+        let source = identity(AssistantSourceResponse::Mine, "", "source-helper");
+
+        let copied = service
+            .copy_to_mine(
+                &source,
+                CopyAssistantToMineRequest {
+                    version: Some("0.1.0".to_owned()),
+                    target_slug: "copied-helper".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(copied.item.identity.slug, "copied-helper");
+        assert_eq!(copied.manifest.id, "copied-helper");
+        assert!(service.mine_root().join("source-helper").is_dir());
+        assert!(service.mine_root().join("copied-helper").is_dir());
+    }
+
     #[test]
     fn assistant_archive_rejects_parent_directory_entries() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2527,6 +2593,8 @@ mod tests {
                     description: "使用 Codex CLI 的系统管家".to_owned(),
                     avatar: None,
                     avatar_data_url: None,
+                    categories: vec!["系统".to_owned()],
+                    tags: vec!["管家".to_owned()],
                     defaults: AssistantDefaultsCatalogResponse {
                         agent: Some("codex-agent-id".to_owned()),
                         ..AssistantDefaultsCatalogResponse::default()
@@ -2539,6 +2607,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(saved.manifest.defaults.agent.as_deref(), Some("codex-agent-id"));
+        assert_eq!(saved.manifest.categories, vec!["系统"]);
+        assert_eq!(saved.manifest.tags, vec!["管家"]);
         let preference = preferences
             .get("mine", "", SYSTEM_ASSISTANT_SLUG)
             .await

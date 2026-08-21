@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +50,8 @@ pub struct SkillManifest {
     pub version: String,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
     pub compatibility: BTreeMap<String, serde_json::Value>,
     pub requirements: Vec<String>,
     pub content_hash: String,
@@ -66,6 +69,7 @@ pub struct InstalledSkill {
     pub path: PathBuf,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
+    pub icon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -352,6 +356,7 @@ pub(crate) async fn load_skill_from_directory(
         path: directory,
         categories: manifest.categories,
         tags: manifest.tags,
+        icon_url: manifest.icon,
     })
 }
 
@@ -573,6 +578,7 @@ fn local_manifest(slug: &str, version: &str) -> SkillManifest {
         version: version.to_owned(),
         categories: Vec::new(),
         tags: Vec::new(),
+        icon: None,
         compatibility: BTreeMap::new(),
         requirements: Vec::new(),
         content_hash: String::new(),
@@ -639,6 +645,82 @@ pub(crate) async fn save_skill_manifest_content(
     manifest.content_hash = workspace_digest(directory)?;
     write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
     load_installed_skill(directory).await
+}
+
+pub async fn update_skill_profile(
+    directory: &Path,
+    name: &str,
+    description: &str,
+    categories: Vec<String>,
+    tags: Vec<String>,
+    icon_data_url: Option<String>,
+) -> Result<InstalledSkill, ExtensionError> {
+    let name = name.trim();
+    let description = description.trim();
+    if name.is_empty() || name.chars().count() > 120 || description.chars().count() > 2_000 {
+        return Err(ExtensionError::InvalidRequest(
+            "技能名称不能为空且不能超过 120 个字符，说明不能超过 2000 个字符".to_owned(),
+        ));
+    }
+    let categories = unique_values(categories);
+    let tags = unique_values(tags);
+    if categories.len() > 20
+        || tags.len() > 40
+        || categories.iter().chain(&tags).any(|value| value.chars().count() > 60)
+    {
+        return Err(ExtensionError::InvalidRequest(
+            "分类最多 20 项、标签最多 40 项，单项不能超过 60 个字符".to_owned(),
+        ));
+    }
+
+    let directory = canonical_directory(directory)?;
+    let entry_path = directory.join(SKILL_ENTRY_FILE);
+    let source = tokio::fs::read_to_string(&entry_path).await?;
+    let normalized = source.replace("\r\n", "\n");
+    let (_, body) = normalized
+        .strip_prefix("---\n")
+        .and_then(|value| value.split_once("\n---\n"))
+        .ok_or_else(|| ExtensionError::SkillInvalidFrontmatter(entry_path.display().to_string()))?;
+    let frontmatter = serde_yaml::to_string(&SkillFrontmatter {
+        name: name.to_owned(),
+        description: description.to_owned(),
+    })
+    .map_err(|error| ExtensionError::Internal(format!("生成技能说明失败：{error}")))?;
+    let entry = format!("---\n{}---\n{}", frontmatter.trim_start_matches("---\n"), body);
+
+    let mut manifest = read_manifest(&directory).await?;
+    manifest.categories = categories;
+    manifest.tags = tags;
+    if let Some(icon) = icon_data_url {
+        manifest.icon = Some(validate_icon_data_url(icon)?);
+    }
+    tokio::fs::write(&entry_path, entry).await?;
+    manifest.content_hash = workspace_digest(&directory)?;
+    write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
+    load_installed_skill(&directory).await
+}
+
+fn validate_icon_data_url(value: String) -> Result<String, ExtensionError> {
+    let (media_type, encoded) = value
+        .split_once(',')
+        .ok_or_else(|| ExtensionError::InvalidRequest("技能图标数据格式无效".to_owned()))?;
+    if !matches!(
+        media_type,
+        "data:image/png;base64" | "data:image/jpeg;base64" | "data:image/webp;base64" | "data:image/gif;base64"
+    ) {
+        return Err(ExtensionError::InvalidRequest(
+            "技能图标仅支持 PNG、JPEG、WebP 或 GIF".to_owned(),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ExtensionError::InvalidRequest("技能图标数据无法解码".to_owned()))?;
+    if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return Err(ExtensionError::InvalidRequest(
+            "技能图标大小必须在 2 MB 以内".to_owned(),
+        ));
+    }
+    Ok(value)
 }
 
 fn unique_values(values: Vec<String>) -> Vec<String> {
@@ -981,6 +1063,41 @@ mod tests {
             .unwrap();
         assert!(created.path.join(SKILL_PACKAGE_MANIFEST).is_file());
         assert_eq!(list_installed_skills(temp.path()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_update_preserves_body_and_updates_search_metadata() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "cron", "cron", "test", git).await.unwrap();
+        tokio::fs::write(
+            created.path.join(SKILL_ENTRY_FILE),
+            "---\nname: cron\ndescription: test\n---\n\n# Keep this body\n",
+        )
+        .await
+        .unwrap();
+        reseal_skill_package(&created.path).await.unwrap();
+
+        let updated = update_skill_profile(
+            &created.path,
+            "计划任务",
+            "自动安排任务",
+            vec!["效率".into(), "效率".into()],
+            vec!["定时".into(), "自动化".into()],
+            Some("data:image/png;base64,aWNvbg==".into()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.name, "计划任务");
+        assert_eq!(updated.description, "自动安排任务");
+        assert_eq!(updated.categories, vec!["效率"]);
+        assert_eq!(updated.tags, vec!["定时", "自动化"]);
+        assert_eq!(updated.icon_url.as_deref(), Some("data:image/png;base64,aWNvbg=="));
+        let source = tokio::fs::read_to_string(updated.path.join(SKILL_ENTRY_FILE))
+            .await
+            .unwrap();
+        assert!(source.contains("# Keep this body"));
     }
 
     #[tokio::test]

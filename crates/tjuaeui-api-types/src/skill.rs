@@ -252,6 +252,17 @@ pub struct SaveSkillFileRequest {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateSkillProfileRequest {
+    pub name: String,
+    pub description: String,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub icon_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSkillRequest {
     pub slug: String,
     pub name: String,

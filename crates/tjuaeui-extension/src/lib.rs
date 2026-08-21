@@ -54,7 +54,7 @@ pub use skill_package::{
     InstalledSkill, MarketIndex, MarketInfo, MarketSkillEntry, MarketSkillFile, MarketSkillVersion, SkillManifest,
     create_skill, delete_installed_skill, ensure_skill_repositories, export_skill_archive,
     export_skill_directory_archive, import_skill_archive, initialize_skill_workspaces, list_installed_skills,
-    load_installed_skill, resolve_installed_skill, tjuae_hub_index,
+    load_installed_skill, resolve_installed_skill, tjuae_hub_index, update_skill_profile,
 };
 pub use skill_routes::{SkillRouterState, skill_routes};
 pub use skill_storage::{

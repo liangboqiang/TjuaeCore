@@ -15,7 +15,7 @@ use tjuaeui_api_types::{
     SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
     SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
     SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
-    UpdateSkillPreferencesRequest,
+    UpdateSkillPreferencesRequest, UpdateSkillProfileRequest,
 };
 use tjuaeui_common::{ApiError, WorkspaceGitProvisioner};
 use tjuaeui_db::{ISkillUserPreferenceRepository, SkillUserPreferenceRow, UpsertSkillUserPreferenceParams};
@@ -43,6 +43,10 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         .route(
             "/api/skills/catalog/{source}/{namespace}/{slug}/file",
             get(get_skill_file).put(save_skill_file),
+        )
+        .route(
+            "/api/skills/catalog/{source}/{namespace}/{slug}/profile",
+            put(update_skill_profile),
         )
         .route(
             "/api/skills/catalog/{source}/{namespace}/{slug}/compare",
@@ -268,6 +272,56 @@ async fn save_skill_file(
         content: request.content,
         editable: true,
     })))
+}
+
+async fn update_skill_profile(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<UpdateSkillProfileRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillCatalogDetailResponse>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let root = match space {
+        SkillSpace::Mine => state.skill_paths.user_skills_dir.clone(),
+        SkillSpace::TjuaeHub if state.can_write_tjuae_hub => state
+            .skill_paths
+            .tjuae_hub_worktree_dir
+            .as_ref()
+            .map(|root| root.join("skills"))
+            .ok_or_else(|| ExtensionError::InvalidRequest("未配置 TjuaeHub 开发工作副本".into()))?,
+        _ => return Err(ExtensionError::InvalidRequest("这个技能来源是只读的".into()).into()),
+    };
+    let updated = crate::update_skill_profile(
+        &root.join(&slug),
+        &request.name,
+        &request.description,
+        request.categories,
+        request.tags,
+        request.icon_data_url,
+    )
+    .await?;
+    let preference = state
+        .preferences
+        .get(&source, &namespace, &slug)
+        .await
+        .map_err(ExtensionError::from)?;
+    let mut detail = crate::catalog_detail(
+        &state.skill_paths.user_skills_dir,
+        space,
+        &namespace,
+        &slug,
+        None,
+        state.git.clone(),
+    )
+    .await?;
+    detail.skill.name = updated.name;
+    detail.skill.description = updated.description;
+    detail.skill.categories = updated.categories;
+    detail.skill.tags = updated.tags;
+    detail.skill.icon_url = updated.icon_url;
+    let response = detail_response(detail, preference.as_ref(), None, state.can_write_tjuae_hub)?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 async fn compare_skill_versions(

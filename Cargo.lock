@@ -5232,6 +5232,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "dirs",
  "fs2",
  "futures-util",

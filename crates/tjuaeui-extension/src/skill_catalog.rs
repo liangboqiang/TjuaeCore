@@ -693,6 +693,38 @@ async fn tjuae_hub_detail(slug: &str, requested_version: Option<&str>) -> Result
         .find(|entry| entry.id == slug)
         .ok_or_else(|| ExtensionError::SkillNotFound(slug.to_owned()))?;
     let selected_version = requested_version.unwrap_or(&entry.latest_version);
+    if let Some(skills_root) = crate::skill_storage::resolve_tjuae_hub_worktree().map(|root| root.join("skills")) {
+        let directory = skills_root.join(slug);
+        if let Ok(skill) = crate::load_installed_skill(&directory).await
+            && selected_version == skill.version
+        {
+            let readme = tokio::fs::read_to_string(directory.join(SKILL_ENTRY_FILE)).await?;
+            return Ok(CatalogDetail {
+                skill: CatalogSkill {
+                    id: format!("tjuae-hub:{}", entry.id),
+                    space: SkillSpace::TjuaeHub,
+                    slug: entry.id.clone(),
+                    namespace: "official".into(),
+                    name: skill.name,
+                    description: skill.description,
+                    version: Some(entry.latest_version.clone()),
+                    categories: skill.categories,
+                    tags: skill.tags,
+                    icon_url: skill.icon_url,
+                    author: Some("TjuaeHub".to_owned()),
+                },
+                readme: strip_frontmatter(&readme),
+                files: list_local_files(&directory)?,
+                versions: unique_versions(entry.versions.iter().map(|version| version.version.clone())),
+                security_reports: vec![CatalogSecurityReport {
+                    provider: "TjuaeHub".to_owned(),
+                    status: "verified".to_owned(),
+                    label: "官方技能仓库已校验".to_owned(),
+                    url: None,
+                }],
+            });
+        }
+    }
     let selected = entry
         .version(selected_version)
         .ok_or_else(|| ExtensionError::InvalidVersion {
@@ -970,7 +1002,7 @@ fn local_catalog_item(skill: &InstalledSkill) -> CatalogSkill {
         version: Some(skill.version.clone()),
         categories: skill.categories.clone(),
         tags: skill.tags.clone(),
-        icon_url: None,
+        icon_url: skill.icon_url.clone(),
         author: None,
     }
 }

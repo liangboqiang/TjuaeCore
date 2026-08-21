@@ -137,6 +137,8 @@ pub struct AssistantManifestResponse {
     pub name_i18n: BTreeMap<String, String>,
     pub description: String,
     pub description_i18n: BTreeMap<String, String>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
     pub avatar: Option<String>,
     pub defaults: AssistantDefaultsCatalogResponse,
     pub requirements: Vec<AssistantRequirementResponse>,
@@ -195,6 +197,10 @@ pub struct UpdateAssistantCatalogSettingsRequest {
     pub description: String,
     pub avatar: Option<String>,
     pub avatar_data_url: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub defaults: AssistantDefaultsCatalogResponse,
     pub recommended_prompts: Vec<String>,
     pub rules: String,
