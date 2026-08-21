@@ -174,10 +174,13 @@ async fn cj2_create_three_schedule_types() {
     assert_eq!(at["schedule"]["kind"], "at");
     assert!(at["state"]["next_run_at_ms"].as_i64().unwrap() > now);
 
+    let every_started_at = tjuaeui_common::now_ms();
     let every = create_job(&mut app, &token, &csrf, create_job_body("Every Job")).await;
+    let every_finished_at = tjuaeui_common::now_ms();
     assert_eq!(every["schedule"]["kind"], "every");
     let next = every["state"]["next_run_at_ms"].as_i64().unwrap();
-    assert!((next - now - 60000).abs() < 3000);
+    assert!(next >= every_started_at + 60_000);
+    assert!(next <= every_finished_at + 61_000);
 
     let cron = create_job(
         &mut app,
