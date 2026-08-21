@@ -49,7 +49,6 @@ pub struct SkillManifest {
     pub id: String,
     pub version: String,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     #[serde(default)]
     pub icon: Option<String>,
     pub compatibility: BTreeMap<String, serde_json::Value>,
@@ -68,7 +67,6 @@ pub struct InstalledSkill {
     pub version: String,
     pub path: PathBuf,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     pub icon_url: Option<String>,
 }
 
@@ -99,7 +97,6 @@ pub struct MarketSkillEntry {
     pub name: String,
     pub description: String,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     pub latest_version: String,
     pub versions: Vec<MarketSkillVersion>,
 }
@@ -355,7 +352,6 @@ pub(crate) async fn load_skill_from_directory(
         version: manifest.version,
         path: directory,
         categories: manifest.categories,
-        tags: manifest.tags,
         icon_url: manifest.icon,
     })
 }
@@ -577,7 +573,6 @@ fn local_manifest(slug: &str, version: &str) -> SkillManifest {
         id: slug.to_owned(),
         version: version.to_owned(),
         categories: Vec::new(),
-        tags: Vec::new(),
         icon: None,
         compatibility: BTreeMap::new(),
         requirements: Vec::new(),
@@ -593,7 +588,6 @@ pub(crate) async fn seal_skill_package(
     slug: &str,
     version: &str,
     categories: Vec<String>,
-    tags: Vec<String>,
 ) -> Result<InstalledSkill, ExtensionError> {
     validate_slug(slug)?;
     if !directory.join(SKILL_ENTRY_FILE).is_file() {
@@ -607,7 +601,6 @@ pub(crate) async fn seal_skill_package(
         .to_string();
     let mut manifest = local_manifest(slug, &version);
     manifest.categories = unique_values(categories);
-    manifest.tags = unique_values(tags);
     manifest.content_hash = workspace_digest(directory)?;
     write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
     load_skill_from_directory(directory, slug).await
@@ -627,6 +620,50 @@ pub(crate) async fn reseal_skill_package(directory: &Path) -> Result<InstalledSk
     load_installed_skill(directory).await
 }
 
+pub(crate) async fn publish_skill_version(
+    directory: &Path,
+    commit_workspace: &Path,
+    version: &str,
+    message: &str,
+    git: Arc<dyn WorkspaceGitProvisioner>,
+) -> Result<(InstalledSkill, String), ExtensionError> {
+    let message = message.trim();
+    if message.is_empty() || message.len() > 500 {
+        return Err(ExtensionError::InvalidRequest(
+            "版本说明不能为空且不能超过 500 个字符".to_owned(),
+        ));
+    }
+    let manifest_path = directory.join(SKILL_PACKAGE_MANIFEST);
+    let original = tokio::fs::read(&manifest_path).await?;
+    let mut manifest: SkillManifest = serde_json::from_slice(&original)?;
+    let current = Version::parse(&manifest.version).map_err(|error| ExtensionError::InvalidVersion {
+        version: manifest.version.clone(),
+        reason: error.to_string(),
+    })?;
+    let next = Version::parse(version.trim()).map_err(|error| ExtensionError::InvalidVersion {
+        version: version.trim().to_owned(),
+        reason: error.to_string(),
+    })?;
+    if next <= current {
+        return Err(ExtensionError::InvalidRequest("新版本号必须高于当前版本".to_owned()));
+    }
+    manifest.version = next.to_string();
+    manifest.content_hash = workspace_digest(directory)?;
+    write_manifest(&manifest_path, &manifest).await?;
+    if let Err(error) = git.ensure_workspace_git(commit_workspace).await {
+        tokio::fs::write(&manifest_path, &original).await?;
+        return Err(ExtensionError::Internal(error));
+    }
+    let commit = match git.commit_workspace_snapshot(commit_workspace, message).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            tokio::fs::write(&manifest_path, &original).await?;
+            return Err(ExtensionError::Internal(error));
+        }
+    };
+    Ok((load_installed_skill(directory).await?, commit))
+}
+
 pub(crate) async fn save_skill_manifest_content(
     directory: &Path,
     content: &str,
@@ -641,7 +678,6 @@ pub(crate) async fn save_skill_manifest_content(
     manifest.format = "agent-skill".to_owned();
     manifest.format_version = 1;
     manifest.categories = unique_values(manifest.categories);
-    manifest.tags = unique_values(manifest.tags);
     manifest.content_hash = workspace_digest(directory)?;
     write_manifest(&directory.join(SKILL_PACKAGE_MANIFEST), &manifest).await?;
     load_installed_skill(directory).await
@@ -652,7 +688,6 @@ pub async fn update_skill_profile(
     name: &str,
     description: &str,
     categories: Vec<String>,
-    tags: Vec<String>,
     icon_data_url: Option<String>,
 ) -> Result<InstalledSkill, ExtensionError> {
     let name = name.trim();
@@ -663,13 +698,9 @@ pub async fn update_skill_profile(
         ));
     }
     let categories = unique_values(categories);
-    let tags = unique_values(tags);
-    if categories.len() > 20
-        || tags.len() > 40
-        || categories.iter().chain(&tags).any(|value| value.chars().count() > 60)
-    {
+    if categories.len() > 20 || categories.iter().any(|value| value.chars().count() > 60) {
         return Err(ExtensionError::InvalidRequest(
-            "分类最多 20 项、标签最多 40 项，单项不能超过 60 个字符".to_owned(),
+            "分类最多 20 项，单项不能超过 60 个字符".to_owned(),
         ));
     }
 
@@ -690,7 +721,6 @@ pub async fn update_skill_profile(
 
     let mut manifest = read_manifest(&directory).await?;
     manifest.categories = categories;
-    manifest.tags = tags;
     if let Some(icon) = icon_data_url {
         manifest.icon = Some(validate_icon_data_url(icon)?);
     }
@@ -818,13 +848,6 @@ fn validate_manifest_identity(manifest: &SkillManifest, slug: &str) -> Result<()
         category.is_empty() || !categories.insert(category)
     }) {
         return Err(ExtensionError::ManifestValidation("技能分类不能为空或重复".to_owned()));
-    }
-    let mut tags = HashSet::new();
-    if manifest.tags.iter().any(|tag| {
-        let tag = tag.trim();
-        tag.is_empty() || !tags.insert(tag)
-    }) {
-        return Err(ExtensionError::ManifestValidation("技能标签不能为空或重复".to_owned()));
     }
     let mut requirements = HashSet::new();
     if manifest.requirements.iter().any(|requirement| {
@@ -1083,7 +1106,6 @@ mod tests {
             "计划任务",
             "自动安排任务",
             vec!["效率".into(), "效率".into()],
-            vec!["定时".into(), "自动化".into()],
             Some("data:image/png;base64,aWNvbg==".into()),
         )
         .await
@@ -1092,12 +1114,49 @@ mod tests {
         assert_eq!(updated.name, "计划任务");
         assert_eq!(updated.description, "自动安排任务");
         assert_eq!(updated.categories, vec!["效率"]);
-        assert_eq!(updated.tags, vec!["定时", "自动化"]);
         assert_eq!(updated.icon_url.as_deref(), Some("data:image/png;base64,aWNvbg=="));
         let source = tokio::fs::read_to_string(updated.path.join(SKILL_ENTRY_FILE))
             .await
             .unwrap();
         assert!(source.contains("# Keep this body"));
+    }
+
+    #[tokio::test]
+    async fn publishing_creates_a_new_semantic_version_and_commits_the_workspace() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "cron", "cron", "test", git.clone())
+            .await
+            .unwrap();
+
+        let (published, commit) = publish_skill_version(&created.path, &created.path, "1.1.0", "新增版本说明", git)
+            .await
+            .unwrap();
+
+        assert_eq!(published.version, "1.1.0");
+        assert_eq!(commit, "test");
+        let manifest: SkillManifest = serde_json::from_slice(
+            &tokio::fs::read(created.path.join(SKILL_PACKAGE_MANIFEST))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.version, "1.1.0");
+    }
+
+    #[tokio::test]
+    async fn publishing_rejects_a_version_that_is_not_newer() {
+        let temp = TempDir::new().unwrap();
+        let git: Arc<dyn WorkspaceGitProvisioner> = Arc::new(TestGit);
+        let created = create_skill(temp.path(), "cron", "cron", "test", git.clone())
+            .await
+            .unwrap();
+
+        let error = publish_skill_version(&created.path, &created.path, "0.1.0", "重复版本", git)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("必须高于当前版本"));
     }
 
     #[tokio::test]
@@ -1231,7 +1290,6 @@ mod tests {
                 name: "示例技能".to_owned(),
                 description: "用于验证本地快照。".to_owned(),
                 categories: vec!["测试".to_owned()],
-                tags: vec!["示例".to_owned()],
                 latest_version: "1.0.0".to_owned(),
                 versions: vec![MarketSkillVersion {
                     version: "1.0.0".to_owned(),

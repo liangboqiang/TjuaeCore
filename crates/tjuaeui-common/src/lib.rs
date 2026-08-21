@@ -33,4 +33,5 @@ pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel, UpdateType, VersionInfo};
 pub use workspace_git::{
     WorkspaceGitProvision, WorkspaceGitProvisioner, WorkspaceGitState, WorkspacePathPublishResult,
+    WorkspaceRevisionCommit, WorkspaceRevisionFile,
 };

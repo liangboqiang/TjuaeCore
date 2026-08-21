@@ -110,7 +110,6 @@ pub struct SkillCatalogItemResponse {
     pub description: String,
     pub latest_version: String,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,8 +148,6 @@ pub struct SkillCatalogQuery {
     pub sources: String,
     #[serde(default)]
     pub categories: String,
-    #[serde(default)]
-    pub tags: String,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -256,9 +253,15 @@ pub struct UpdateSkillProfileRequest {
     pub name: String,
     pub description: String,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     #[serde(default)]
     pub icon_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishSkillVersionRequest {
+    pub version: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -308,7 +311,6 @@ mod tests {
             description: "Write".into(),
             latest_version: "1.2.0".into(),
             categories: vec![],
-            tags: vec![],
             icon_url: None,
             author: None,
             preferences: SkillPreferencesResponse {
@@ -328,6 +330,7 @@ mod tests {
         );
         assert!(value.get("installed").is_none());
         assert!(value.get("syncState").is_none());
+        assert!(value.get("tags").is_none());
     }
 
     #[test]
@@ -341,6 +344,19 @@ mod tests {
             serde_json::from_value::<CompareSkillVersionsQuery>(json!({
                 "leftSource": "skillhub", "base": "1.0.0", "target": "1.1.0"
             }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn skill_publish_requires_a_version_and_rejects_removed_tag_fields() {
+        let request: PublishSkillVersionRequest =
+            serde_json::from_value(json!({"version":"1.1.0","message":"release"})).unwrap();
+        assert_eq!(request.version, "1.1.0");
+        assert!(
+            serde_json::from_value::<PublishSkillVersionRequest>(
+                json!({"version":"1.1.0","message":"release","tags":["legacy"]})
+            )
             .is_err()
         );
     }

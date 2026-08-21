@@ -5043,6 +5043,7 @@ dependencies = [
  "http-body-util",
  "include_dir",
  "mime_guess",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

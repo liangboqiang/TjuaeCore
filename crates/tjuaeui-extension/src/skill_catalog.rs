@@ -6,12 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tjuaeui_common::WorkspaceGitProvisioner;
+use tjuaeui_common::{WorkspaceGitProvisioner, WorkspaceRevisionFile};
 
 use crate::error::ExtensionError;
 use crate::skill_package::{
-    InstalledSkill, SKILL_ENTRY_FILE, list_installed_skills, load_skill_from_directory, normalize_skill_workspace,
-    seal_skill_package,
+    InstalledSkill, SKILL_ENTRY_FILE, SKILL_PACKAGE_MANIFEST, SkillManifest, list_installed_skills,
+    load_skill_from_directory, normalize_skill_workspace, seal_skill_package,
 };
 
 const SKILLHUB_BASE_URL: &str = "https://api.skillhub.cn";
@@ -70,7 +70,6 @@ pub struct CatalogSkill {
     pub description: String,
     pub version: Option<String>,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     pub icon_url: Option<String>,
     pub author: Option<String>,
 }
@@ -146,10 +145,10 @@ pub async fn catalog_detail(
     namespace: &str,
     slug: &str,
     version: Option<&str>,
-    _git: Arc<dyn WorkspaceGitProvisioner>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
 ) -> Result<CatalogDetail, ExtensionError> {
     match space {
-        SkillSpace::Mine => mine_detail(root, slug, version, list_installed_skills(root).await?).await,
+        SkillSpace::Mine => mine_detail(root, slug, version, list_installed_skills(root).await?, git).await,
         SkillSpace::TjuaeHub => tjuae_hub_detail(slug, version).await,
         SkillSpace::SkillHub => skillhub_detail(namespace, slug, version).await,
         SkillSpace::ClawHub => clawhub_detail(namespace, slug, version).await,
@@ -163,9 +162,10 @@ pub async fn catalog_file_content(
     slug: &str,
     path: &str,
     version: Option<&str>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
 ) -> Result<CatalogFileContent, ExtensionError> {
     validate_catalog_file(path, 0)?;
-    let bytes = catalog_file_bytes(root, space, namespace, slug, path, version).await?;
+    let bytes = catalog_file_bytes(root, space, namespace, slug, path, version, git).await?;
     let content = String::from_utf8(bytes)
         .map_err(|_| ExtensionError::SkillImportInvalidSource(format!("技能文件不是 UTF-8 文本：{path}")))?;
     Ok(CatalogFileContent {
@@ -182,11 +182,12 @@ async fn catalog_file_bytes(
     slug: &str,
     path: &str,
     version: Option<&str>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
 ) -> Result<Vec<u8>, ExtensionError> {
     validate_catalog_file(path, 0)?;
     let namespace = resolve_transport_namespace(space, namespace, slug).await?;
     match space {
-        SkillSpace::Mine => read_local_catalog_file_bytes(root, slug, path).await,
+        SkillSpace::Mine => read_mine_catalog_file_bytes(root, slug, path, version, git).await,
         SkillSpace::TjuaeHub => {
             if let Some(skills_root) =
                 crate::skill_storage::resolve_tjuae_hub_worktree().map(|root| root.join("skills"))
@@ -220,7 +221,7 @@ pub async fn compare_catalog_versions(
     }
     let transport_namespace = resolve_transport_namespace(space, namespace, slug).await?;
     let base_detail = catalog_detail(root, space, &transport_namespace, slug, Some(base), git.clone()).await?;
-    let target_detail = catalog_detail(root, space, &transport_namespace, slug, Some(target), git).await?;
+    let target_detail = catalog_detail(root, space, &transport_namespace, slug, Some(target), git.clone()).await?;
     for version in [base, target] {
         if !base_detail.versions.iter().any(|available| available == version) {
             return Err(ExtensionError::InvalidVersion {
@@ -238,7 +239,7 @@ pub async fn compare_catalog_versions(
     let mut diffs = Vec::new();
     for path in paths {
         let base_content = if base_detail.files.iter().any(|file| file.path == *path) {
-            catalog_file_content(root, space, &transport_namespace, slug, &path, Some(base))
+            catalog_file_content(root, space, &transport_namespace, slug, &path, Some(base), git.clone())
                 .await
                 .ok()
                 .map(|file| file.content)
@@ -246,10 +247,18 @@ pub async fn compare_catalog_versions(
             None
         };
         let target_content = if target_detail.files.iter().any(|file| file.path == *path) {
-            catalog_file_content(root, space, &transport_namespace, slug, &path, Some(target))
-                .await
-                .ok()
-                .map(|file| file.content)
+            catalog_file_content(
+                root,
+                space,
+                &transport_namespace,
+                slug,
+                &path,
+                Some(target),
+                git.clone(),
+            )
+            .await
+            .ok()
+            .map(|file| file.content)
         } else {
             None
         };
@@ -441,7 +450,7 @@ async fn write_catalog_snapshot(
         &transport_namespace,
         request.slug,
         Some(request.version),
-        git,
+        git.clone(),
     )
     .await?;
     if detail.files.len() > MAX_FILE_COUNT {
@@ -460,6 +469,7 @@ async fn write_catalog_snapshot(
             request.slug,
             &file.path,
             Some(request.version),
+            git.clone(),
         )
         .await?;
         total = total.saturating_add(bytes.len() as u64);
@@ -490,14 +500,7 @@ async fn write_catalog_snapshot(
         );
         tokio::fs::write(target.join(SKILL_ENTRY_FILE), entry).await?;
     }
-    seal_skill_package(
-        target,
-        request.target_slug,
-        request.version,
-        detail.skill.categories,
-        detail.skill.tags,
-    )
-    .await
+    seal_skill_package(target, request.target_slug, request.version, detail.skill.categories).await
 }
 
 pub async fn publish_mine_to_tjuae_hub(
@@ -579,7 +582,6 @@ async fn list_tjuae_hub(
             description: entry.description.clone(),
             version: Some(latest.version.clone()),
             categories: entry.categories.clone(),
-            tags: entry.tags.clone(),
             icon_url: None,
             author: Some("TjuaeHub".to_owned()),
         });
@@ -657,30 +659,104 @@ async fn list_clawhub(query: &str, cursor: Option<&str>, limit: u32) -> Result<C
     })
 }
 
+struct MineVersionSnapshot {
+    manifest: SkillManifest,
+    files: Vec<WorkspaceRevisionFile>,
+}
+
+async fn mine_version_snapshots(
+    directory: &Path,
+    git: Arc<dyn WorkspaceGitProvisioner>,
+) -> Result<Vec<MineVersionSnapshot>, ExtensionError> {
+    let commits = git
+        .workspace_revision_history(directory, SKILL_PACKAGE_MANIFEST, 256)
+        .await
+        .map_err(ExtensionError::Internal)?;
+    let mut versions = BTreeSet::new();
+    let mut snapshots = Vec::new();
+    for commit in commits {
+        let files = git
+            .workspace_revision_files(directory, &commit.revision)
+            .await
+            .map_err(ExtensionError::Internal)?;
+        let Some(manifest_file) = files.iter().find(|file| file.path == SKILL_PACKAGE_MANIFEST) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_slice::<SkillManifest>(&manifest_file.content) else {
+            continue;
+        };
+        if versions.insert(manifest.version.clone()) {
+            snapshots.push(MineVersionSnapshot { manifest, files });
+        }
+    }
+    Ok(snapshots)
+}
+
+fn catalog_files_from_revision(files: &[WorkspaceRevisionFile]) -> Vec<CatalogFile> {
+    files
+        .iter()
+        .map(|file| CatalogFile {
+            path: file.path.clone(),
+            size: file.size,
+            sha256: Some(format!("{:x}", Sha256::digest(&file.content))),
+        })
+        .collect()
+}
+
 async fn mine_detail(
     root: &Path,
     slug: &str,
     requested_version: Option<&str>,
     installed: Vec<InstalledSkill>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
 ) -> Result<CatalogDetail, ExtensionError> {
     let skill = installed
         .into_iter()
         .find(|item| item.slug == slug)
         .ok_or_else(|| ExtensionError::SkillNotFound(slug.to_owned()))?;
-    if requested_version.is_some_and(|version| version != skill.version) {
-        return Err(ExtensionError::InvalidVersion {
-            version: requested_version.unwrap_or_default().to_owned(),
-            reason: "“我的技能”当前只保留正在编辑的版本".to_owned(),
+    let directory = root.join(slug);
+    git.ensure_workspace_git(&directory)
+        .await
+        .map_err(ExtensionError::Internal)?;
+    let snapshots = mine_version_snapshots(&directory, git).await?;
+    let versions = unique_versions(
+        std::iter::once(skill.version.clone())
+            .chain(snapshots.iter().map(|snapshot| snapshot.manifest.version.clone())),
+    );
+    if let Some(version) = requested_version
+        && version != skill.version
+    {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.manifest.version == version)
+            .ok_or_else(|| ExtensionError::InvalidVersion {
+                version: version.to_owned(),
+                reason: "这个本地技能没有该版本".to_owned(),
+            })?;
+        let readme = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == SKILL_ENTRY_FILE)
+            .and_then(|file| String::from_utf8(file.content.clone()).ok())
+            .ok_or_else(|| ExtensionError::InvalidRequest("技能版本缺少 SKILL.md".to_owned()))?;
+        let mut historical = local_catalog_item(&skill);
+        historical.version = Some(snapshot.manifest.version.clone());
+        historical.categories.clone_from(&snapshot.manifest.categories);
+        return Ok(CatalogDetail {
+            skill: historical,
+            readme: strip_frontmatter(&readme),
+            files: catalog_files_from_revision(&snapshot.files),
+            versions,
+            security_reports: Vec::new(),
         });
     }
-    let directory = root.join(slug);
     let readme = tokio::fs::read_to_string(directory.join(SKILL_ENTRY_FILE)).await?;
     let files = list_local_files(&directory)?;
     Ok(CatalogDetail {
         skill: local_catalog_item(&skill),
         readme: strip_frontmatter(&readme),
         files,
-        versions: vec![skill.version.clone()],
+        versions,
         security_reports: Vec::new(),
     })
 }
@@ -696,7 +772,7 @@ async fn tjuae_hub_detail(slug: &str, requested_version: Option<&str>) -> Result
     if let Some(skills_root) = crate::skill_storage::resolve_tjuae_hub_worktree().map(|root| root.join("skills")) {
         let directory = skills_root.join(slug);
         if let Ok(skill) = crate::load_installed_skill(&directory).await
-            && selected_version == skill.version
+            && requested_version.is_none_or(|requested| requested == skill.version)
         {
             let readme = tokio::fs::read_to_string(directory.join(SKILL_ENTRY_FILE)).await?;
             return Ok(CatalogDetail {
@@ -707,15 +783,17 @@ async fn tjuae_hub_detail(slug: &str, requested_version: Option<&str>) -> Result
                     namespace: "official".into(),
                     name: skill.name,
                     description: skill.description,
-                    version: Some(entry.latest_version.clone()),
+                    version: Some(skill.version.clone()),
                     categories: skill.categories,
-                    tags: skill.tags,
                     icon_url: skill.icon_url,
                     author: Some("TjuaeHub".to_owned()),
                 },
                 readme: strip_frontmatter(&readme),
                 files: list_local_files(&directory)?,
-                versions: unique_versions(entry.versions.iter().map(|version| version.version.clone())),
+                versions: unique_versions(
+                    std::iter::once(skill.version.clone())
+                        .chain(entry.versions.iter().map(|version| version.version.clone())),
+                ),
                 security_reports: vec![CatalogSecurityReport {
                     provider: "TjuaeHub".to_owned(),
                     status: "verified".to_owned(),
@@ -741,7 +819,6 @@ async fn tjuae_hub_detail(slug: &str, requested_version: Option<&str>) -> Result
             description: entry.description.clone(),
             version: Some(entry.latest_version.clone()),
             categories: entry.categories.clone(),
-            tags: entry.tags.clone(),
             icon_url: None,
             author: Some("TjuaeHub".to_owned()),
         },
@@ -1001,7 +1078,6 @@ fn local_catalog_item(skill: &InstalledSkill) -> CatalogSkill {
         description: skill.description.clone(),
         version: Some(skill.version.clone()),
         categories: skill.categories.clone(),
-        tags: skill.tags.clone(),
         icon_url: skill.icon_url.clone(),
         author: None,
     }
@@ -1030,7 +1106,6 @@ fn skillhub_item(item: SkillHubListItem) -> CatalogSkill {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
-        tags: Vec::new(),
         icon_url: item.icon_url,
         author: item.owner_name,
     }
@@ -1046,7 +1121,6 @@ fn clawhub_item(item: ClawHubListItem) -> CatalogSkill {
         description: item.summary.clone().or(item.description.clone()).unwrap_or_default(),
         version: item.latest_version.as_ref().and_then(|value| value.version.clone()),
         categories: item.topics.unwrap_or_default(),
-        tags: Vec::new(),
         icon_url: None,
         author: None,
     }
@@ -1067,7 +1141,6 @@ fn clawhub_search_item(item: ClawHubSearchItem) -> CatalogSkill {
         description: item.summary.unwrap_or_default(),
         version: None,
         categories: Vec::new(),
-        tags: Vec::new(),
         icon_url: item.owner.as_ref().and_then(|owner| owner.image.clone()),
         author: item
             .owner
@@ -1085,7 +1158,6 @@ fn matches_query(skill: &CatalogSkill, query: &str) -> bool {
             .categories
             .iter()
             .any(|category| category.to_lowercase().contains(&query))
-        || skill.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
 }
 
 fn sort_catalog(items: &mut [CatalogSkill], _sort: &str) {
@@ -1327,6 +1399,38 @@ async fn read_local_catalog_file_bytes(root: &Path, slug: &str, path: &str) -> R
         return Err(ExtensionError::InvalidRequest(format!("技能文件不可读取：{path}")));
     }
     tokio::fs::read(target).await.map_err(ExtensionError::from)
+}
+
+async fn read_mine_catalog_file_bytes(
+    root: &Path,
+    slug: &str,
+    path: &str,
+    requested_version: Option<&str>,
+    git: Arc<dyn WorkspaceGitProvisioner>,
+) -> Result<Vec<u8>, ExtensionError> {
+    let installed = list_installed_skills(root).await?;
+    let skill = installed
+        .iter()
+        .find(|skill| skill.slug == slug)
+        .ok_or_else(|| ExtensionError::SkillNotFound(slug.to_owned()))?;
+    if requested_version.is_none_or(|version| version == skill.version) {
+        return read_local_catalog_file_bytes(root, slug, path).await;
+    }
+    let directory = root.join(slug);
+    let selected = mine_version_snapshots(&directory, git)
+        .await?
+        .into_iter()
+        .find(|snapshot| requested_version == Some(snapshot.manifest.version.as_str()))
+        .ok_or_else(|| ExtensionError::InvalidVersion {
+            version: requested_version.unwrap_or_default().to_owned(),
+            reason: "这个本地技能没有该版本".to_owned(),
+        })?;
+    selected
+        .files
+        .into_iter()
+        .find(|file| file.path == path)
+        .map(|file| file.content)
+        .ok_or_else(|| ExtensionError::InvalidRequest(format!("该技能版本中不存在文件：{path}")))
 }
 
 async fn fetch_tjuae_hub_file_bytes(
@@ -1702,7 +1806,6 @@ mod tests {
             description: String::new(),
             version: None,
             categories: vec![],
-            tags: vec![],
             icon_url: None,
             author: None,
         };
@@ -1781,9 +1884,7 @@ mod tests {
         )
         .await
         .unwrap();
-        seal_skill_package(&target, "github", "1.0.0", vec![], vec![])
-            .await
-            .unwrap();
+        seal_skill_package(&target, "github", "1.0.0", vec![]).await.unwrap();
 
         let resolved = ensure_runtime_snapshot(
             &mine_root,
@@ -1813,15 +1914,9 @@ mod tests {
         )
         .await
         .unwrap();
-        seal_skill_package(
-            &source,
-            "draft",
-            "1.2.3",
-            vec!["development".into()],
-            vec!["demo".into()],
-        )
-        .await
-        .unwrap();
+        seal_skill_package(&source, "draft", "1.2.3", vec!["development".into()])
+            .await
+            .unwrap();
 
         let published = publish_mine_to_tjuae_hub(
             &mine_root,

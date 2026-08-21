@@ -153,11 +153,11 @@ pub use shell::{
 };
 pub use skill::{
     CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest, ImportSkillRequest,
-    SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse, SkillCatalogFileQuery,
-    SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse,
-    SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse, SkillVersionComparisonResponse,
-    SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse, UpdateSkillPreferencesRequest,
-    UpdateSkillProfileRequest,
+    PublishSkillVersionRequest, SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse,
+    SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
+    SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
+    SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
+    UpdateSkillPreferencesRequest, UpdateSkillProfileRequest,
 };
 pub use system::{
     ClientPreferencesResponse, DEFAULT_NETWORK_PROXY_BYPASS, FeedbackDiagnosticsContextResponse,

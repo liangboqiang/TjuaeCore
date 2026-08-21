@@ -11,17 +11,20 @@ use axum::routing::{get, post, put};
 use futures_util::future::join_all;
 use tjuaeui_api_types::{
     ApiResponse, CompareSkillVersionsQuery, CopySkillRequest, CreateSkillRequest, ExportSkillRequest,
-    ImportSkillRequest, SaveSkillFileRequest, SkillCatalogDetailResponse, SkillCatalogFileContentResponse,
-    SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse, SkillCatalogQuery, SkillFileResponse,
-    SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse, SkillSourceResponse,
-    SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery, SkillVersionResponse,
-    UpdateSkillPreferencesRequest, UpdateSkillProfileRequest,
+    ImportSkillRequest, PublishSkillVersionRequest, SaveSkillFileRequest, SkillCatalogDetailResponse,
+    SkillCatalogFileContentResponse, SkillCatalogFileQuery, SkillCatalogItemResponse, SkillCatalogPageResponse,
+    SkillCatalogQuery, SkillFileResponse, SkillIdentityResponse, SkillOperationResponse, SkillPreferencesResponse,
+    SkillSourceResponse, SkillVersionComparisonResponse, SkillVersionFileDiffResponse, SkillVersionQuery,
+    SkillVersionResponse, UpdateSkillPreferencesRequest, UpdateSkillProfileRequest,
 };
 use tjuaeui_common::{ApiError, WorkspaceGitProvisioner};
 use tjuaeui_db::{ISkillUserPreferenceRepository, SkillUserPreferenceRow, UpsertSkillUserPreferenceParams};
+use tjuaeui_runtime::Builder as CommandBuilder;
 
 use crate::error::ExtensionError;
-use crate::skill_package::{SKILL_PACKAGE_MANIFEST, reseal_skill_package, save_skill_manifest_content};
+use crate::skill_package::{
+    SKILL_PACKAGE_MANIFEST, publish_skill_version, reseal_skill_package, save_skill_manifest_content,
+};
 use crate::skill_storage::SkillPaths;
 use crate::{CatalogDetail, CatalogSkill, SkillSpace};
 
@@ -47,6 +50,10 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         .route(
             "/api/skills/catalog/{source}/{namespace}/{slug}/profile",
             put(update_skill_profile),
+        )
+        .route(
+            "/api/skills/catalog/{source}/{namespace}/{slug}/publish",
+            post(publish_version),
         )
         .route(
             "/api/skills/catalog/{source}/{namespace}/{slug}/compare",
@@ -226,6 +233,7 @@ async fn get_skill_file(
             &slug,
             &query.path,
             query.version.as_deref(),
+            state.git.clone(),
         )
         .await?
     };
@@ -297,7 +305,6 @@ async fn update_skill_profile(
         &request.name,
         &request.description,
         request.categories,
-        request.tags,
         request.icon_data_url,
     )
     .await?;
@@ -318,10 +325,75 @@ async fn update_skill_profile(
     detail.skill.name = updated.name;
     detail.skill.description = updated.description;
     detail.skill.categories = updated.categories;
-    detail.skill.tags = updated.tags;
     detail.skill.icon_url = updated.icon_url;
     let response = detail_response(detail, preference.as_ref(), None, state.can_write_tjuae_hub)?;
     Ok(Json(ApiResponse::ok(response)))
+}
+
+async fn publish_version(
+    State(state): State<SkillRouterState>,
+    AxumPath((source, namespace, slug)): AxumPath<(String, String, String)>,
+    body: Result<Json<PublishSkillVersionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SkillOperationResponse>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    let space = SkillSpace::parse(&source)?;
+    let namespace = route_namespace(&namespace);
+    let (directory, commit_workspace) = match space {
+        SkillSpace::Mine => {
+            let directory = state.skill_paths.user_skills_dir.join(&slug);
+            (directory.clone(), directory)
+        }
+        SkillSpace::TjuaeHub if state.can_write_tjuae_hub => {
+            let hub = state
+                .skill_paths
+                .tjuae_hub_worktree_dir
+                .as_ref()
+                .ok_or_else(|| ExtensionError::InvalidRequest("未配置 TjuaeHub 开发工作副本".into()))?;
+            (hub.join("skills").join(&slug), hub.clone())
+        }
+        _ => return Err(ExtensionError::InvalidRequest("这个技能来源是只读的".into()).into()),
+    };
+    if !directory.is_dir() {
+        return Err(ExtensionError::SkillNotFound(slug).into());
+    }
+    let (skill, commit) = publish_skill_version(
+        &directory,
+        &commit_workspace,
+        &request.version,
+        &request.message,
+        state.git.clone(),
+    )
+    .await?;
+    if space == SkillSpace::TjuaeHub {
+        let mut command = CommandBuilder::clean_cli("node");
+        command
+            .current_dir(&commit_workspace)
+            .env("TJUAE_SOURCE_REVISION", &commit)
+            .arg(".github/scripts/build-assets.js");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+            .await
+            .map_err(|_| ExtensionError::Internal("TjuaeHub 索引生成超时".to_owned()))?
+            .map_err(|error| ExtensionError::Internal(format!("无法生成 TjuaeHub 索引：{error}")))?;
+        if !output.status.success() {
+            return Err(
+                ExtensionError::InvalidRequest(String::from_utf8_lossy(&output.stderr).trim().to_owned()).into(),
+            );
+        }
+        state
+            .git
+            .commit_workspace_snapshot(&commit_workspace, "chore(hub): 更新技能目录索引")
+            .await
+            .map_err(ExtensionError::Internal)?;
+        state
+            .git
+            .push_workspace(&commit_workspace)
+            .await
+            .map_err(ExtensionError::Internal)?;
+    }
+    Ok(Json(ApiResponse::ok(SkillOperationResponse {
+        identity: identity(source_response(space), namespace, skill.slug),
+        version: skill.version,
+    })))
 }
 
 async fn compare_skill_versions(
@@ -611,7 +683,6 @@ fn catalog_item_response(
         description: skill.description,
         latest_version: skill.version.unwrap_or_else(|| "0.0.0".into()),
         categories: skill.categories,
-        tags: skill.tags,
         icon_url: skill.icon_url,
         author: skill.author,
         preferences: preference_response(preference),
@@ -704,16 +775,9 @@ fn matches_filters(item: &SkillCatalogItemResponse, query: &SkillCatalogQuery) -
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
-    let tags = query
-        .tags
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
     categories
         .iter()
         .all(|value| item.categories.iter().any(|item| item == value))
-        && tags.iter().all(|value| item.tags.iter().any(|item| item == value))
 }
 
 fn safe_local_file(root: &Path, slug: &str, relative: &str) -> Result<std::path::PathBuf, ExtensionError> {
@@ -777,7 +841,6 @@ mod tests {
                 description: String::new(),
                 version: Some("1.0.3".into()),
                 categories: vec![],
-                tags: vec![],
                 icon_url: None,
                 author: None,
             },

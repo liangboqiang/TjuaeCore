@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tjuaeui_common::{WorkspaceGitProvision, WorkspaceGitProvisioner, WorkspaceGitState, WorkspacePathPublishResult};
+use tjuaeui_common::{
+    WorkspaceGitProvision, WorkspaceGitProvisioner, WorkspaceGitState, WorkspacePathPublishResult,
+    WorkspaceRevisionCommit, WorkspaceRevisionFile,
+};
 use tjuaeui_runtime::Builder as CommandBuilder;
 use tokio::sync::Mutex;
 
@@ -193,6 +196,52 @@ impl WorkspaceGitProvisioner for GitService {
                 .map_err(|error| error.to_string());
         }
         IGitService::commit(self, workspace, message, true)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn push_workspace(&self, workspace: &Path) -> Result<(), String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        IGitService::push(self, workspace)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn workspace_revision_history(
+        &self,
+        workspace: &Path,
+        file_path: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceRevisionCommit>, String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        IGitService::history(self, workspace, Some(file_path), None, limit)
+            .await
+            .map(|commits| {
+                commits
+                    .into_iter()
+                    .map(|commit| WorkspaceRevisionCommit {
+                        revision: commit.hash,
+                        authored_at: commit.authored_at,
+                        subject: commit.subject,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    async fn workspace_revision_files(
+        &self,
+        workspace: &Path,
+        revision: &str,
+    ) -> Result<Vec<WorkspaceRevisionFile>, String> {
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| "工作区路径不是有效 UTF-8".to_owned())?;
+        IGitService::revision_files(self, workspace, revision)
             .await
             .map_err(|error| error.to_string())
     }
@@ -699,6 +748,41 @@ impl IGitService for GitService {
             patch,
             binary,
         })
+    }
+
+    async fn revision_files(&self, workspace: &str, revision: &str) -> Result<Vec<WorkspaceRevisionFile>, FileError> {
+        validate_revision(revision)?;
+        let context = self.context(workspace).await?;
+        let mut args = vec![
+            OsString::from("ls-tree"),
+            OsString::from("-r"),
+            OsString::from("-z"),
+            OsString::from("--name-only"),
+            OsString::from(revision),
+        ];
+        if context.scope != "." {
+            args.push(OsString::from("--"));
+            args.push(OsString::from(context.scope.clone()));
+        }
+        let output = run_git_owned(&context.repository_root, args, Duration::from_secs(30)).await?;
+        let mut files = Vec::new();
+        for raw_path in output.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+            let repo_path = String::from_utf8(raw_path.to_vec())
+                .map_err(|_| FileError::BadRequest("Git 快照包含非 UTF-8 路径".to_owned()))?;
+            let path = repo_to_workspace_relative(&context, &repo_path)?;
+            let Some(bytes) = show_bytes(&context.repository_root, &format!("{revision}:{repo_path}")).await? else {
+                continue;
+            };
+            let size = bytes.len() as u64;
+            let binary = std::str::from_utf8(&bytes).is_err();
+            files.push(WorkspaceRevisionFile {
+                path,
+                size,
+                content: bytes,
+                binary,
+            });
+        }
+        Ok(files)
     }
 
     async fn create_branch(&self, workspace: &str, name: &str, start_point: Option<&str>) -> Result<(), FileError> {

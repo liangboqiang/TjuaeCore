@@ -63,7 +63,6 @@ pub struct AssistantCatalogItemResponse {
     pub avatar_url: Option<String>,
     pub latest_version: String,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     pub editable: bool,
     pub system: bool,
     pub can_disable: bool,
@@ -138,7 +137,6 @@ pub struct AssistantManifestResponse {
     pub description: String,
     pub description_i18n: BTreeMap<String, String>,
     pub categories: Vec<String>,
-    pub tags: Vec<String>,
     pub avatar: Option<String>,
     pub defaults: AssistantDefaultsCatalogResponse,
     pub requirements: Vec<AssistantRequirementResponse>,
@@ -191,7 +189,7 @@ pub struct SaveAssistantCatalogFileRequest {
 /// Structured assistant settings update. Fields outside this DTO remain
 /// intact in the canonical package manifest.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAssistantCatalogSettingsRequest {
     pub name: String,
     pub description: String,
@@ -199,16 +197,15 @@ pub struct UpdateAssistantCatalogSettingsRequest {
     pub avatar_data_url: Option<String>,
     #[serde(default)]
     pub categories: Vec<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
     pub defaults: AssistantDefaultsCatalogResponse,
     pub recommended_prompts: Vec<String>,
     pub rules: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishAssistantCatalogRequest {
+    pub version: String,
     pub message: String,
 }
 
@@ -423,4 +420,23 @@ pub struct ExportAssistantRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ExportAssistantResponse {
     pub output_path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn assistant_publish_requires_an_explicit_version_and_rejects_removed_tag_fields() {
+        let request: PublishAssistantCatalogRequest =
+            serde_json::from_value(json!({"version":"1.1.0","message":"release"})).unwrap();
+        assert_eq!(request.version, "1.1.0");
+        assert!(
+            serde_json::from_value::<PublishAssistantCatalogRequest>(
+                json!({"version":"1.1.0","message":"release","tags":["legacy"]})
+            )
+            .is_err()
+        );
+    }
 }

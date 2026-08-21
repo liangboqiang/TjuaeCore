@@ -7,6 +7,7 @@ use crate::types::{
     CopyResult, DirOrFile, FileMetadata, GitCommit, GitCommitFile, GitRepositoryInfo, GitRevision, GitStatus,
     GitWorktree, WorkspaceFlatFile, ZipEntry,
 };
+use tjuaeui_common::WorkspaceRevisionFile;
 
 /// Core file operations: directory browsing, file read/write, management,
 /// image processing, and ZIP packaging.
@@ -187,6 +188,7 @@ pub trait IGitService: Send + Sync {
     ) -> Result<Vec<GitCommit>, FileError>;
     async fn commit_files(&self, workspace: &str, revision: &str) -> Result<Vec<GitCommitFile>, FileError>;
     async fn revision(&self, workspace: &str, file_path: &str, revision: &str) -> Result<GitRevision, FileError>;
+    async fn revision_files(&self, workspace: &str, revision: &str) -> Result<Vec<WorkspaceRevisionFile>, FileError>;
     async fn create_branch(&self, workspace: &str, name: &str, start_point: Option<&str>) -> Result<(), FileError>;
     async fn switch_branch(&self, workspace: &str, name: &str) -> Result<(), FileError>;
     async fn checkout_revision(&self, workspace: &str, revision: &str) -> Result<(), FileError>;

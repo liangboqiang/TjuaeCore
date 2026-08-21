@@ -59,7 +59,6 @@ struct ValidatedSkillManifest {
     id: String,
     version: String,
     categories: Vec<String>,
-    tags: Vec<String>,
     compatibility: serde_json::Map<String, serde_json::Value>,
     requirements: Vec<String>,
     content_hash: String,
@@ -119,15 +118,6 @@ fn validate_tjuae_manifest_write(path: &Path, data: &[u8]) -> Result<(), FileErr
     }) {
         return Err(FileError::BadRequest(
             "TJUAE_MANIFEST_INVALID: 技能分类不能为空或重复".to_owned(),
-        ));
-    }
-    let mut tags = HashSet::new();
-    if manifest.tags.iter().any(|tag| {
-        let tag = tag.trim();
-        tag.is_empty() || !tags.insert(tag)
-    }) {
-        return Err(FileError::BadRequest(
-            "TJUAE_MANIFEST_INVALID: 技能标签不能为空或重复".to_owned(),
         ));
     }
     let digest = manifest.content_hash.strip_prefix("sha256-").unwrap_or_default();
@@ -1996,7 +1986,6 @@ mod tests {
             "id": "test-skill",
             "version": "1.2.3",
             "categories": ["development"],
-            "tags": ["test"],
             "compatibility": {},
             "requirements": [],
             "contentHash": format!("sha256-{}", "a".repeat(64)),

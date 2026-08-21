@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tjuaeui_api_types::{
@@ -386,7 +387,6 @@ impl AssistantCatalogService {
             description: request.description.trim().to_owned(),
             description_i18n: BTreeMap::new(),
             categories: Vec::new(),
-            tags: Vec::new(),
             avatar: None,
             instructions: InstructionManifest {
                 default: ENTRY_FILE.to_owned(),
@@ -592,7 +592,6 @@ impl AssistantCatalogService {
             manifest.name = name.to_owned();
             manifest.description = description.to_owned();
             manifest.categories = unique_manifest_values(request.categories, 20, 60, "分类")?;
-            manifest.tags = unique_manifest_values(request.tags, 40, 60, "标签")?;
             manifest.recommended_prompts = request
                 .recommended_prompts
                 .into_iter()
@@ -653,10 +652,13 @@ impl AssistantCatalogService {
         identity: &AssistantIdentityResponse,
         request: PublishAssistantCatalogRequest,
     ) -> Result<PublishAssistantCatalogResponse, AssistantError> {
-        if identity.source != AssistantSourceResponse::TjuaeHub || !self.can_write_hub {
+        if identity.source == AssistantSourceResponse::TjuaeHub && !self.can_write_hub {
             return Err(AssistantError::Forbidden(
                 "当前用户没有发布 TjuaeHub 助手的权限".to_owned(),
             ));
+        }
+        if is_system_assistant(identity) {
+            return Err(AssistantError::Forbidden("系统助手不能发布独立版本".to_owned()));
         }
         let message = request.message.trim();
         if message.is_empty() || message.len() > 500 {
@@ -664,18 +666,44 @@ impl AssistantCatalogService {
                 "发布说明不能为空且不能超过 500 个字符".to_owned(),
             ));
         }
+        let root = self.editable_root(identity)?;
+        let workspace = root.to_string_lossy();
+        self.git
+            .ensure(&workspace)
+            .await
+            .map_err(|error| AssistantError::Internal(error.to_string()))?;
+        let manifest_path = root.join(MANIFEST_FILE);
+        let original = tokio::fs::read(&manifest_path).await?;
+        let mut manifest: AssistantManifest = serde_json::from_slice(&original)
+            .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+        let current = Version::parse(&manifest.version)
+            .map_err(|error| AssistantError::BadRequest(format!("当前助手版本无效：{error}")))?;
+        let next = Version::parse(request.version.trim())
+            .map_err(|error| AssistantError::BadRequest(format!("新版本号无效：{error}")))?;
+        if next <= current {
+            return Err(AssistantError::BadRequest("新版本号必须高于当前版本".to_owned()));
+        }
+        manifest.version = next.to_string();
+        manifest.content_hash = assistant_directory_digest(&root)?;
+        tokio::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).map_err(|error| AssistantError::Internal(error.to_string()))?,
+        )
+        .await?;
+        let commit = match self.git.commit(&workspace, message, true).await {
+            Ok(commit) => commit,
+            Err(error) => {
+                tokio::fs::write(&manifest_path, original).await?;
+                return Err(AssistantError::Internal(error.to_string()));
+            }
+        };
+        if identity.source == AssistantSourceResponse::Mine {
+            return Ok(PublishAssistantCatalogResponse { commit });
+        }
         let hub_root = self
             .hub_worktree
             .as_ref()
             .ok_or_else(|| AssistantError::Forbidden("TjuaeHub 开发工作区不可用".to_owned()))?;
-        let assistant_root = self.editable_root(identity)?;
-        let assistant_workspace = assistant_root.to_string_lossy();
-        let commit = self
-            .git
-            .commit(&assistant_workspace, message, true)
-            .await
-            .map_err(|error| AssistantError::Internal(error.to_string()))?;
-
         let mut command = CommandBuilder::clean_cli("node");
         command
             .current_dir(hub_root)
@@ -704,6 +732,7 @@ impl AssistantCatalogService {
             .push(&hub_workspace)
             .await
             .map_err(|error| AssistantError::Internal(error.to_string()))?;
+        *self.hub_index_cache.write().await = None;
         Ok(PublishAssistantCatalogResponse { commit: index_commit })
     }
 
@@ -953,7 +982,6 @@ impl AssistantCatalogService {
                 item.name.to_lowercase().contains(&needle)
                     || item.description.to_lowercase().contains(&needle)
                     || item.identity.slug.to_lowercase().contains(&needle)
-                    || item.tags.iter().any(|tag| tag.to_lowercase().contains(&needle))
             });
         }
         match sort {
@@ -1013,13 +1041,7 @@ impl AssistantCatalogService {
         match identity.source {
             AssistantSourceResponse::Mine => {
                 let root = self.mine_root.join(&identity.slug);
-                let declared = list_local_files(&root)?.into_iter().any(|file| file.path == path);
-                if !declared {
-                    return Err(AssistantError::NotFound(format!("助手文件 {path}")));
-                }
-                tjuaeui_catalog::read_local_file(&root, path)
-                    .await
-                    .map_err(AssistantError::from)
+                self.mine_file_bytes(&root, version, path).await
             }
             AssistantSourceResponse::TjuaeHub => {
                 if let Some(root) = self.hub_worktree_root_for_version(identity, version).await? {
@@ -1084,7 +1106,8 @@ impl AssistantCatalogService {
             .ok_or_else(|| AssistantError::NotFound(format!("助手文件 {path}")))?;
         let bytes = match identity.source {
             AssistantSourceResponse::Mine => {
-                tjuaeui_catalog::read_local_file(&self.mine_root.join(&identity.slug), path).await?
+                self.mine_file_bytes(&self.mine_root.join(&identity.slug), version, path)
+                    .await?
             }
             AssistantSourceResponse::TjuaeHub => {
                 if let Some(root) = self.hub_worktree_root_for_version(identity, version).await? {
@@ -1114,6 +1137,35 @@ impl AssistantCatalogService {
             }
         };
         Ok(bytes)
+    }
+
+    async fn mine_file_bytes(&self, root: &Path, version: Option<&str>, path: &str) -> Result<Vec<u8>, AssistantError> {
+        let manifest = read_manifest(root).await?;
+        if version.is_none_or(|version| version == manifest.version) {
+            let declared = list_local_files(root)?.into_iter().any(|file| file.path == path);
+            if !declared {
+                return Err(AssistantError::NotFound(format!("助手文件 {path}")));
+            }
+            return tjuaeui_catalog::read_local_file(root, path)
+                .await
+                .map_err(AssistantError::from);
+        }
+        let selected_version = version.unwrap_or_default();
+        let selected = self
+            .mine_versions(root)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.version == selected_version)
+            .ok_or_else(|| AssistantError::NotFound(selected_version.to_owned()))?;
+        let workspace = root.to_string_lossy();
+        self.git
+            .revision_files(&workspace, &selected.revision)
+            .await
+            .map_err(|error| AssistantError::Internal(error.to_string()))?
+            .into_iter()
+            .find(|file| file.path == path)
+            .map(|file| file.content)
+            .ok_or_else(|| AssistantError::NotFound(format!("助手文件 {path}")))
     }
 
     pub async fn compare_versions(
@@ -1302,22 +1354,102 @@ impl AssistantCatalogService {
         preferences: &HashMap<IdentityKey, AssistantUserPreferenceRow>,
     ) -> Result<AssistantCatalogDetailResponse, AssistantError> {
         let root = self.mine_root.join(&identity.slug);
-        let manifest = read_manifest(&root).await?;
-        if requested_version.is_some_and(|version| version != manifest.version) {
-            return Err(AssistantError::NotFound(
-                requested_version.unwrap_or_default().to_owned(),
-            ));
+        let workspace = root.to_string_lossy();
+        self.git
+            .ensure(&workspace)
+            .await
+            .map_err(|error| AssistantError::Internal(error.to_string()))?;
+        let current_manifest = read_manifest(&root).await?;
+        let versions = self.mine_versions(&root).await?;
+        if requested_version.is_none_or(|version| version == current_manifest.version) {
+            let files = list_local_files(&root)?;
+            let readme = tokio::fs::read_to_string(root.join(ENTRY_FILE)).await?;
+            let mut detail = detail_from_manifest(
+                identity.clone(),
+                current_manifest,
+                readme,
+                files,
+                "working-tree".to_owned(),
+                preferences.get(&IdentityKey::from(identity)),
+            );
+            detail.versions = versions;
+            return Ok(detail);
         }
-        let files = list_local_files(&root)?;
-        let readme = tokio::fs::read_to_string(root.join(ENTRY_FILE)).await?;
-        Ok(detail_from_manifest(
+        let selected_version = requested_version.unwrap_or_default();
+        let selected = versions
+            .iter()
+            .find(|version| version.version == selected_version)
+            .ok_or_else(|| AssistantError::NotFound(selected_version.to_owned()))?;
+        let snapshot = self
+            .git
+            .revision_files(&workspace, &selected.revision)
+            .await
+            .map_err(|error| AssistantError::Internal(error.to_string()))?;
+        let manifest_bytes = snapshot
+            .iter()
+            .find(|file| file.path == MANIFEST_FILE)
+            .map(|file| file.content.as_slice())
+            .ok_or_else(|| AssistantError::BadRequest("助手版本缺少 _meta.json".to_owned()))?;
+        let manifest: AssistantManifest = serde_json::from_slice(manifest_bytes)
+            .map_err(|error| AssistantError::BadRequest(format!("助手清单无效：{error}")))?;
+        validate_manifest(&manifest, &identity.slug)?;
+        let readme = snapshot
+            .iter()
+            .find(|file| file.path == manifest.instructions.default)
+            .and_then(|file| String::from_utf8(file.content.clone()).ok())
+            .ok_or_else(|| AssistantError::BadRequest("助手版本缺少规则入口文件".to_owned()))?;
+        let files = snapshot
+            .iter()
+            .map(|file| CatalogFile {
+                path: file.path.clone(),
+                size: file.size,
+                sha256: format!("{:x}", Sha256::digest(&file.content)),
+            })
+            .collect();
+        let mut detail = detail_from_manifest(
             identity.clone(),
             manifest,
             readme,
             files,
-            "working-tree".to_owned(),
+            selected.revision.clone(),
             preferences.get(&IdentityKey::from(identity)),
-        ))
+        );
+        detail.item.editable = false;
+        detail.item.latest_version = current_manifest.version;
+        detail.versions = versions;
+        Ok(detail)
+    }
+
+    async fn mine_versions(&self, root: &Path) -> Result<Vec<AssistantVersionResponse>, AssistantError> {
+        let workspace = root.to_string_lossy();
+        let commits = self
+            .git
+            .history(&workspace, Some(MANIFEST_FILE), None, 256)
+            .await
+            .map_err(|error| AssistantError::Internal(error.to_string()))?;
+        let mut seen = BTreeSet::new();
+        let mut versions = Vec::new();
+        for commit in commits {
+            let revision = self
+                .git
+                .revision(&workspace, MANIFEST_FILE, &commit.hash)
+                .await
+                .map_err(|error| AssistantError::Internal(error.to_string()))?;
+            let Some(content) = revision.modified_content else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_str::<AssistantManifest>(&content) else {
+                continue;
+            };
+            if seen.insert(manifest.version.clone()) {
+                versions.push(AssistantVersionResponse {
+                    version: manifest.version,
+                    revision: commit.hash,
+                    digest: manifest.content_hash,
+                });
+            }
+        }
+        Ok(versions)
     }
 
     async fn hub_detail(
@@ -1524,7 +1656,6 @@ struct AssistantMarketEntry {
     manifest: AssistantManifest,
     avatar: Option<String>,
     categories: Vec<String>,
-    tags: Vec<String>,
     latest_version: String,
     versions: Vec<CatalogVersion>,
 }
@@ -1552,8 +1683,6 @@ struct AssistantManifest {
     description_i18n: BTreeMap<String, String>,
     #[serde(default)]
     categories: Vec<String>,
-    #[serde(default)]
-    tags: Vec<String>,
     avatar: Option<String>,
     instructions: InstructionManifest,
     defaults: DefaultsManifest,
@@ -1864,7 +1993,6 @@ fn item_from_entry(
         avatar_url,
         latest_version: entry.latest_version.clone(),
         categories: entry.categories.clone(),
-        tags: entry.tags.clone(),
         editable,
         system: false,
         can_disable: true,
@@ -1891,7 +2019,6 @@ fn item_from_manifest(
         avatar_url,
         latest_version: manifest.version.clone(),
         categories: manifest.categories.clone(),
-        tags: manifest.tags.clone(),
         editable,
         system,
         can_disable: !system,
@@ -1942,7 +2069,6 @@ fn system_assistant_manifest(content_hash: String) -> AssistantManifest {
             ),
         ]),
         categories: Vec::new(),
-        tags: Vec::new(),
         avatar: Some("/api/assets/logos/brand/tjuae-cli.svg".to_owned()),
         instructions: InstructionManifest {
             default: ENTRY_FILE.to_owned(),
@@ -2100,7 +2226,6 @@ fn manifest_response(manifest: &AssistantManifest) -> AssistantManifestResponse 
         description: manifest.description.clone(),
         description_i18n: manifest.description_i18n.clone(),
         categories: manifest.categories.clone(),
-        tags: manifest.tags.clone(),
         avatar: manifest.avatar.clone(),
         defaults: AssistantDefaultsCatalogResponse {
             agent: manifest.defaults.agent.clone(),
@@ -2398,7 +2523,6 @@ mod tests {
             "name": "Writer",
             "description": "Writes",
             "categories": [],
-            "tags": [],
             "avatar": null,
             "instructions": {"default": "ASSISTANT.md", "locales": {}},
             "defaults": {"agent": null, "model": {"mode":"auto","value":null}, "permission":{"mode":"auto","value":null}, "thoughtLevel":{"mode":"auto","value":null}, "skills":[], "mcps":[]},
@@ -2594,7 +2718,6 @@ mod tests {
                     avatar: None,
                     avatar_data_url: None,
                     categories: vec!["系统".to_owned()],
-                    tags: vec!["管家".to_owned()],
                     defaults: AssistantDefaultsCatalogResponse {
                         agent: Some("codex-agent-id".to_owned()),
                         ..AssistantDefaultsCatalogResponse::default()
@@ -2608,7 +2731,6 @@ mod tests {
 
         assert_eq!(saved.manifest.defaults.agent.as_deref(), Some("codex-agent-id"));
         assert_eq!(saved.manifest.categories, vec!["系统"]);
-        assert_eq!(saved.manifest.tags, vec!["管家"]);
         let preference = preferences
             .get("mine", "", SYSTEM_ASSISTANT_SLUG)
             .await

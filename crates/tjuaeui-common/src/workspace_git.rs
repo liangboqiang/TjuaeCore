@@ -21,6 +21,21 @@ pub struct WorkspacePathPublishResult {
     pub commit: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRevisionFile {
+    pub path: String,
+    pub size: u64,
+    pub content: Vec<u8>,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRevisionCommit {
+    pub revision: String,
+    pub authored_at: i64,
+    pub subject: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceGitState {
@@ -51,6 +66,29 @@ pub trait WorkspaceGitProvisioner: Send + Sync {
     /// authority without spawning their own commands.
     async fn commit_workspace_snapshot(&self, _workspace: &Path, _message: &str) -> Result<String, String> {
         Err("当前 Git 实现不支持托管快照提交".to_owned())
+    }
+
+    /// Push the current branch to its configured upstream after an
+    /// application-owned release commit.
+    async fn push_workspace(&self, _workspace: &Path) -> Result<(), String> {
+        Err("当前 Git 实现不支持推送托管工作区".to_owned())
+    }
+
+    async fn workspace_revision_history(
+        &self,
+        _workspace: &Path,
+        _file_path: &str,
+        _limit: usize,
+    ) -> Result<Vec<WorkspaceRevisionCommit>, String> {
+        Err("当前 Git 实现不支持读取版本历史".to_owned())
+    }
+
+    async fn workspace_revision_files(
+        &self,
+        _workspace: &Path,
+        _revision: &str,
+    ) -> Result<Vec<WorkspaceRevisionFile>, String> {
+        Err("当前 Git 实现不支持读取版本快照".to_owned())
     }
 
     /// 将一个技能仓库克隆到托管目录，并返回克隆后的工作区信息。
